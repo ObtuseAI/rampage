@@ -1,0 +1,31 @@
+[package]
+name = "rampage-controller"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+iroh.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+rampage-ledger = { path = "../rampage-ledger" }
+rampage-mesh = { path = "../rampage-mesh" }
+rampage-policy = { path = "../rampage-policy" }
+rampage-project = { path = "../rampage-project" }
+rampage-protocol = { path = "../rampage-protocol" }
+rampage-storage = { path = "../rampage-storage" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true

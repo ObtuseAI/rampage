@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust trust and control planes
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.91
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Prepare Tauri external-binary compile sentinels
+        shell: pwsh
+        run: |
+          # Tauri validates externalBin paths while compiling the desktop shell. Release packaging
+          # replaces these sentinels with the real, freshly built sidecars in Build-Rampage.ps1.
+          $binaryDir = 'apps/desktop/src-tauri/binaries'
+          New-Item -ItemType Directory -Path $binaryDir -Force | Out-Null
+          @('rampage-controller', 'rampage-agent', 'rampage', 'rampage-intelligence') |
+            ForEach-Object {
+              New-Item -ItemType File -Path "$binaryDir/$($_)-x86_64-pc-windows-msvc.exe" -Force | Out-Null
+            }
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test workspace
+        run: cargo test --workspace
+      - name: Deny Clippy warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  typescript:
+    name: Desktop and TypeScript SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+
+  python:
+    name: Proposal-only intelligence and Python SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - run: uv sync --project services/intelligence --extra dev --locked
+      - run: uv run --project services/intelligence ruff check services/intelligence packages/sdk-python
+      - run: uv run --project services/intelligence mypy services/intelligence/src
+      - run: uv run --project services/intelligence pytest services/intelligence/tests
+      - name: Test Python SDK
+        env:
+          PYTHONPATH: packages/sdk-python/src
+        run: uv run --project packages/sdk-python --with pytest pytest packages/sdk-python/tests
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: high

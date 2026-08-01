@@ -1,0 +1,19 @@
+[package]
+name = "rampage-policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+rand.workspace = true
+rampage-protocol = { path = "../rampage-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+

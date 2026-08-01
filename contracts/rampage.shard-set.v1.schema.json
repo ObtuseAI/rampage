@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rampage.local/contracts/rampage.shard-set.v1.schema.json",
+  "title": "Rampage independent shard set v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "set_id",
+    "project_id",
+    "submitted_by",
+    "shards",
+    "minimum_successes",
+    "deadline",
+    "idempotency_key"
+  ],
+  "properties": {
+    "schema": { "const": "rampage.shard-set.v1" },
+    "set_id": { "type": "string", "format": "uuid" },
+    "project_id": { "type": "string", "format": "uuid" },
+    "submitted_by": { "type": "string", "format": "uuid" },
+    "shards": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/job" }
+    },
+    "minimum_successes": { "type": "integer", "minimum": 1, "maximum": 256 },
+    "deadline": { "type": "string", "format": "date-time" },
+    "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 512 }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "digest", "size_bytes", "media_type", "storage_class", "encrypted"],
+      "properties": {
+        "schema": { "const": "rampage.artifact-ref.v1" },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "size_bytes": { "type": "integer", "minimum": 0, "maximum": 67108864 },
+        "media_type": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "storage_class": { "enum": ["cache", "scratch", "protected"] },
+        "encrypted": { "type": "boolean" }
+      }
+    },
+    "resource_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "minimum", "preferred", "unit", "required_labels"],
+      "properties": {
+        "class": {
+          "enum": [
+            "cpu_compute", "gpu_compute", "npu_compute", "gpu_memory", "ram_working_set",
+            "ram_cache", "storage_cache", "storage_scratch", "protected_store", "network_fetch",
+            "network_relay", "toolchain", "runtime", "codec", "licensed_service"
+          ]
+        },
+        "minimum": { "type": "integer", "minimum": 0 },
+        "preferred": { "type": "integer", "minimum": 0 },
+        "unit": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "required_labels": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "maxLength": 512 },
+          "maxProperties": 64
+        }
+      }
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "job_id", "project_id", "submitted_by", "adapter", "operation", "arguments",
+        "inputs", "requests", "trust", "restart_tolerant", "network_allowlist", "deadline",
+        "idempotency_key"
+      ],
+      "properties": {
+        "schema": { "const": "rampage.job-spec.v1" },
+        "job_id": { "type": "string", "format": "uuid" },
+        "project_id": { "type": "string", "format": "uuid" },
+        "submitted_by": { "type": "string", "format": "uuid" },
+        "adapter": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "operation": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "maxLength": 1048576 },
+          "maxProperties": 128
+        },
+        "inputs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/artifact" } },
+        "requests": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/resource_request" } },
+        "trust": { "enum": ["native_trusted", "generated_sandboxed", "external_untrusted"] },
+        "restart_tolerant": { "const": true },
+        "network_allowlist": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "maxLength": 255 }
+        },
+        "deadline": { "type": "string", "format": "date-time" },
+        "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    }
+  }
+}

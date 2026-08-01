@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://obtuse.ai/rampage/contracts/rampage.proposal-envelope.v1.schema.json",
+  "title": "Rampage Proposal Envelope V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "proposal_id", "cycle_id", "producer", "artifact", "summary", "execution_authority", "credential_access", "policy_mutation", "capital_authority", "created_at", "signature"],
+  "properties": {
+    "schema": { "const": "rampage.proposal-envelope.v1" },
+    "proposal_id": { "type": "string", "format": "uuid" },
+    "cycle_id": { "type": "string", "minLength": 1 },
+    "producer": { "const": "rampage" },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "size_bytes", "media_type"],
+      "properties": {
+        "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "media_type": { "type": "string", "minLength": 1 }
+      }
+    },
+    "summary": { "type": "string", "minLength": 1 },
+    "execution_authority": { "const": false },
+    "credential_access": { "const": false },
+    "policy_mutation": { "const": false },
+    "capital_authority": { "const": false },
+    "created_at": { "type": "string", "format": "date-time" },
+    "signature": { "type": "string", "minLength": 1 }
+  }
+}
+
