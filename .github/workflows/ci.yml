@@ -23,6 +23,17 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Prepare Tauri external-binary compile sentinels
+        shell: pwsh
+        run: |
+          # Tauri validates externalBin paths while compiling the desktop shell. Release packaging
+          # replaces these sentinels with the real, freshly built sidecars in Build-Rampage.ps1.
+          $binaryDir = 'apps/desktop/src-tauri/binaries'
+          New-Item -ItemType Directory -Path $binaryDir -Force | Out-Null
+          @('rampage-controller', 'rampage-agent', 'rampage', 'rampage-intelligence') |
+            ForEach-Object {
+              New-Item -ItemType File -Path "$binaryDir/$($_)-x86_64-pc-windows-msvc.exe" -Force | Out-Null
+            }
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Test workspace
