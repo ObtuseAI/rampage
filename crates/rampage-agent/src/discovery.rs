@@ -1,6 +1,7 @@
 use rampage_protocol::{
-    InstalledModelV1, ModelBackend, ModelMemoryKind, ModelParallelism, ModelRuntimeOfferV1,
-    ModelRuntimeStatus, ResourceClass, ResourceQuantityV1,
+    ExecutionPattern, InstalledModelV1, ModelBackend, ModelMemoryKind, ModelParallelism,
+    ModelRuntimeOfferV1, ModelRuntimeStatus, ResourceClass, ResourceQuantityV1,
+    WorkloadCapabilityStatus, WorkloadCapabilityV1, WorkloadDomain, WorkloadIsolation,
 };
 use serde::Deserialize;
 use std::{
@@ -125,6 +126,105 @@ pub fn ollama_available(base_url: &str) -> bool {
         .build()
         .and_then(|client| client.get(format!("{base_url}/api/tags")).send())
         .is_ok_and(|response| response.status().is_success())
+}
+
+pub fn discover_workload_capabilities(
+    adapters: &BTreeSet<String>,
+    model_runtimes: &[ModelRuntimeOfferV1],
+) -> Vec<WorkloadCapabilityV1> {
+    let shipped_runtime = format!("shipped-agent:{}", env!("CARGO_PKG_VERSION"));
+    let mut capabilities = adapters
+        .iter()
+        .filter_map(|adapter| {
+            let (domain, operations, patterns, resources, isolation, runtime_digest, preemptible) =
+                match adapter.as_str() {
+                    "rampage.echo.v1" => (
+                        WorkloadDomain::EdgeUtility,
+                        BTreeSet::from(["echo".into()]),
+                        BTreeSet::from([ExecutionPattern::WholeWorkload]),
+                        BTreeSet::from([ResourceClass::CpuCompute]),
+                        WorkloadIsolation::AllowlistedInProcess,
+                        shipped_runtime.clone(),
+                        true,
+                    ),
+                    "rampage.hash.v1" => (
+                        WorkloadDomain::DataProcessing,
+                        BTreeSet::from(["hash".into()]),
+                        BTreeSet::from([
+                            ExecutionPattern::WholeWorkload,
+                            ExecutionPattern::IndependentShard,
+                        ]),
+                        BTreeSet::from([ResourceClass::CpuCompute]),
+                        WorkloadIsolation::AllowlistedInProcess,
+                        shipped_runtime.clone(),
+                        true,
+                    ),
+                    "rampage.eval-shard.v1" => (
+                        WorkloadDomain::AiEvaluation,
+                        BTreeSet::from(["score".into()]),
+                        BTreeSet::from([ExecutionPattern::IndependentShard]),
+                        BTreeSet::from([ResourceClass::CpuCompute]),
+                        WorkloadIsolation::AllowlistedInProcess,
+                        shipped_runtime.clone(),
+                        true,
+                    ),
+                    "rampage.artifact-hash.v1" => (
+                        WorkloadDomain::Storage,
+                        BTreeSet::from(["hash_artifact".into()]),
+                        BTreeSet::from([
+                            ExecutionPattern::WholeWorkload,
+                            ExecutionPattern::IndependentShard,
+                        ]),
+                        BTreeSet::from([ResourceClass::CpuCompute, ResourceClass::StorageCache]),
+                        WorkloadIsolation::AllowlistedInProcess,
+                        shipped_runtime.clone(),
+                        true,
+                    ),
+                    "rampage.ollama.v1" => {
+                        let runtime_digest = model_runtimes
+                            .iter()
+                            .find(|runtime| runtime.adapter == *adapter)
+                            .map(|runtime| runtime.runtime_digest.clone())?;
+                        (
+                            WorkloadDomain::AiInference,
+                            BTreeSet::from(["generate".into(), "chat".into()]),
+                            BTreeSet::from([
+                                ExecutionPattern::WholeWorkload,
+                                ExecutionPattern::Replica,
+                                ExecutionPattern::StreamingService,
+                            ]),
+                            BTreeSet::from([
+                                ResourceClass::CpuCompute,
+                                ResourceClass::GpuCompute,
+                                ResourceClass::GpuMemory,
+                                ResourceClass::RamWorkingSet,
+                            ]),
+                            WorkloadIsolation::ExternalService,
+                            runtime_digest,
+                            false,
+                        )
+                    }
+                    _ => return None,
+                };
+            Some(WorkloadCapabilityV1 {
+                schema: WorkloadCapabilityV1::SCHEMA.into(),
+                adapter: adapter.clone(),
+                domain,
+                operations,
+                execution_patterns: patterns,
+                resource_classes: resources,
+                isolation,
+                runtime_digest,
+                checkpointable: false,
+                preemptible,
+                network_allowlist_required: false,
+                status: WorkloadCapabilityStatus::Shipped,
+                qualification_digest: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    capabilities.sort_by(|left, right| left.adapter.cmp(&right.adapter));
+    capabilities
 }
 
 #[derive(Debug, Deserialize)]
@@ -502,5 +602,27 @@ mod tests {
         let models = parse_ollama_models(payload.to_string().as_bytes()).unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].model_id, "local:latest");
+    }
+
+    #[test]
+    fn advertises_only_shipped_operation_exact_workload_capabilities() {
+        let adapters = BTreeSet::from([
+            "rampage.hash.v1".into(),
+            "rampage.eval-shard.v1".into(),
+            "unknown.adapter".into(),
+        ]);
+        let capabilities = discover_workload_capabilities(&adapters, &[]);
+        assert_eq!(capabilities.len(), 2);
+        assert!(capabilities[0].is_valid());
+        assert!(
+            capabilities
+                .iter()
+                .any(|capability| capability.authorizes("rampage.eval-shard.v1", "score"))
+        );
+        assert!(
+            !capabilities
+                .iter()
+                .any(|capability| capability.adapter == "unknown.adapter")
+        );
     }
 }

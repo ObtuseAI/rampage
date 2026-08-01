@@ -117,10 +117,10 @@ export function ComputeStrategyPanel() {
         <div className="strategy-gate"><strong>{plan.blockers.length ? "FENCED" : "NOTE"}</strong><span>{plan.blockers[0] ?? plan.warnings[0]}</span></div>
       )}
       <div className={`gateway-ready ${state.gatewayModels.length ? "online" : ""}`}>
-        <span><strong>REMOTE OLLAMA</strong>{state.gatewayModels.length ? `${state.gatewayModels.length} consistent installed model${state.gatewayModels.length === 1 ? "" : "s"} · OpenAI API ready` : "No eligible whole-model worker"}</span>
+        <span><strong>UNIVERSAL AI GATEWAY</strong>{state.gatewayModels.length ? `${state.gatewayModels.length} consistent installed model${state.gatewayModels.length === 1 ? "" : "s"} · OpenAI · Anthropic · OpenRouter ready` : "No eligible whole-model worker"}</span>
         <button onClick={() => void state.copyGatewayConfig()} disabled={!state.gatewayModels.length}>Copy API setup</button>
       </div>
-      <footer>Whole-model Ollama execution is live through signed one-shot leases. Cross-host tensor and pipeline launch remain evidence-gated.</footer>
+      <footer>One signed execution lane now speaks OpenAI, Anthropic, and OpenRouter-compatible APIs. Cross-host tensor and pipeline launch remain evidence-gated.</footer>
     </section>
   );
 }

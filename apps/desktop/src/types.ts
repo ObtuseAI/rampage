@@ -26,6 +26,7 @@ export interface ResourceOffer {
     owner_idle: boolean;
   };
   adapters: string[];
+  workload_capabilities?: WorkloadCapability[];
   model_runtimes?: Array<{
     adapter: string;
     backend: "local_ollama" | "exo_mlx" | "vllm_ray";
@@ -52,6 +53,40 @@ export interface ResourceOffer {
     direct_addresses: string[];
     signature: string;
   };
+}
+
+export interface WorkloadCapability {
+  schema: "rampage.workload-capability.v1";
+  adapter: string;
+  domain: "ai_inference" | "ai_evaluation" | "gaming" | "creative_production" | "software_build" | "scientific_computing" | "data_processing" | "storage" | "edge_utility";
+  operations: string[];
+  execution_patterns: string[];
+  resource_classes: string[];
+  isolation: "allowlisted_in_process" | "dedicated_process" | "container" | "wasm_sandbox" | "external_service" | "vendor_worker";
+  runtime_digest: string;
+  checkpointable: boolean;
+  preemptible: boolean;
+  network_allowlist_required: boolean;
+  status: "shipped" | "qualified" | "candidate";
+  qualification_digest?: string;
+}
+
+export interface FabricDiagnosticReport {
+  schema: "rampage.fabric-diagnostic-report.v1";
+  status: "healthy" | "attention" | "degraded" | "stopped";
+  health_score: number;
+  evidence_digest: string;
+  autonomy: {
+    mode: "deterministic_thresholded_governor";
+    per_change_approval_required: false;
+    authority_expansion: "automatically_denied_outside_owner_envelope";
+  };
+  findings: Array<{
+    severity: "info" | "warning" | "critical";
+    code: string;
+    scope: string;
+    evidence: string;
+  }>;
 }
 
 export type ComputeStrategy =

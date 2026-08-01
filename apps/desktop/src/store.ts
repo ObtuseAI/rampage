@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { CapabilityState, ComputeStrategy, ControllerHealth, FabricNode, LedgerEvent, ModelSessionPlan, ResourceOffer } from "./types";
+import type { CapabilityState, ComputeStrategy, ControllerHealth, FabricDiagnosticReport, FabricNode, LedgerEvent, ModelSessionPlan, ResourceOffer } from "./types";
 
 const controller = import.meta.env.VITE_RAMPAGE_CONTROLLER ?? "http://127.0.0.1:47831";
 const intelligence = import.meta.env.VITE_RAMPAGE_INTELLIGENCE ?? "http://127.0.0.1:47832";
@@ -47,6 +47,23 @@ const demoNodes: FabricNode[] = [
   { id: "nas", name: "Archive", kind: "storage", state: "ready", cpu: 9, memory: 16, gpu: 0, storage: 48, storageAvailableGb: 540, artifactEndpoint: true, latencyMs: 2.2, downlinkMbps: 941, uplinkMbps: 936, topologyConfidence: "measured", x: -2.6, y: 0.6, z: -2.7 },
 ];
 const initialNodes = import.meta.env.DEV ? demoNodes : [];
+const demoDiagnostic: FabricDiagnosticReport = {
+  schema: "rampage.fabric-diagnostic-report.v1",
+  status: "healthy",
+  health_score: 96,
+  evidence_digest: `sha256:${"d".repeat(64)}`,
+  autonomy: {
+    mode: "deterministic_thresholded_governor",
+    per_change_approval_required: false,
+    authority_expansion: "automatically_denied_outside_owner_envelope",
+  },
+  findings: [{
+    severity: "info",
+    code: "IDLE_CAPACITY_AVAILABLE",
+    scope: "fabric",
+    evidence: "Fresh signed offers show useful idle capacity inside every owner reserve.",
+  }],
+};
 
 interface RampageState {
   mode: "arena" | "grid";
@@ -74,6 +91,7 @@ interface RampageState {
   modelPlan: ModelSessionPlan | null;
   modelPlanPending: boolean;
   gatewayModels: string[];
+  diagnostic: FabricDiagnosticReport | null;
   setMode: (mode: "arena" | "grid") => void;
   setSelectedNode: (id: string) => void;
   setCommandOpen: (open: boolean) => void;
@@ -163,6 +181,7 @@ export const useRampage = create<RampageState>((set, get) => ({
   modelPlan: null,
   modelPlanPending: false,
   gatewayModels: [],
+  diagnostic: import.meta.env.DEV ? demoDiagnostic : null,
   setMode: (mode) => set({ mode }),
   setSelectedNode: (selectedNode) => set({ selectedNode }),
   setCommandOpen: (commandOpen) => set({ commandOpen }),
@@ -229,10 +248,10 @@ export const useRampage = create<RampageState>((set, get) => ({
   copyGatewayConfig: async () => {
     localControllerToken ??= await invoke<string>("controller_token");
     await navigator.clipboard.writeText(
-      `OPENAI_BASE_URL=${controller}/v1\nOPENAI_API_KEY=${localControllerToken}`,
+      `OPENAI_BASE_URL=${controller}/v1\nOPENAI_API_KEY=${localControllerToken}\nANTHROPIC_BASE_URL=${controller}\nANTHROPIC_API_KEY=${localControllerToken}\nRAMPAGE_OPENROUTER_BASE_URL=${controller}/api/v1`,
     );
     set({
-      lastAction: "OpenAI-compatible loopback gateway settings copied. Treat the API key as a local secret.",
+      lastAction: "Universal AI gateway settings copied. Treat the shared local API key as a secret.",
     });
   },
   finishOnboarding: () => {
@@ -251,6 +270,7 @@ export const useRampage = create<RampageState>((set, get) => ({
           connected: true,
           capability: "local_reduced",
           gatewayModels: [],
+          diagnostic: null,
           nodes: [{
             id: "worker",
             name: "This Worker",
@@ -273,17 +293,19 @@ export const useRampage = create<RampageState>((set, get) => ({
         return;
       }
       localControllerToken ??= await invoke<string>("controller_token").catch(() => null);
-      const [healthResponse, offersResponse, eventsResponse, modelsResponse, intelligenceResponse] = await Promise.all([
+      const [healthResponse, offersResponse, eventsResponse, modelsResponse, diagnosticResponse, intelligenceResponse] = await Promise.all([
         fetch(`${controller}/health`),
         fetch(`${controller}/v1/offers`, { headers: controllerHeaders() }),
         fetch(`${controller}/v1/events?after=0&limit=120`, { headers: controllerHeaders() }),
         fetch(`${controller}/v1/models`, { headers: controllerBearerHeaders() }).catch(() => null),
+        fetch(`${controller}/v1/diagnostics/self-scan`, { headers: controllerHeaders() }),
         fetch(`${intelligence}/health`).catch(() => null),
       ]);
-      if (!healthResponse.ok || !offersResponse.ok || !eventsResponse.ok) throw new Error("controller unavailable");
+      if (!healthResponse.ok || !offersResponse.ok || !eventsResponse.ok || !diagnosticResponse.ok) throw new Error("controller unavailable");
       const health = (await healthResponse.json()) as ControllerHealth;
       const offers = (await offersResponse.json()) as ResourceOffer[];
       const events = (await eventsResponse.json()) as LedgerEvent[];
+      const diagnostic = (await diagnosticResponse.json()) as FabricDiagnosticReport;
       const gatewayModels = modelsResponse?.ok
         ? ((await modelsResponse.json()) as { data: Array<{ id: string }> }).data.map((model) => model.id)
         : [];
@@ -309,6 +331,7 @@ export const useRampage = create<RampageState>((set, get) => ({
           : "",
         events,
         gatewayModels,
+        diagnostic,
         killLatch: health.kill_latch,
         lastAction: (() => {
           const latest = events.at(-1);
@@ -325,8 +348,11 @@ export const useRampage = create<RampageState>((set, get) => ({
         capability: "deterministic_only",
         nodes: import.meta.env.DEV ? get().nodes : [],
         gatewayModels: [],
+        diagnostic: import.meta.env.DEV ? demoDiagnostic : null,
         selectedNode: import.meta.env.DEV ? get().selectedNode : "",
-        lastAction: error instanceof Error ? `Fabric unavailable: ${error.message}` : "Fabric unavailable.",
+        lastAction: import.meta.env.DEV
+          ? "Showcase topology · production builds display only verified controller evidence."
+          : error instanceof Error ? `Fabric unavailable: ${error.message}` : "Fabric unavailable.",
         lastSync: new Date(),
       });
     }

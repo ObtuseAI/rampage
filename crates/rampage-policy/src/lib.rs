@@ -7,8 +7,8 @@ use rampage_protocol::{
     ExecutionReceiptV1, InstalledModelV1, JobSpecV1, MAX_ARTIFACT_TRANSFER_BYTES,
     MAX_MODEL_OUTPUT_TOKENS, MAX_MODEL_PROMPT_BYTES, MeshEndpointRecordV1, ModelBackend,
     ModelExecutionReceiptV1, ModelParallelism, ModelRuntimeOfferV1, ModelRuntimeStatus,
-    ModelSessionLeaseV1, NodeIdentityV1, ResourceClass, ResourceOfferV1, StorageClass,
-    StorageLeaseV1,
+    ModelSessionLeaseV1, NodeIdentityV1, PromotionCanaryLeaseV1, PromotionCandidateV1,
+    PromotionRiskV1, ResourceClass, ResourceOfferV1, StorageClass, StorageLeaseV1,
 };
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,7 @@ pub struct GovernorConfig {
     pub trusted_adapters: BTreeSet<String>,
     pub mobile_adapters: BTreeSet<String>,
     pub trusted_autopilot_projects: BTreeSet<Uuid>,
+    pub autonomous_protected_projects: BTreeSet<Uuid>,
     pub mobile_min_battery_percent: u8,
     pub mobile_min_thermal_headroom_percent: u8,
     pub killed: bool,
@@ -56,6 +57,7 @@ impl Default for GovernorConfig {
                 "rampage.artifact-hash.v1".to_string(),
             ]),
             trusted_autopilot_projects: BTreeSet::new(),
+            autonomous_protected_projects: BTreeSet::new(),
             mobile_min_battery_percent: 40,
             mobile_min_thermal_headroom_percent: 35,
             killed: false,
@@ -77,6 +79,8 @@ pub enum Denial {
     AdapterDenied,
     #[error("selected offer does not advertise the requested adapter")]
     OfferAdapterMismatch,
+    #[error("selected offer does not advertise an executable capability for this operation")]
+    WorkloadCapabilityMismatch,
     #[error("selected offer does not satisfy the requested resource contract")]
     OfferResourceMismatch,
     #[error("adapter is not permitted to request this resource class")]
@@ -99,10 +103,16 @@ pub enum Denial {
     MobileThermalDenied,
     #[error("job deadline exceeds the maximum authority window")]
     DeadlineTooFar,
-    #[error("risk class requires human review")]
-    HumanReviewRequired,
+    #[error("risk class is outside the owner-defined autonomous authority envelope")]
+    AutonomousAuthorityDenied,
     #[error("autopilot is not enabled for this project")]
     AutopilotNotEnabled,
+    #[error("diagnostic action is outside the deterministic operational envelope")]
+    DiagnosticActionDenied,
+    #[error("promotion evidence is incomplete, stale, ambiguous, or malformed")]
+    InvalidPromotionEvidence,
+    #[error("declared promotion risk does not match deterministic path classification")]
+    PromotionRiskMismatch,
     #[error("lease signature is invalid")]
     InvalidSignature,
     #[error("artifact digest or size is invalid")]
@@ -238,6 +248,14 @@ impl Governor {
         if !offer.adapters.contains(&job.adapter) {
             return Err(Denial::OfferAdapterMismatch);
         }
+        if !offer.workload_capabilities.is_empty()
+            && !offer
+                .workload_capabilities
+                .iter()
+                .any(|capability| capability.authorizes(&job.adapter, &job.operation))
+        {
+            return Err(Denial::WorkloadCapabilityMismatch);
+        }
         if job.requests.iter().any(|request| {
             offer.resources.iter().all(|resource| {
                 resource.class != request.class
@@ -298,10 +316,83 @@ impl Governor {
                 Ok(())
             }
             RiskClass::R1AllowlistedSource => Err(Denial::AutopilotNotEnabled),
+            RiskClass::R2ProtectedChange
+                if self
+                    .config
+                    .autonomous_protected_projects
+                    .contains(&project_id) =>
+            {
+                Ok(())
+            }
             RiskClass::R2ProtectedChange | RiskClass::R3AuthorityCritical => {
-                Err(Denial::HumanReviewRequired)
+                Err(Denial::AutonomousAuthorityDenied)
             }
         }
+    }
+
+    /// Authorize only predeclared, reversible scheduling constraints derived from direct evidence.
+    ///
+    /// This is the no-per-change-approval operational lane. It can reduce authority by suppressing
+    /// unsafe placement, but it cannot add adapters, resources, peers, routes, or filesystem/network
+    /// access. Code and policy promotion uses the separate evidence-gated promotion path.
+    pub fn authorize_diagnostic_action(&self, action: &str) -> Result<(), Denial> {
+        if self.config.killed {
+            return Err(Denial::KillLatch);
+        }
+        match action {
+            "suppress_thermally_constrained_node"
+            | "suppress_low_battery_node"
+            | "suppress_unroutable_node" => Ok(()),
+            _ => Err(Denial::DiagnosticActionDenied),
+        }
+    }
+
+    pub fn authorize_promotion_canary_at_epoch(
+        &self,
+        candidate: &PromotionCandidateV1,
+        fencing_epoch: u64,
+    ) -> Result<PromotionCanaryLeaseV1, Denial> {
+        let now = Utc::now();
+        if !candidate.is_valid_at(now) {
+            return Err(Denial::InvalidPromotionEvidence);
+        }
+        let classified = classify_promotion_paths(&candidate.changed_paths);
+        let declared = promotion_risk(candidate.risk);
+        if declared != classified {
+            return Err(Denial::PromotionRiskMismatch);
+        }
+        self.authorize_promotion(candidate.project_id, declared)?;
+        let max_traffic_basis_points = match candidate.risk {
+            PromotionRiskV1::R0Configuration => 1_000,
+            PromotionRiskV1::R1AllowlistedSource => 500,
+            PromotionRiskV1::R2ProtectedChange => 100,
+            PromotionRiskV1::R3AuthorityCritical => {
+                return Err(Denial::AutonomousAuthorityDenied);
+            }
+        };
+        let mut lease = PromotionCanaryLeaseV1 {
+            schema: PromotionCanaryLeaseV1::SCHEMA.into(),
+            canary_id: Uuid::now_v7(),
+            proposal_id: candidate.proposal_id,
+            project_id: candidate.project_id,
+            candidate_digest: candidate.candidate_digest.clone(),
+            risk: candidate.risk,
+            max_traffic_basis_points,
+            max_error_regression_basis_points: 100,
+            max_latency_regression_basis_points: 500,
+            max_cost_regression_basis_points: 500,
+            issued_at: now,
+            expires_at: std::cmp::min(candidate.expires_at, now + Duration::minutes(10)),
+            nonce: Uuid::new_v4().simple().to_string(),
+            fencing_epoch,
+            signature: String::new(),
+        };
+        lease.signature = hex::encode(
+            self.signing_key
+                .sign(&promotion_canary_message(&lease))
+                .to_bytes(),
+        );
+        Ok(lease)
     }
 
     pub fn authorize_storage(
@@ -507,6 +598,58 @@ fn adapter_allows_resource(adapter: &str, class: rampage_protocol::ResourceClass
     }
 }
 
+fn promotion_risk(risk: PromotionRiskV1) -> RiskClass {
+    match risk {
+        PromotionRiskV1::R0Configuration => RiskClass::R0Configuration,
+        PromotionRiskV1::R1AllowlistedSource => RiskClass::R1AllowlistedSource,
+        PromotionRiskV1::R2ProtectedChange => RiskClass::R2ProtectedChange,
+        PromotionRiskV1::R3AuthorityCritical => RiskClass::R3AuthorityCritical,
+    }
+}
+
+fn classify_promotion_paths(paths: &[String]) -> RiskClass {
+    let normalized = paths
+        .iter()
+        .map(|path| path.replace('\\', "/").to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let authority_critical = [
+        "crates/rampage-policy/",
+        "crates/rampage-protocol/",
+        "crates/rampage-controller/",
+        "crates/rampage-agent/",
+        "crates/rampage-mesh/",
+        "crates/rampage-storage/",
+        "policies/",
+        "evals/holdouts/",
+        "signing/",
+        "updater/",
+        "services/intelligence/src/rampage_intelligence/promotion.py",
+        ".github/workflows/",
+    ];
+    if normalized.iter().any(|path| {
+        authority_critical
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+    }) {
+        return RiskClass::R3AuthorityCritical;
+    }
+    if normalized.iter().any(|path| {
+        path.ends_with("pyproject.toml")
+            || path.ends_with("Cargo.toml")
+            || path.ends_with("package.json")
+            || path.contains("/migrations/")
+            || path.starts_with("contracts/")
+    }) {
+        return RiskClass::R2ProtectedChange;
+    }
+    if normalized.iter().all(|path| {
+        path.starts_with("prompts/") || path.starts_with("routing/") || path.starts_with("cache/")
+    }) {
+        return RiskClass::R0Configuration;
+    }
+    RiskClass::R1AllowlistedSource
+}
+
 fn lease_message(lease: &CapabilityLeaseV1) -> Vec<u8> {
     let mut unsigned = lease.clone();
     unsigned.signature.clear();
@@ -556,6 +699,23 @@ fn model_session_lease_message(lease: &ModelSessionLeaseV1) -> Vec<u8> {
     let mut unsigned = lease.clone();
     unsigned.signature.clear();
     contract_message(&unsigned)
+}
+
+fn promotion_canary_message(lease: &PromotionCanaryLeaseV1) -> Vec<u8> {
+    let mut unsigned = lease.clone();
+    unsigned.signature.clear();
+    contract_message(&unsigned)
+}
+
+pub fn verify_promotion_canary_with_key(
+    public_key: &str,
+    lease: &PromotionCanaryLeaseV1,
+) -> Result<(), Denial> {
+    verify_contract_signature(
+        public_key,
+        &lease.signature,
+        &promotion_canary_message(lease),
+    )
 }
 
 fn storage_lease_message(lease: &StorageLeaseV1) -> Vec<u8> {
@@ -678,8 +838,9 @@ mod tests {
     use super::*;
     use chrono::Duration;
     use rampage_protocol::{
-        AvailabilityV1, ModelMemoryKind, ResourceClass, ResourceQuantityV1, ResourceRequestV1,
-        WorkloadTrust,
+        AvailabilityV1, ExecutionPattern, ModelMemoryKind, PromotionEvidenceGateV1, ResourceClass,
+        ResourceQuantityV1, ResourceRequestV1, WorkloadCapabilityStatus, WorkloadCapabilityV1,
+        WorkloadDomain, WorkloadIsolation, WorkloadTrust,
     };
     use std::collections::BTreeMap;
 
@@ -734,6 +895,7 @@ mod tests {
                     owner_idle: true,
                 },
                 adapters: BTreeSet::from(["rampage.hash.v1".into()]),
+                workload_capabilities: Vec::new(),
                 model_runtimes: Vec::new(),
                 link_benchmark: None,
                 mesh_endpoint: None,
@@ -875,6 +1037,38 @@ mod tests {
     }
 
     #[test]
+    fn governor_denies_candidate_or_wrong_operation_capabilities() {
+        let governor = Governor::ephemeral(GovernorConfig::default());
+        let (job, mut offer) = fixtures("desktop", true);
+        offer.workload_capabilities = vec![WorkloadCapabilityV1 {
+            schema: WorkloadCapabilityV1::SCHEMA.into(),
+            adapter: job.adapter.clone(),
+            domain: WorkloadDomain::DataProcessing,
+            operations: BTreeSet::from([job.operation.clone()]),
+            execution_patterns: BTreeSet::from([ExecutionPattern::WholeWorkload]),
+            resource_classes: BTreeSet::from([ResourceClass::CpuCompute]),
+            isolation: WorkloadIsolation::AllowlistedInProcess,
+            runtime_digest: "shipped-agent:test".into(),
+            checkpointable: false,
+            preemptible: true,
+            network_allowlist_required: false,
+            status: WorkloadCapabilityStatus::Candidate,
+            qualification_digest: None,
+        }];
+        assert_eq!(
+            governor.check_job(&job, &offer, offer.node_id),
+            Err(Denial::WorkloadCapabilityMismatch)
+        );
+        offer.workload_capabilities[0].status = WorkloadCapabilityStatus::Shipped;
+        assert_eq!(governor.check_job(&job, &offer, offer.node_id), Ok(()));
+        offer.workload_capabilities[0].operations = BTreeSet::from(["other".into()]);
+        assert_eq!(
+            governor.check_job(&job, &offer, offer.node_id),
+            Err(Denial::WorkloadCapabilityMismatch)
+        );
+    }
+
+    #[test]
     fn rejects_non_restartable_mobile_work() {
         let governor = Governor::ephemeral(GovernorConfig::default());
         let (job, offer) = fixtures("phone", false);
@@ -899,11 +1093,106 @@ mod tests {
     }
 
     #[test]
-    fn authority_critical_promotion_requires_human() {
+    fn authority_critical_promotion_is_automatically_denied() {
         let governor = Governor::ephemeral(GovernorConfig::default());
         assert_eq!(
             governor.authorize_promotion(Uuid::now_v7(), RiskClass::R3AuthorityCritical),
-            Err(Denial::HumanReviewRequired)
+            Err(Denial::AutonomousAuthorityDenied)
+        );
+    }
+
+    #[test]
+    fn protected_promotion_requires_a_preconfigured_project_envelope() {
+        let project_id = Uuid::now_v7();
+        let mut config = GovernorConfig::default();
+        config.autonomous_protected_projects.insert(project_id);
+        let governor = Governor::ephemeral(config);
+        assert_eq!(
+            governor.authorize_promotion(project_id, RiskClass::R2ProtectedChange),
+            Ok(())
+        );
+        assert_eq!(
+            governor.authorize_promotion(Uuid::now_v7(), RiskClass::R2ProtectedChange),
+            Err(Denial::AutonomousAuthorityDenied)
+        );
+    }
+
+    #[test]
+    fn diagnostic_autonomy_can_only_reduce_scheduling_authority() {
+        let governor = Governor::ephemeral(GovernorConfig::default());
+        assert_eq!(
+            governor.authorize_diagnostic_action("suppress_thermally_constrained_node"),
+            Ok(())
+        );
+        assert_eq!(
+            governor.authorize_diagnostic_action("enroll_peer"),
+            Err(Denial::DiagnosticActionDenied)
+        );
+    }
+
+    fn valid_promotion_candidate() -> PromotionCandidateV1 {
+        let now = Utc::now();
+        PromotionCandidateV1 {
+            schema: PromotionCandidateV1::SCHEMA.into(),
+            proposal_id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            base_revision: "abc123".into(),
+            candidate_digest: format!("sha256:{}", "b".repeat(64)),
+            changed_paths: vec!["routing/placement.toml".into()],
+            risk: PromotionRiskV1::R0Configuration,
+            gates: PromotionCandidateV1::REQUIRED_GATES
+                .iter()
+                .enumerate()
+                .map(|(index, name)| PromotionEvidenceGateV1 {
+                    name: (*name).into(),
+                    passed: true,
+                    evidence_digest: format!("sha256:{:064x}", index + 1),
+                    independent: *name == "g5_independent_replication",
+                })
+                .collect(),
+            requested_at: now,
+            expires_at: now + Duration::minutes(10),
+        }
+    }
+
+    #[test]
+    fn promotion_canary_requires_full_evidence_and_is_signed_and_bounded() {
+        let governor = Governor::ephemeral(GovernorConfig::default());
+        let candidate = valid_promotion_candidate();
+        let lease = governor
+            .authorize_promotion_canary_at_epoch(&candidate, 7)
+            .unwrap();
+        let public_key = hex::encode(governor.verifying_key().to_bytes());
+        assert!(lease.is_active_at(Utc::now(), 7));
+        assert_eq!(lease.max_traffic_basis_points, 1_000);
+        assert!(verify_promotion_canary_with_key(&public_key, &lease).is_ok());
+        let mut tampered = lease;
+        tampered.max_traffic_basis_points = 10_000;
+        assert_eq!(
+            verify_promotion_canary_with_key(&public_key, &tampered),
+            Err(Denial::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn promotion_canary_denies_risk_understatement_and_missing_gate_evidence() {
+        let governor = Governor::ephemeral(GovernorConfig::default());
+        let mut candidate = valid_promotion_candidate();
+        candidate.changed_paths = vec!["crates/rampage-policy/src/lib.rs".into()];
+        assert_eq!(
+            governor.authorize_promotion_canary_at_epoch(&candidate, 1),
+            Err(Denial::PromotionRiskMismatch)
+        );
+        candidate.changed_paths = vec!["CRATES/RAMPAGE-POLICY/src/lib.rs".into()];
+        assert_eq!(
+            governor.authorize_promotion_canary_at_epoch(&candidate, 1),
+            Err(Denial::PromotionRiskMismatch)
+        );
+        candidate.changed_paths = vec!["routing/placement.toml".into()];
+        candidate.gates[0].passed = false;
+        assert_eq!(
+            governor.authorize_promotion_canary_at_epoch(&candidate, 1),
+            Err(Denial::InvalidPromotionEvidence)
         );
     }
 

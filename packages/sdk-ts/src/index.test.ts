@@ -98,6 +98,93 @@ describe("RampageClient", () => {
     vi.unstubAllGlobals();
   });
 
+  it("exposes operation-exact capabilities and deterministic self-diagnostics", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        schema: "rampage.workload-capability-inventory.v1",
+        authority: "exact_adapter_operation_from_verified_signed_offer",
+        candidate_authority: false,
+        nodes: [],
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        schema: "rampage.fabric-diagnostic-report.v1",
+        status: "healthy",
+        health_score: 100,
+        evidence_digest: `sha256:${"a".repeat(64)}`,
+        autonomy: { per_change_approval_required: false },
+        findings: [],
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new RampageClient(undefined, "local-token");
+    expect((await client.workloadCapabilities()).candidate_authority).toBe(false);
+    expect((await client.selfScan()).autonomy.per_change_approval_required).toBe(false);
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "http://127.0.0.1:47831/v1/workload-capabilities",
+      "http://127.0.0.1:47831/v1/diagnostics/self-scan",
+    ]);
+    vi.unstubAllGlobals();
+  });
+
+  it("requests signed canary authority with the complete evidence candidate", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      schema: "rampage.promotion-canary-lease.v1",
+      canary_id: "canary-1",
+      max_traffic_basis_points: 500,
+      signature: "signed",
+    }), { status: 201, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new RampageClient(undefined, "local-token");
+    const now = new Date().toISOString();
+    const candidate = {
+      schema: "rampage.promotion-candidate.v1" as const,
+      proposal_id: "proposal-1",
+      project_id: "project-1",
+      base_revision: "abc123",
+      candidate_digest: `sha256:${"a".repeat(64)}`,
+      changed_paths: ["routing/cache.toml"],
+      risk: "r0_configuration" as const,
+      gates: [],
+      requested_at: now,
+      expires_at: now,
+    };
+    expect((await client.authorizePromotionCanary(candidate)).signature).toBe("signed");
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:47831/v1/improvements/canary");
+    expect(new Headers(init.headers).get("x-rampage-token")).toBe("local-token");
+    expect(JSON.parse(init.body as string).candidate_digest).toBe(candidate.candidate_digest);
+    vi.unstubAllGlobals();
+  });
+
+  it("exposes Anthropic and OpenRouter compatibility without changing authority", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      content: [{ type: "text", text: "hello" }],
+      model: "gemma3:4b",
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new RampageClient(undefined, "local-token");
+    expect(client.anthropicConfig()).toEqual({
+      baseURL: "http://127.0.0.1:47831",
+      apiKey: "local-token",
+    });
+    expect(client.openRouterConfig().baseURL).toBe("http://127.0.0.1:47831/api/v1");
+    const response = await client.anthropicMessage({
+      model: "gemma3:4b",
+      max_tokens: 16,
+      messages: [{ role: "user", content: "hello" }],
+    });
+    expect(response.content[0]?.text).toBe("hello");
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:47831/v1/messages");
+    expect(new Headers(init.headers).get("authorization")).toBe("Bearer local-token");
+    vi.unstubAllGlobals();
+  });
+
   it("uses the bounded shard-set planning and status routes", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({

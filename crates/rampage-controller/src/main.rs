@@ -30,14 +30,14 @@ use rampage_protocol::{
     MeshEndpointRecordV1, ModelBackend, ModelChatMessageV1, ModelExecutionReceiptV1,
     ModelInvocationFrameKind, ModelInvocationRequestV1, ModelMemoryKind, ModelParallelism,
     ModelRuntimeOfferV1, ModelRuntimeStatus, ModelSessionLeaseV1, ModelSessionRequestV1,
-    ModelUsageV1, NodeIdentityV1, ResourceClass, ResourceOfferV1, ShardSetV1, StorageClass,
-    WorkClaimV1,
+    ModelUsageV1, NodeIdentityV1, PromotionCanaryLeaseV1, PromotionCandidateV1, ResourceClass,
+    ResourceOfferV1, ShardSetV1, StorageClass, WorkClaimV1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     convert::Infallible,
     net::SocketAddr,
     path::PathBuf,
@@ -53,7 +53,7 @@ use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     trace::TraceLayer,
 };
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 type ShardInputLocality = HashMap<(Uuid, Uuid), BTreeSet<String>>;
@@ -80,6 +80,9 @@ struct AppState {
     admission_gate: Arc<tokio::sync::Mutex<()>>,
     fencing_epoch: Arc<AtomicU64>,
     model_cancellations: Arc<tokio::sync::Mutex<HashMap<Uuid, watch::Sender<bool>>>>,
+    diagnostic_report: Arc<RwLock<Option<FabricDiagnosticReport>>>,
+    diagnostic_digest: Arc<RwLock<Option<String>>>,
+    autonomous_constraints: Arc<RwLock<AutonomousConstraints>>,
 }
 
 #[derive(Clone)]
@@ -112,6 +115,73 @@ struct Health {
     mesh_endpoint_id: String,
     mesh_sockets: Vec<String>,
     fencing_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DiagnosticSeverity {
+    Info,
+    Warning,
+    Critical,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DiagnosticProposal {
+    action: &'static str,
+    risk: &'static str,
+    auto_eligible: bool,
+    threshold: &'static str,
+    required_gates: Vec<&'static str>,
+    rollback: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DiagnosticFinding {
+    severity: DiagnosticSeverity,
+    code: &'static str,
+    scope: String,
+    evidence: String,
+    proposal: DiagnosticProposal,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DiagnosticMetrics {
+    enrolled_nodes: usize,
+    live_offers: usize,
+    expired_offers: usize,
+    active_assignments: usize,
+    protected_artifacts: usize,
+    under_replicated_protected_artifacts: usize,
+    recent_denials: usize,
+    recent_failed_receipts: usize,
+    available_resources: BTreeMap<&'static str, u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DiagnosticAutonomy {
+    mode: &'static str,
+    per_change_approval_required: bool,
+    eligible_within_envelope: Vec<&'static str>,
+    authority_expansion: &'static str,
+    promotion_requirements: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FabricDiagnosticReport {
+    schema: &'static str,
+    generated_at: chrono::DateTime<chrono::Utc>,
+    status: &'static str,
+    health_score: u8,
+    evidence_digest: String,
+    metrics: DiagnosticMetrics,
+    autonomy: DiagnosticAutonomy,
+    findings: Vec<DiagnosticFinding>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+struct AutonomousConstraints {
+    evidence_digest: String,
+    excluded_nodes: BTreeMap<Uuid, Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -193,9 +263,20 @@ async fn main() -> anyhow::Result<()> {
         address.ip().is_loopback(),
         "the controller API must remain loopback-only; use the authenticated mesh transport for remote nodes"
     );
+    let governor_config = governor_config_from_env()?;
+    ledger.append(
+        "governor.autonomy.envelope.loaded",
+        "controller",
+        &json!({
+            "r1_projects": governor_config.trusted_autopilot_projects.len(),
+            "r2_projects": governor_config.autonomous_protected_projects.len(),
+            "per_change_approval_required": false,
+            "authority_expansion": "denied"
+        }),
+    )?;
     let governor = Arc::new(load_or_create_governor(
         &data_dir.join("governor.key"),
-        GovernorConfig::default(),
+        governor_config,
     )?);
     let local_api_token = Arc::new(hex::encode(load_or_create_secret(
         &data_dir.join("controller.token"),
@@ -248,7 +329,12 @@ async fn main() -> anyhow::Result<()> {
         admission_gate: Arc::new(tokio::sync::Mutex::new(())),
         fencing_epoch: Arc::new(AtomicU64::new(fencing_epoch)),
         model_cancellations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        diagnostic_report: Arc::new(RwLock::new(None)),
+        diagnostic_digest: Arc::new(RwLock::new(None)),
+        autonomous_constraints: Arc::new(RwLock::new(AutonomousConstraints::default())),
     };
+    refresh_diagnostics(&state).map_err(anyhow::Error::msg)?;
+    tokio::spawn(run_diagnostic_loop(state.clone()));
     let mesh_state = state.clone();
     let protected = Router::new()
         .route("/v1/stop", post(local_stop))
@@ -257,6 +343,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/nodes", get(list_nodes))
         .route("/v1/nodes/enroll", post(enroll_node))
         .route("/v1/offers", get(list_offers).post(register_offer))
+        .route("/v1/workload-capabilities", get(list_workload_capabilities))
+        .route("/v1/diagnostics/self-scan", get(self_scan))
         .route("/v1/jobs", post(submit_job))
         .route("/v1/jobs/plan", post(plan_job))
         .route("/v1/model-sessions/plan", post(plan_model_session_request))
@@ -276,6 +364,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/artifacts/retrieve", post(retrieve_artifact))
         .route("/v1/benchmarks/link", post(link_probe))
         .route("/v1/governor/key", get(governor_key))
+        .route("/v1/improvements/canary", post(authorize_promotion_canary))
         .route("/v1/projects/discover", post(discover_project))
         .route("/v1/events", get(events))
         .route_layer(middleware::from_fn_with_state(
@@ -285,13 +374,21 @@ async fn main() -> anyhow::Result<()> {
     let openai = Router::new()
         .route("/v1/models", get(openai_models))
         .route("/v1/chat/completions", post(openai_chat_completions))
+        .route("/api/v1/models", get(openai_models))
+        .route("/api/v1/chat/completions", post(openai_chat_completions))
+        .route("/v1/messages", post(anthropic_messages))
+        .route("/v1/capabilities", get(gateway_capabilities))
+        .route(
+            "/.well-known/rampage-capabilities",
+            get(gateway_capabilities),
+        )
         .route(
             "/v1/model-sessions/{session_id}/cancel",
             post(cancel_model_session),
         )
         .route_layer(middleware::from_fn_with_state(
             local_api_token.clone(),
-            require_bearer_token,
+            require_gateway_token,
         ));
     let app = Router::new()
         .route("/health", get(health))
@@ -311,6 +408,9 @@ async fn main() -> anyhow::Result<()> {
                     CONTENT_TYPE,
                     AUTHORIZATION,
                     HeaderName::from_static("x-rampage-token"),
+                    HeaderName::from_static("x-api-key"),
+                    HeaderName::from_static("anthropic-version"),
+                    HeaderName::from_static("anthropic-beta"),
                 ])
                 .expose_headers([HeaderName::from_static("x-rampage-session-id")]),
         )
@@ -516,6 +616,40 @@ struct OpenAiChatMessage {
     content: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnthropicMessagesRequest {
+    model: String,
+    max_tokens: u32,
+    messages: Vec<AnthropicMessage>,
+    system: Option<AnthropicContent>,
+    #[serde(default)]
+    stream: bool,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnthropicMessage {
+    role: String,
+    content: AnthropicContent,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AnthropicContent {
+    Text(String),
+    Blocks(Vec<AnthropicTextBlock>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnthropicTextBlock {
+    r#type: String,
+    text: String,
+}
+
 #[derive(Clone)]
 struct ModelCandidate {
     offer: ResourceOfferV1,
@@ -536,6 +670,12 @@ struct ModelGatewayCompletion {
     usage: Option<ModelUsageV1>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ModelStreamFormat {
+    OpenAi,
+    Anthropic,
+}
+
 #[derive(Debug)]
 struct ModelGatewayFailure {
     status: StatusCode,
@@ -544,12 +684,12 @@ struct ModelGatewayFailure {
     message: String,
 }
 
-async fn require_bearer_token(
+async fn require_gateway_token(
     State(expected): State<Arc<String>>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let supplied = request
+    let bearer = request
         .headers()
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -557,9 +697,22 @@ async fn require_bearer_token(
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
         .map(|(_, token)| token)
         .unwrap_or_default();
+    let supplied = request
+        .headers()
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(bearer);
     let expected_digest = Sha256::digest(expected.as_bytes());
     let supplied_digest = Sha256::digest(supplied.as_bytes());
     if !bool::from(expected_digest.ct_eq(&supplied_digest)) {
+        if request.uri().path() == "/v1/messages" {
+            return anthropic_error(
+                StatusCode::UNAUTHORIZED,
+                "valid Rampage API key required",
+                "authentication_error",
+            );
+        }
         return openai_error(
             StatusCode::UNAUTHORIZED,
             "valid Rampage bearer token required",
@@ -593,6 +746,65 @@ async fn openai_models(State(state): State<AppState>) -> Response {
         .collect::<Vec<_>>();
     data.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
     Json(json!({"object": "list", "data": data})).into_response()
+}
+
+async fn gateway_capabilities() -> Json<Value> {
+    Json(json!({
+        "schema": "rampage.gateway-capabilities.v1",
+        "execution": {
+            "topology": "whole_model_one_contributor",
+            "cross_host_shared_memory": false,
+            "terminal_success_requires_signed_receipt": true
+        },
+        "workload_contract": {
+            "schema": "rampage.workload-capability.v1",
+            "inventory_path": "/v1/workload-capabilities",
+            "authority": "verified_signed_offer_plus_exact_adapter_and_operation",
+            "candidate_profiles_authorize_execution": false,
+            "domains": [
+                "ai_inference",
+                "ai_evaluation",
+                "gaming",
+                "creative_production",
+                "software_build",
+                "scientific_computing",
+                "data_processing",
+                "storage",
+                "edge_utility"
+            ],
+            "note": "a domain is executable only when a live signed offer advertises a shipped or qualified exact capability"
+        },
+        "diagnostics": {
+            "path": "/v1/diagnostics/self-scan",
+            "mode": "deterministic_thresholded_governor",
+            "per_change_approval_required": false,
+            "authority_expansion": "automatically_denied_outside_owner_envelope",
+            "signed_canary_path": "/v1/improvements/canary",
+            "required_evidence_gates": 8
+        },
+        "protocols": [
+            {
+                "id": "openai.chat_completions",
+                "paths": ["/v1/chat/completions", "/api/v1/chat/completions"],
+                "models_paths": ["/v1/models", "/api/v1/models"],
+                "streaming": "sse",
+                "content": ["text"]
+            },
+            {
+                "id": "anthropic.messages",
+                "paths": ["/v1/messages"],
+                "streaming": "anthropic_sse_events",
+                "content": ["text"]
+            }
+        ],
+        "unsupported": [
+            "tools",
+            "vision",
+            "audio",
+            "provider_routing",
+            "cross_host_tensor_or_pipeline_launch"
+        ]
+    }))
 }
 
 async fn openai_chat_completions(
@@ -639,8 +851,12 @@ async fn openai_chat_completions(
                     "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]
                 }))))
                 .await;
-            let result =
-                consume_model_invocation(&task_state, invocation, Some(&task_sender)).await;
+            let result = consume_model_invocation(
+                &task_state,
+                invocation,
+                Some((&task_sender, ModelStreamFormat::OpenAi)),
+            )
+            .await;
             task_state
                 .model_cancellations
                 .lock()
@@ -718,6 +934,259 @@ async fn openai_chat_completions(
         }
         Err(error) => gateway_failure_response(error),
     }
+}
+
+async fn anthropic_messages(
+    State(state): State<AppState>,
+    payload: Result<Json<AnthropicMessagesRequest>, JsonRejection>,
+) -> Response {
+    let request = match payload {
+        Ok(Json(request)) => request,
+        Err(error) => {
+            return anthropic_error(
+                StatusCode::BAD_REQUEST,
+                &bounded_gateway_error(&error.to_string()),
+                "invalid_request_error",
+            );
+        }
+    };
+    let wants_stream = request.stream;
+    let model_id = request.model.clone();
+    let openai_request = match translate_anthropic_request(request) {
+        Ok(request) => request,
+        Err(error) => return anthropic_gateway_failure_response(error),
+    };
+    let max_output_tokens = match validate_openai_request(&openai_request) {
+        Ok(limit) => limit,
+        Err(error) => return anthropic_gateway_failure_response(error),
+    };
+    let invocation = match start_model_invocation(&state, openai_request, max_output_tokens).await {
+        Ok(invocation) => invocation,
+        Err(error) => return anthropic_gateway_failure_response(error),
+    };
+    let session_id = invocation.lease.session_id;
+    let request_id = invocation.request_id;
+    let message_id = format!("msg_{}", request_id.simple());
+
+    if wants_stream {
+        let (sender, receiver) = mpsc::channel::<Result<Bytes, Infallible>>(32);
+        let task_sender = sender.clone();
+        let task_state = state.clone();
+        tokio::spawn(async move {
+            let _ = task_sender
+                .send(Ok(anthropic_sse(
+                    "message_start",
+                    json!({
+                        "type": "message_start",
+                        "message": {
+                            "id": message_id,
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [],
+                            "model": model_id,
+                            "stop_reason": null,
+                            "stop_sequence": null,
+                            "usage": {"input_tokens": 0, "output_tokens": 0}
+                        }
+                    }),
+                )))
+                .await;
+            let _ = task_sender
+                .send(Ok(anthropic_sse(
+                    "content_block_start",
+                    json!({
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": "text", "text": ""}
+                    }),
+                )))
+                .await;
+            let result = consume_model_invocation(
+                &task_state,
+                invocation,
+                Some((&task_sender, ModelStreamFormat::Anthropic)),
+            )
+            .await;
+            task_state
+                .model_cancellations
+                .lock()
+                .await
+                .remove(&session_id);
+            match result {
+                Ok(completion) => {
+                    if let Some(usage) = completion.usage {
+                        let _ = task_sender
+                            .send(Ok(anthropic_sse(
+                                "content_block_stop",
+                                json!({"type": "content_block_stop", "index": 0}),
+                            )))
+                            .await;
+                        let _ = task_sender
+                            .send(Ok(anthropic_sse(
+                                "message_delta",
+                                json!({
+                                    "type": "message_delta",
+                                    "delta": {
+                                        "stop_reason": anthropic_stop_reason(&completion.finish_reason),
+                                        "stop_sequence": null
+                                    },
+                                    "usage": {
+                                        "input_tokens": usage.prompt_tokens,
+                                        "output_tokens": usage.completion_tokens
+                                    }
+                                }),
+                            )))
+                            .await;
+                        let _ = task_sender
+                            .send(Ok(anthropic_sse(
+                                "message_stop",
+                                json!({"type": "message_stop"}),
+                            )))
+                            .await;
+                    } else {
+                        let _ = task_sender
+                            .send(Ok(anthropic_sse(
+                                "error",
+                                json!({"type": "error", "error": {
+                                    "type": "api_error",
+                                    "message": "worker omitted required verified token usage"
+                                }}),
+                            )))
+                            .await;
+                    }
+                }
+                Err(error) => {
+                    let _ = task_sender
+                        .send(Ok(anthropic_sse(
+                            "error",
+                            json!({"type": "error", "error": {
+                                "type": anthropic_failure_kind(error.status),
+                                "message": bounded_gateway_error(&error.message)
+                            }}),
+                        )))
+                        .await;
+                }
+            }
+        });
+        drop(sender);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"))
+            .header(CACHE_CONTROL, HeaderValue::from_static("no-cache"))
+            .header("x-rampage-session-id", session_id.to_string())
+            .header("request-id", format!("req_{}", request_id.simple()))
+            .body(Body::from_stream(ReceiverStream::new(receiver)))
+            .expect("static Anthropic streaming response is valid");
+    }
+
+    let result = consume_model_invocation(&state, invocation, None).await;
+    state.model_cancellations.lock().await.remove(&session_id);
+    match result {
+        Ok(completion) => {
+            let Some(usage) = completion.usage else {
+                return anthropic_error(
+                    StatusCode::BAD_GATEWAY,
+                    "worker omitted required verified token usage",
+                    "api_error",
+                );
+            };
+            let response = json!({
+                "id": message_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": completion.content}],
+                "model": model_id,
+                "stop_reason": anthropic_stop_reason(&completion.finish_reason),
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": usage.prompt_tokens,
+                    "output_tokens": usage.completion_tokens
+                }
+            });
+            let mut response = Json(response).into_response();
+            response.headers_mut().insert(
+                HeaderName::from_static("x-rampage-session-id"),
+                HeaderValue::from_str(&session_id.to_string())
+                    .expect("UUID is a valid header value"),
+            );
+            response.headers_mut().insert(
+                HeaderName::from_static("request-id"),
+                HeaderValue::from_str(&format!("req_{}", request_id.simple()))
+                    .expect("request ID is a valid header value"),
+            );
+            response
+        }
+        Err(error) => anthropic_gateway_failure_response(error),
+    }
+}
+
+fn translate_anthropic_request(
+    request: AnthropicMessagesRequest,
+) -> Result<OpenAiChatCompletionRequest, ModelGatewayFailure> {
+    if request.max_tokens == 0 {
+        return Err(invalid_model_request(
+            "max_tokens must be positive; prompt-cache-only requests are not supported",
+            "max_tokens",
+        ));
+    }
+    let mut messages = Vec::with_capacity(request.messages.len().saturating_add(1));
+    if let Some(system) = request.system {
+        messages.push(OpenAiChatMessage {
+            role: "system".into(),
+            content: anthropic_content_text(system)?,
+        });
+    }
+    for message in request.messages {
+        if !matches!(message.role.as_str(), "user" | "assistant") {
+            return Err(invalid_model_request(
+                "Anthropic messages support only user and assistant roles",
+                "messages",
+            ));
+        }
+        messages.push(OpenAiChatMessage {
+            role: message.role,
+            content: anthropic_content_text(message.content)?,
+        });
+    }
+    Ok(OpenAiChatCompletionRequest {
+        model: request.model,
+        messages,
+        stream: request.stream,
+        max_tokens: None,
+        max_completion_tokens: Some(request.max_tokens),
+        temperature: request.temperature,
+        top_p: request.top_p,
+    })
+}
+
+fn anthropic_content_text(content: AnthropicContent) -> Result<String, ModelGatewayFailure> {
+    let text = match content {
+        AnthropicContent::Text(text) => text,
+        AnthropicContent::Blocks(blocks) => {
+            if blocks.is_empty()
+                || blocks
+                    .iter()
+                    .any(|block| block.r#type != "text" || block.text.is_empty())
+            {
+                return Err(invalid_model_request(
+                    "only non-empty Anthropic text content blocks are supported",
+                    "messages",
+                ));
+            }
+            blocks
+                .into_iter()
+                .map(|block| block.text)
+                .collect::<Vec<_>>()
+                .join("")
+        }
+    };
+    if text.is_empty() {
+        return Err(invalid_model_request(
+            "Anthropic message content must not be empty",
+            "messages",
+        ));
+    }
+    Ok(text)
 }
 
 async fn cancel_model_session(
@@ -961,7 +1430,7 @@ async fn start_model_invocation(
 async fn consume_model_invocation(
     state: &AppState,
     mut invocation: ActiveModelInvocation,
-    stream_sender: Option<&mpsc::Sender<Result<Bytes, Infallible>>>,
+    stream_sender: Option<(&mpsc::Sender<Result<Bytes, Infallible>>, ModelStreamFormat)>,
 ) -> Result<ModelGatewayCompletion, ModelGatewayFailure> {
     let mut expected_sequence = 0_u64;
     let mut output = String::new();
@@ -1007,15 +1476,26 @@ async fn consume_model_invocation(
                         "model output exceeds the transcript limit",
                     ));
                 }
-                if let Some(sender) = stream_sender {
-                    sender
-                        .send(Ok(openai_sse(json!({
+                if let Some((sender, format)) = stream_sender {
+                    let delta = match format {
+                        ModelStreamFormat::OpenAi => openai_sse(json!({
                             "id": format!("chatcmpl-{}", invocation.request_id.simple()),
                             "object": "chat.completion.chunk",
                             "created": invocation.lease.issued_at.timestamp(),
                             "model": invocation.lease.model_id,
                             "choices": [{"index": 0, "delta": {"content": frame.content}, "finish_reason": null}]
-                        }))))
+                        })),
+                        ModelStreamFormat::Anthropic => anthropic_sse(
+                            "content_block_delta",
+                            json!({
+                                "type": "content_block_delta",
+                                "index": 0,
+                                "delta": {"type": "text_delta", "text": frame.content}
+                            }),
+                        ),
+                    };
+                    sender
+                        .send(Ok(delta))
                         .await
                         .map_err(|_| ModelGatewayFailure {
                             status: StatusCode::REQUEST_TIMEOUT,
@@ -1149,6 +1629,19 @@ fn live_model_catalog(
     state: &AppState,
 ) -> Result<HashMap<String, Vec<ModelCandidate>>, ModelGatewayFailure> {
     let now = chrono::Utc::now();
+    let excluded = state
+        .autonomous_constraints
+        .read()
+        .map_err(|_| ModelGatewayFailure {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            kind: "server_error",
+            code: "controller_state_unavailable",
+            message: "autonomous constraint lock poisoned".into(),
+        })?
+        .excluded_nodes
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
     let offers = state.offers.read().map_err(|_| ModelGatewayFailure {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         kind: "server_error",
@@ -1158,6 +1651,7 @@ fn live_model_catalog(
     let mut catalog: HashMap<String, Vec<ModelCandidate>> = HashMap::new();
     for offer in offers.values().filter(|offer| {
         offer.expires_at > now
+            && !excluded.contains(&offer.node_id)
             && offer.mesh_endpoint.is_some()
             && offer.availability.foreground_allowed
             && offer.availability.thermal_headroom_percent >= 15
@@ -1207,6 +1701,17 @@ fn live_model_catalog(
 }
 
 fn validate_model_runtime_contracts(offer: &ResourceOfferV1) -> Result<(), String> {
+    if offer.workload_capabilities.len() > 64 {
+        return Err("offer contains too many workload-capability profiles".into());
+    }
+    let mut capability_adapters = BTreeSet::new();
+    if offer.workload_capabilities.iter().any(|capability| {
+        !capability.is_valid()
+            || !offer.adapters.contains(&capability.adapter)
+            || !capability_adapters.insert(capability.adapter.as_str())
+    }) {
+        return Err("offer contains a malformed or duplicate workload capability".into());
+    }
     if offer.model_runtimes.len() > 16 {
         return Err("offer exceeds the 16 model-runtime profile limit".into());
     }
@@ -1278,6 +1783,40 @@ fn openai_sse(value: Value) -> Bytes {
     Bytes::from(format!("data: {}\n\n", value))
 }
 
+fn anthropic_sse(event: &str, value: Value) -> Bytes {
+    Bytes::from(format!("event: {event}\ndata: {value}\n\n"))
+}
+
+fn anthropic_stop_reason(finish_reason: &str) -> &'static str {
+    if finish_reason == "length" {
+        "max_tokens"
+    } else {
+        "end_turn"
+    }
+}
+
+fn anthropic_failure_kind(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE => "invalid_request_error",
+        StatusCode::UNAUTHORIZED => "authentication_error",
+        StatusCode::FORBIDDEN => "permission_error",
+        StatusCode::NOT_FOUND => "not_found_error",
+        StatusCode::TOO_MANY_REQUESTS => "rate_limit_error",
+        _ => "api_error",
+    }
+}
+
+fn anthropic_error(status: StatusCode, message: &str, kind: &'static str) -> Response {
+    (
+        status,
+        Json(json!({
+            "type": "error",
+            "error": {"type": kind, "message": message}
+        })),
+    )
+        .into_response()
+}
+
 fn openai_error(
     status: StatusCode,
     message: &str,
@@ -1304,6 +1843,14 @@ fn gateway_failure_response(error: ModelGatewayFailure) -> Response {
         error.kind,
         None,
         error.code,
+    )
+}
+
+fn anthropic_gateway_failure_response(error: ModelGatewayFailure) -> Response {
+    anthropic_error(
+        error.status,
+        &bounded_gateway_error(&error.message),
+        anthropic_failure_kind(error.status),
     )
 }
 
@@ -1561,6 +2108,638 @@ async fn list_offers(
     Ok(Json(offers))
 }
 
+async fn list_workload_capabilities(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let now = chrono::Utc::now();
+    let offers = state.offers.read().map_err(lock_error)?;
+    let mut nodes = offers
+        .values()
+        .filter(|offer| offer.expires_at > now)
+        .map(|offer| {
+            json!({
+                "node_id": offer.node_id,
+                "offer_id": offer.offer_id,
+                "observed_at": offer.observed_at,
+                "expires_at": offer.expires_at,
+                "signed_offer": !offer.signature.is_empty(),
+                "capabilities": offer.workload_capabilities
+            })
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_by(|left, right| left["node_id"].as_str().cmp(&right["node_id"].as_str()));
+    Ok(Json(json!({
+        "schema": "rampage.workload-capability-inventory.v1",
+        "authority": "exact_adapter_operation_from_verified_signed_offer",
+        "candidate_authority": false,
+        "nodes": nodes
+    })))
+}
+
+async fn self_scan(
+    State(state): State<AppState>,
+) -> Result<Json<FabricDiagnosticReport>, (StatusCode, Json<Value>)> {
+    refresh_diagnostics(&state).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        )
+    })?;
+    let report = state
+        .diagnostic_report
+        .read()
+        .map_err(lock_error)?
+        .clone()
+        .ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "fabric diagnostic report is not available"})),
+            )
+        })?;
+    Ok(Json(report))
+}
+
+async fn run_diagnostic_loop(state: AppState) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        if let Err(error) = refresh_diagnostics(&state) {
+            warn!(%error, "Rampage fabric self-scan failed");
+        }
+    }
+}
+
+fn refresh_diagnostics(state: &AppState) -> Result<(), String> {
+    let now = chrono::Utc::now();
+    let nodes = state
+        .nodes
+        .read()
+        .map_err(|_| "node registry lock is poisoned".to_string())?
+        .clone();
+    let offers = state
+        .offers
+        .read()
+        .map_err(|_| "offer registry lock is poisoned".to_string())?
+        .clone();
+    let active_assignments = state
+        .assignments
+        .read()
+        .map_err(|_| "assignment registry lock is poisoned".to_string())?
+        .values()
+        .filter(|assignment| assignment.lease.expires_at > now)
+        .count();
+    let artifact_replicas = state
+        .artifact_replicas
+        .read()
+        .map_err(|_| "artifact replica registry lock is poisoned".to_string())?
+        .clone();
+    let events = state
+        .ledger
+        .latest_events(512)
+        .map_err(|error| format!("diagnostic evidence read failed: {error}"))?;
+    let report = build_diagnostic_report(
+        now,
+        &nodes,
+        &offers,
+        active_assignments,
+        &artifact_replicas,
+        &events,
+        state.kill_latch_path.is_file(),
+    );
+    let constraints = derive_autonomous_constraints(&state.governor, &report);
+    let constraints_changed = *state
+        .autonomous_constraints
+        .read()
+        .map_err(|_| "autonomous constraint lock is poisoned".to_string())?
+        != constraints;
+    if constraints_changed {
+        state
+            .ledger
+            .append(
+                "diagnostic.autonomy.applied",
+                &constraints.evidence_digest,
+                &constraints,
+            )
+            .map_err(|error| format!("autonomous constraint evidence write failed: {error}"))?;
+        *state
+            .autonomous_constraints
+            .write()
+            .map_err(|_| "autonomous constraint lock is poisoned".to_string())? = constraints;
+    }
+    let changed = state
+        .diagnostic_digest
+        .read()
+        .map_err(|_| "diagnostic digest lock is poisoned".to_string())?
+        .as_ref()
+        != Some(&report.evidence_digest);
+    if changed {
+        state
+            .ledger
+            .append(
+                "diagnostic.self_scan.completed",
+                &report.evidence_digest,
+                &report,
+            )
+            .map_err(|error| format!("diagnostic evidence write failed: {error}"))?;
+        *state
+            .diagnostic_digest
+            .write()
+            .map_err(|_| "diagnostic digest lock is poisoned".to_string())? =
+            Some(report.evidence_digest.clone());
+    }
+    *state
+        .diagnostic_report
+        .write()
+        .map_err(|_| "diagnostic report lock is poisoned".to_string())? = Some(report);
+    Ok(())
+}
+
+fn derive_autonomous_constraints(
+    governor: &Governor,
+    report: &FabricDiagnosticReport,
+) -> AutonomousConstraints {
+    let mut excluded_nodes = BTreeMap::<Uuid, Vec<String>>::new();
+    for finding in &report.findings {
+        let action = match finding.code {
+            "THERMAL_HEADROOM_CONSTRAINED" => "suppress_thermally_constrained_node",
+            "BATTERY_RESERVE_CONSTRAINED" => "suppress_low_battery_node",
+            "AUTHENTICATED_ROUTE_MISSING" | "AUTHENTICATED_ROUTE_EMPTY" => {
+                "suppress_unroutable_node"
+            }
+            _ => continue,
+        };
+        if governor.authorize_diagnostic_action(action).is_err() {
+            continue;
+        }
+        let Ok(node_id) = Uuid::parse_str(&finding.scope) else {
+            continue;
+        };
+        excluded_nodes
+            .entry(node_id)
+            .or_default()
+            .push(finding.code.to_string());
+    }
+    for reasons in excluded_nodes.values_mut() {
+        reasons.sort();
+        reasons.dedup();
+    }
+    AutonomousConstraints {
+        evidence_digest: report.evidence_digest.clone(),
+        excluded_nodes,
+    }
+}
+
+fn placement_offers(state: &AppState) -> Result<Vec<ResourceOfferV1>, (StatusCode, Json<Value>)> {
+    let excluded = state
+        .autonomous_constraints
+        .read()
+        .map_err(lock_error)?
+        .excluded_nodes
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    Ok(state
+        .offers
+        .read()
+        .map_err(lock_error)?
+        .values()
+        .filter(|offer| !excluded.contains(&offer.node_id))
+        .cloned()
+        .collect())
+}
+
+fn build_diagnostic_report(
+    now: chrono::DateTime<chrono::Utc>,
+    nodes: &HashMap<Uuid, NodeIdentityV1>,
+    offers: &HashMap<Uuid, ResourceOfferV1>,
+    active_assignments: usize,
+    artifact_replicas: &HashMap<(String, Uuid), ArtifactRefV1>,
+    events: &[LedgerEvent],
+    kill_latch: bool,
+) -> FabricDiagnosticReport {
+    let mut findings = Vec::new();
+    let live_offers = offers
+        .values()
+        .filter(|offer| offer.expires_at > now)
+        .collect::<Vec<_>>();
+    let expired_offers = offers.len().saturating_sub(live_offers.len());
+    let live_node_ids = live_offers
+        .iter()
+        .map(|offer| offer.node_id)
+        .collect::<BTreeSet<_>>();
+
+    if kill_latch {
+        findings.push(diagnostic_finding(
+            DiagnosticSeverity::Critical,
+            "OWNER_STOP_ACTIVE",
+            "fabric",
+            "The durable owner stop latch is active; no new work can be admitted.",
+            "retain_stop_and_surface_state",
+            "r0_configuration",
+            false,
+            "owner stop is never overridden by autonomy",
+        ));
+    }
+    if nodes.is_empty() {
+        findings.push(diagnostic_finding(
+            DiagnosticSeverity::Warning,
+            "NO_ENROLLED_CONTRIBUTORS",
+            "fabric",
+            "No contributor identity is enrolled, so the fabric has no remote capacity.",
+            "prepare_one_time_enrollment",
+            "r0_configuration",
+            true,
+            "invite remains short-lived and enrollment remains cryptographically bound",
+        ));
+    }
+    for node_id in nodes
+        .keys()
+        .filter(|node_id| !live_node_ids.contains(node_id))
+    {
+        findings.push(diagnostic_finding(
+            DiagnosticSeverity::Warning,
+            "NODE_WITHOUT_LIVE_OFFER",
+            node_id.to_string(),
+            "The enrolled contributor has no unexpired signed resource offer.",
+            "request_offer_refresh",
+            "r0_configuration",
+            true,
+            "refresh only; no work is issued until a verified offer arrives",
+        ));
+    }
+
+    let mut available_resources = BTreeMap::new();
+    for offer in &live_offers {
+        for resource in &offer.resources {
+            let current = available_resources
+                .entry(resource_class_name(resource.class))
+                .or_insert(0_u64);
+            *current = current.saturating_add(resource.available);
+        }
+        if offer.workload_capabilities.is_empty() {
+            findings.push(diagnostic_finding(
+                DiagnosticSeverity::Warning,
+                "MISSING_WORKLOAD_CAPABILITY_CONTRACT",
+                offer.node_id.to_string(),
+                "The live offer predates operation-exact workload capability discovery.",
+                "request_offer_refresh",
+                "r0_configuration",
+                true,
+                "jobs remain fail-closed to the legacy adapter/resource contract",
+            ));
+        }
+        if offer.availability.thermal_headroom_percent < 35 {
+            findings.push(diagnostic_finding(
+                DiagnosticSeverity::Warning,
+                "THERMAL_HEADROOM_CONSTRAINED",
+                offer.node_id.to_string(),
+                format!(
+                    "Thermal headroom is {}%, below the autonomous scheduling threshold of 35%.",
+                    offer.availability.thermal_headroom_percent
+                ),
+                "reduce_or_preempt_contributor_load",
+                "r0_configuration",
+                true,
+                "preempt restart-tolerant work; never increase the owner thermal envelope",
+            ));
+        }
+        if !offer.availability.on_ac_power
+            && offer
+                .availability
+                .battery_percent
+                .is_some_and(|battery| battery < 40)
+        {
+            findings.push(diagnostic_finding(
+                DiagnosticSeverity::Warning,
+                "BATTERY_RESERVE_CONSTRAINED",
+                offer.node_id.to_string(),
+                format!(
+                    "Battery is {}%, below the autonomous donation floor of 40%.",
+                    offer.availability.battery_percent.unwrap_or_default()
+                ),
+                "preempt_mobile_contribution",
+                "r0_configuration",
+                true,
+                "resume only after a fresh signed offer proves the battery floor",
+            ));
+        }
+        match &offer.mesh_endpoint {
+            None => findings.push(diagnostic_finding(
+                DiagnosticSeverity::Critical,
+                "AUTHENTICATED_ROUTE_MISSING",
+                offer.node_id.to_string(),
+                "The offer has no signed mesh endpoint, so the controller cannot execute remote work.",
+                "refresh_signed_mesh_endpoint",
+                "r0_configuration",
+                true,
+                "endpoint identity must match enrollment and the signed offer",
+            )),
+            Some(endpoint)
+                if endpoint.direct_addresses.is_empty() && endpoint.relay_urls.is_empty() =>
+            {
+                findings.push(diagnostic_finding(
+                    DiagnosticSeverity::Critical,
+                    "AUTHENTICATED_ROUTE_EMPTY",
+                    offer.node_id.to_string(),
+                    "The signed mesh endpoint exposes neither a direct address nor an owner-controlled relay.",
+                    "reprobe_nat_and_owner_relay",
+                    "r1_allowlisted_source",
+                    true,
+                    "canary route must authenticate the enrolled endpoint before use",
+                ));
+            }
+            Some(_) => {}
+        }
+        match &offer.link_benchmark {
+            None => findings.push(diagnostic_finding(
+                DiagnosticSeverity::Info,
+                "LINK_QUALIFICATION_MISSING",
+                offer.node_id.to_string(),
+                "No fresh bounded link benchmark is attached; latency-sensitive placement stays conservative.",
+                "run_bounded_link_probe",
+                "r0_configuration",
+                true,
+                "probe is capped at the protocol transfer limit and grants no job authority",
+            )),
+            Some(link) => {
+                if link.rtt_micros_p50 > 75_000 {
+                    findings.push(diagnostic_finding(
+                        DiagnosticSeverity::Warning,
+                        "HIGH_LINK_LATENCY",
+                        offer.node_id.to_string(),
+                        format!(
+                            "Measured median RTT is {:.1} ms; interactive speed-lane placement is suppressed.",
+                            link.rtt_micros_p50 as f64 / 1_000.0
+                        ),
+                        "prefer_throughput_or_whole_workload_lane",
+                        "r0_configuration",
+                        true,
+                        "placement change must improve measured completion time in shadow and canary",
+                    ));
+                }
+                if link.uplink_bps.min(link.downlink_bps) < 25_000_000 {
+                    findings.push(diagnostic_finding(
+                        DiagnosticSeverity::Warning,
+                        "LOW_LINK_BANDWIDTH",
+                        offer.node_id.to_string(),
+                        format!(
+                            "The slower measured direction is {:.1} Mbps; transfer-heavy shards are suppressed.",
+                            link.uplink_bps.min(link.downlink_bps) as f64 / 1_000_000.0
+                        ),
+                        "prefer_data_local_or_low_transfer_work",
+                        "r0_configuration",
+                        true,
+                        "placement change must reduce measured bytes per successful result",
+                    ));
+                }
+            }
+        }
+        if offer.adapters.contains("rampage.ollama.v1")
+            && offer
+                .model_runtimes
+                .iter()
+                .all(|runtime| runtime.installed_models.is_empty())
+        {
+            findings.push(diagnostic_finding(
+                DiagnosticSeverity::Warning,
+                "LOCAL_MODEL_INVENTORY_EMPTY",
+                offer.node_id.to_string(),
+                "Ollama is advertised but no exact locally installed model is executable.",
+                "refresh_local_model_inventory",
+                "r0_configuration",
+                true,
+                "cloud aliases and digestless models remain excluded",
+            ));
+        }
+        if offer.availability.owner_idle
+            && offer
+                .resources
+                .iter()
+                .any(|resource| resource.available > 0)
+        {
+            findings.push(diagnostic_finding(
+                DiagnosticSeverity::Info,
+                "IDLE_CAPACITY_AVAILABLE",
+                offer.node_id.to_string(),
+                "The contributor reports idle capacity that can accept bounded preemptible work.",
+                "prefer_idle_capacity",
+                "r0_configuration",
+                true,
+                "owner activity, battery, thermal, lease, and deadline gates remain authoritative",
+            ));
+        }
+    }
+
+    let recent_cutoff = now - chrono::Duration::minutes(15);
+    let recent_denials = events
+        .iter()
+        .filter(|event| {
+            event.recorded_at >= recent_cutoff
+                && matches!(
+                    event.event_type.as_str(),
+                    "job.blocked" | "mesh.request.denied"
+                )
+        })
+        .count();
+    let recent_failed_receipts = events
+        .iter()
+        .filter(|event| {
+            event.recorded_at >= recent_cutoff
+                && event.event_type == "job.receipted"
+                && matches!(
+                    event.payload.get("state").and_then(Value::as_str),
+                    Some("failed" | "ambiguous" | "cancelled" | "fenced")
+                )
+        })
+        .count();
+    if recent_denials >= 3 {
+        findings.push(diagnostic_finding(
+            DiagnosticSeverity::Warning,
+            "REPEATED_AUTHORITY_DENIALS",
+            "fabric",
+            format!(
+                "{recent_denials} requests were denied in the bounded 15-minute evidence window."
+            ),
+            "cluster_denial_causes_and_adjust_safe_placement",
+            "r1_allowlisted_source",
+            true,
+            "never broaden adapter, resource, network, or identity authority",
+        ));
+    }
+    if recent_failed_receipts >= 2 {
+        findings.push(diagnostic_finding(
+            DiagnosticSeverity::Critical,
+            "REPEATED_EXECUTION_FAILURES",
+            "fabric",
+            format!("{recent_failed_receipts} terminal execution failures occurred in the bounded 15-minute evidence window."),
+            "quarantine_failing_route_or_adapter",
+            "r1_allowlisted_source",
+            true,
+            "canary recovery must produce verified receipts before normal traffic resumes",
+        ));
+    }
+
+    let mut protected_replica_counts = HashMap::<String, usize>::new();
+    for ((digest, _), artifact) in artifact_replicas {
+        if artifact.storage_class == StorageClass::Protected {
+            *protected_replica_counts.entry(digest.clone()).or_default() += 1;
+        }
+    }
+    let under_replicated_protected_artifacts = protected_replica_counts
+        .values()
+        .filter(|replicas| **replicas < 2)
+        .count();
+    if under_replicated_protected_artifacts > 0 {
+        findings.push(diagnostic_finding(
+            DiagnosticSeverity::Warning,
+            "PROTECTED_ARTIFACT_UNDER_REPLICATED",
+            "protected_store",
+            format!(
+                "{under_replicated_protected_artifacts} protected artifact(s) have fewer than two evidenced contributor replicas."
+            ),
+            "schedule_encrypted_replica_repair",
+            "r1_allowlisted_source",
+            true,
+            "repair requires a signed storage lease, digest verification, and an independent destination",
+        ));
+    }
+
+    findings.sort_by(|left, right| {
+        left.severity
+            .cmp(&right.severity)
+            .reverse()
+            .then_with(|| left.code.cmp(right.code))
+            .then_with(|| left.scope.cmp(&right.scope))
+    });
+    let critical = findings
+        .iter()
+        .filter(|finding| finding.severity == DiagnosticSeverity::Critical)
+        .count() as u8;
+    let warnings = findings
+        .iter()
+        .filter(|finding| finding.severity == DiagnosticSeverity::Warning)
+        .count() as u8;
+    let health_score = if kill_latch {
+        0
+    } else {
+        100_u8
+            .saturating_sub(critical.saturating_mul(25))
+            .saturating_sub(warnings.saturating_mul(8))
+    };
+    let status = if kill_latch {
+        "stopped"
+    } else if health_score < 70 {
+        "degraded"
+    } else if health_score < 90 {
+        "attention"
+    } else {
+        "healthy"
+    };
+    let metrics = DiagnosticMetrics {
+        enrolled_nodes: nodes.len(),
+        live_offers: live_offers.len(),
+        expired_offers,
+        active_assignments,
+        protected_artifacts: protected_replica_counts.len(),
+        under_replicated_protected_artifacts,
+        recent_denials,
+        recent_failed_receipts,
+        available_resources,
+    };
+    let autonomy = DiagnosticAutonomy {
+        mode: "deterministic_thresholded_governor",
+        per_change_approval_required: false,
+        eligible_within_envelope: vec!["r0_configuration", "r1_allowlisted_source"],
+        authority_expansion: "automatically_denied_outside_owner_envelope",
+        promotion_requirements: vec![
+            "schema_policy_static",
+            "deterministic_replay",
+            "quality_reliability_cost",
+            "sealed_holdout",
+            "adversarial_security",
+            "independent_replication",
+            "shadow",
+            "canary_rollback",
+        ],
+    };
+    let digest_value = json!({
+        "status": status,
+        "health_score": health_score,
+        "metrics": &metrics,
+        "autonomy": &autonomy,
+        "findings": &findings,
+    });
+    let evidence_digest = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&digest_value).expect("diagnostic report is serializable")
+        ))
+    );
+    FabricDiagnosticReport {
+        schema: "rampage.fabric-diagnostic-report.v1",
+        generated_at: now,
+        status,
+        health_score,
+        evidence_digest,
+        metrics,
+        autonomy,
+        findings,
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // each call remains a self-contained, auditable policy rule
+fn diagnostic_finding(
+    severity: DiagnosticSeverity,
+    code: &'static str,
+    scope: impl Into<String>,
+    evidence: impl Into<String>,
+    action: &'static str,
+    risk: &'static str,
+    auto_eligible: bool,
+    threshold: &'static str,
+) -> DiagnosticFinding {
+    DiagnosticFinding {
+        severity,
+        code,
+        scope: scope.into(),
+        evidence: evidence.into(),
+        proposal: DiagnosticProposal {
+            action,
+            risk,
+            auto_eligible,
+            threshold,
+            required_gates: vec![
+                "deterministic_replay",
+                "adversarial_security",
+                "shadow",
+                "canary_rollback",
+            ],
+            rollback: "automatic_on_threshold_breach",
+        },
+    }
+}
+
+fn resource_class_name(class: ResourceClass) -> &'static str {
+    match class {
+        ResourceClass::CpuCompute => "cpu_compute",
+        ResourceClass::GpuCompute => "gpu_compute",
+        ResourceClass::NpuCompute => "npu_compute",
+        ResourceClass::GpuMemory => "gpu_memory",
+        ResourceClass::RamWorkingSet => "ram_working_set",
+        ResourceClass::RamCache => "ram_cache",
+        ResourceClass::StorageCache => "storage_cache",
+        ResourceClass::StorageScratch => "storage_scratch",
+        ResourceClass::ProtectedStore => "protected_store",
+        ResourceClass::NetworkFetch => "network_fetch",
+        ResourceClass::NetworkRelay => "network_relay",
+        ResourceClass::Toolchain => "toolchain",
+        ResourceClass::Runtime => "runtime",
+        ResourceClass::Codec => "codec",
+        ResourceClass::LicensedService => "licensed_service",
+    }
+}
+
 async fn submit_job(
     State(state): State<AppState>,
     Json(job): Json<JobSpecV1>,
@@ -1604,13 +2783,7 @@ async fn submit_job(
         .ledger
         .append("job.proposed", &job.job_id.to_string(), &job)
         .map_err(internal_error)?;
-    let offers: Vec<_> = state
-        .offers
-        .read()
-        .map_err(lock_error)?
-        .values()
-        .cloned()
-        .collect();
+    let offers = placement_offers(&state)?;
     let reservations = state.reservations.read().map_err(lock_error)?.clone();
     let now = chrono::Utc::now();
     let local_inputs_by_node = input_locality(&state, &offers, &job)?;
@@ -1745,13 +2918,7 @@ async fn submit_shard_set(
         }
     }
 
-    let offers = state
-        .offers
-        .read()
-        .map_err(lock_error)?
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
+    let offers = placement_offers(&state)?;
     let reservations = state.reservations.read().map_err(lock_error)?.clone();
     let locality = shard_input_locality(&state, &offers, &set)?;
     let placements = plan_shard_set(
@@ -1903,13 +3070,7 @@ async fn plan_shard_set_request(
             Json(json!({"error": error.to_string()})),
         )
     })?;
-    let offers = state
-        .offers
-        .read()
-        .map_err(lock_error)?
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
+    let offers = placement_offers(&state)?;
     let reservations = state.reservations.read().map_err(lock_error)?.clone();
     let locality = shard_input_locality(&state, &offers, &set)?;
     let result = plan_shard_set(
@@ -2074,13 +3235,7 @@ async fn plan_job(
             Json(json!({"error": error.to_string()})),
         )
     })?;
-    let offers: Vec<_> = state
-        .offers
-        .read()
-        .map_err(lock_error)?
-        .values()
-        .cloned()
-        .collect();
+    let offers = placement_offers(&state)?;
     let reservations = state.reservations.read().map_err(lock_error)?.clone();
     let now = chrono::Utc::now();
     let local_inputs_by_node = input_locality(&state, &offers, &job)?;
@@ -2130,13 +3285,7 @@ async fn plan_model_session_request(
             Json(json!({"error": error.to_string()})),
         )
     })?;
-    let offers = state
-        .offers
-        .read()
-        .map_err(lock_error)?
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
+    let offers = placement_offers(&state)?;
     Ok(Json(plan_model_session(&request, &offers, now)))
 }
 
@@ -2173,6 +3322,80 @@ async fn governor_key(State(state): State<AppState>) -> Json<Value> {
         "schema": "rampage.governor-key.v1",
         "public_key": hex::encode(state.governor.verifying_key().to_bytes())
     }))
+}
+
+async fn authorize_promotion_canary(
+    State(state): State<AppState>,
+    Json(candidate): Json<PromotionCandidateV1>,
+) -> Result<(StatusCode, Json<PromotionCanaryLeaseV1>), (StatusCode, Json<Value>)> {
+    if state.kill_latch_path.is_file() {
+        return Err((
+            StatusCode::LOCKED,
+            Json(json!({"error": "owner kill latch is active"})),
+        ));
+    }
+    let _guard = state.admission_gate.lock().await;
+    let subject = candidate.proposal_id.to_string();
+    for event in state
+        .ledger
+        .events_for_subject(&subject, 128)
+        .map_err(internal_error)?
+    {
+        if event.event_type == "promotion.candidate.proposed" {
+            let existing: PromotionCandidateV1 =
+                serde_json::from_value(event.payload).map_err(internal_error)?;
+            if existing.candidate_digest != candidate.candidate_digest
+                || existing.project_id != candidate.project_id
+                || existing.changed_paths != candidate.changed_paths
+            {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": "proposal id is already bound to another candidate"})),
+                ));
+            }
+        } else if event.event_type == "promotion.canary.lease.issued" {
+            let existing: PromotionCanaryLeaseV1 =
+                serde_json::from_value(event.payload).map_err(internal_error)?;
+            if existing.candidate_digest != candidate.candidate_digest
+                || existing.project_id != candidate.project_id
+            {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": "proposal id is already bound to another canary"})),
+                ));
+            }
+            if existing.is_active_at(
+                chrono::Utc::now(),
+                state.fencing_epoch.load(Ordering::Acquire),
+            ) {
+                return Ok((StatusCode::OK, Json(existing)));
+            }
+        }
+    }
+    let lease = state
+        .governor
+        .authorize_promotion_canary_at_epoch(
+            &candidate,
+            state.fencing_epoch.load(Ordering::Acquire),
+        )
+        .map_err(|error| {
+            let status = match error {
+                rampage_policy::Denial::InvalidPromotionEvidence
+                | rampage_policy::Denial::PromotionRiskMismatch => StatusCode::BAD_REQUEST,
+                rampage_policy::Denial::KillLatch => StatusCode::LOCKED,
+                _ => StatusCode::FORBIDDEN,
+            };
+            (status, Json(json!({"error": error.to_string()})))
+        })?;
+    state
+        .ledger
+        .append("promotion.candidate.proposed", &subject, &candidate)
+        .map_err(internal_error)?;
+    state
+        .ledger
+        .append("promotion.canary.lease.issued", &subject, &lease)
+        .map_err(internal_error)?;
+    Ok((StatusCode::CREATED, Json(lease)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2838,6 +4061,31 @@ fn load_or_create_secret(path: &std::path::Path) -> anyhow::Result<[u8; 32]> {
     Ok(bytes)
 }
 
+fn governor_config_from_env() -> anyhow::Result<GovernorConfig> {
+    Ok(GovernorConfig {
+        trusted_autopilot_projects: parse_uuid_set_env("RAMPAGE_AUTONOMY_R1_PROJECTS")?,
+        autonomous_protected_projects: parse_uuid_set_env("RAMPAGE_AUTONOMY_R2_PROJECTS")?,
+        ..GovernorConfig::default()
+    })
+}
+
+fn parse_uuid_set_env(name: &str) -> anyhow::Result<BTreeSet<Uuid>> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(BTreeSet::new());
+    };
+    value
+        .to_string_lossy()
+        .split([';', ','])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            Uuid::parse_str(value).map_err(|error| {
+                anyhow::anyhow!("{name} contains invalid project UUID {value}: {error}")
+            })
+        })
+        .collect()
+}
+
 fn mesh_config_from_env(nodes: &HashMap<Uuid, NodeIdentityV1>) -> anyhow::Result<MeshConfig> {
     let allowed_peer_keys = nodes.values().map(|node| node.public_key.clone()).collect();
     let mode = match std::env::var("RAMPAGE_PRIVATE_RELAYS") {
@@ -3297,6 +4545,7 @@ mod tests {
                 owner_idle: true,
             },
             adapters: BTreeSet::from(["rampage.ollama.v1".into()]),
+            workload_capabilities: Vec::new(),
             model_runtimes: vec![ModelRuntimeOfferV1 {
                 schema: ModelRuntimeOfferV1::SCHEMA.into(),
                 adapter: "rampage.ollama.v1".into(),
@@ -3333,6 +4582,35 @@ mod tests {
     }
 
     #[test]
+    fn workload_capability_must_be_valid_unique_and_adapter_bound() {
+        let mut offer = valid_model_offer();
+        offer.workload_capabilities = vec![rampage_protocol::WorkloadCapabilityV1 {
+            schema: rampage_protocol::WorkloadCapabilityV1::SCHEMA.into(),
+            adapter: "unadvertised.adapter".into(),
+            domain: rampage_protocol::WorkloadDomain::Gaming,
+            operations: BTreeSet::from(["stream_session".into()]),
+            execution_patterns: BTreeSet::from([
+                rampage_protocol::ExecutionPattern::StreamingService,
+            ]),
+            resource_classes: BTreeSet::from([ResourceClass::GpuCompute]),
+            isolation: rampage_protocol::WorkloadIsolation::VendorWorker,
+            runtime_digest: "candidate:gaming".into(),
+            checkpointable: false,
+            preemptible: true,
+            network_allowlist_required: true,
+            status: rampage_protocol::WorkloadCapabilityStatus::Candidate,
+            qualification_digest: None,
+        }];
+        assert!(validate_model_runtime_contracts(&offer).is_err());
+        offer.workload_capabilities[0].adapter = "rampage.ollama.v1".into();
+        assert_eq!(validate_model_runtime_contracts(&offer), Ok(()));
+        offer
+            .workload_capabilities
+            .push(offer.workload_capabilities[0].clone());
+        assert!(validate_model_runtime_contracts(&offer).is_err());
+    }
+
+    #[test]
     fn openai_subset_rejects_tools_instead_of_ignoring_them() {
         let request = serde_json::json!({
             "model": "gemma3:4b",
@@ -3357,5 +4635,142 @@ mod tests {
             top_p: Some(0.9),
         };
         assert_eq!(validate_openai_request(&request).unwrap(), 128);
+    }
+
+    #[test]
+    fn anthropic_text_messages_translate_without_broadening_authority() {
+        let request = serde_json::from_value::<AnthropicMessagesRequest>(serde_json::json!({
+            "model": "gemma3:4b",
+            "max_tokens": 64,
+            "system": [{"type": "text", "text": "Be concise."}],
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "hello"}]
+            }],
+            "stream": true
+        }))
+        .unwrap();
+        let translated = translate_anthropic_request(request).unwrap();
+        assert_eq!(translated.messages.len(), 2);
+        assert_eq!(translated.messages[0].role, "system");
+        assert_eq!(translated.messages[1].content, "hello");
+        assert_eq!(translated.max_completion_tokens, Some(64));
+        assert!(translated.stream);
+    }
+
+    #[test]
+    fn anthropic_subset_rejects_tools_instead_of_ignoring_them() {
+        let request = serde_json::json!({
+            "model": "gemma3:4b",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": []
+        });
+        assert!(serde_json::from_value::<AnthropicMessagesRequest>(request).is_err());
+    }
+
+    #[test]
+    fn anthropic_stop_reasons_are_explicitly_mapped() {
+        assert_eq!(anthropic_stop_reason("stop"), "end_turn");
+        assert_eq!(anthropic_stop_reason("length"), "max_tokens");
+    }
+
+    #[test]
+    fn self_scan_is_stable_and_requires_no_per_change_approval() {
+        let now = chrono::Utc::now();
+        let report = build_diagnostic_report(
+            now,
+            &HashMap::new(),
+            &HashMap::new(),
+            0,
+            &HashMap::new(),
+            &[],
+            false,
+        );
+        let repeated = build_diagnostic_report(
+            now + Duration::seconds(1),
+            &HashMap::new(),
+            &HashMap::new(),
+            0,
+            &HashMap::new(),
+            &[],
+            false,
+        );
+        assert!(!report.autonomy.per_change_approval_required);
+        assert_eq!(
+            report.autonomy.authority_expansion,
+            "automatically_denied_outside_owner_envelope"
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "NO_ENROLLED_CONTRIBUTORS")
+        );
+        assert_eq!(report.evidence_digest, repeated.evidence_digest);
+        assert!(report.evidence_digest.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn self_scan_promotes_repeated_denials_to_an_evidenced_finding() {
+        let ledger = Ledger::in_memory().unwrap();
+        for index in 0..3 {
+            ledger
+                .append(
+                    "job.blocked",
+                    &format!("job-{index}"),
+                    &json!({"reason": "test"}),
+                )
+                .unwrap();
+        }
+        let report = build_diagnostic_report(
+            chrono::Utc::now(),
+            &HashMap::new(),
+            &HashMap::new(),
+            0,
+            &HashMap::new(),
+            &ledger.latest_events(10).unwrap(),
+            false,
+        );
+        assert_eq!(report.metrics.recent_denials, 3);
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.code == "REPEATED_AUTHORITY_DENIALS")
+            .unwrap();
+        assert!(finding.proposal.auto_eligible);
+        assert_eq!(finding.proposal.risk, "r1_allowlisted_source");
+    }
+
+    #[test]
+    fn governor_turns_unroutable_evidence_into_a_reversible_placement_exclusion() {
+        let offer = valid_model_offer();
+        let identity = NodeIdentityV1 {
+            schema: "rampage.node-identity.v1".into(),
+            node_id: offer.node_id,
+            owner_id: Uuid::now_v7(),
+            display_name: "unroutable".into(),
+            device_kind: rampage_protocol::DeviceKind::Desktop,
+            platform: "windows-x86_64".into(),
+            public_key: "test-key".into(),
+            enrolled_at: chrono::Utc::now(),
+            fencing_epoch: 1,
+        };
+        let report = build_diagnostic_report(
+            chrono::Utc::now(),
+            &HashMap::from([(identity.node_id, identity)]),
+            &HashMap::from([(offer.node_id, offer)]),
+            0,
+            &HashMap::new(),
+            &[],
+            false,
+        );
+        let constraints =
+            derive_autonomous_constraints(&Governor::ephemeral(GovernorConfig::default()), &report);
+        assert_eq!(
+            constraints.excluded_nodes.values().next().unwrap(),
+            &["AUTHENTICATED_ROUTE_MISSING".to_string()]
+        );
+        assert_eq!(constraints.evidence_digest, report.evidence_digest);
     }
 }

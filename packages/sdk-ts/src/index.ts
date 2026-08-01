@@ -71,6 +71,102 @@ export interface ResourceOffer {
   link_benchmark?: LinkBenchmark;
   mesh_endpoint?: EnrollmentInvite["controller_mesh"];
   model_runtimes?: ModelRuntimeOffer[];
+  workload_capabilities?: WorkloadCapability[];
+}
+
+export interface WorkloadCapability {
+  schema: "rampage.workload-capability.v1";
+  adapter: string;
+  domain: "ai_inference" | "ai_evaluation" | "gaming" | "creative_production" | "software_build" | "scientific_computing" | "data_processing" | "storage" | "edge_utility";
+  operations: string[];
+  execution_patterns: Array<"whole_workload" | "independent_shard" | "replica" | "streaming_service" | "application_native_distributed" | "tensor_parallel" | "pipeline_parallel">;
+  resource_classes: string[];
+  isolation: "allowlisted_in_process" | "dedicated_process" | "container" | "wasm_sandbox" | "external_service" | "vendor_worker";
+  runtime_digest: string;
+  checkpointable: boolean;
+  preemptible: boolean;
+  network_allowlist_required: boolean;
+  status: "shipped" | "qualified" | "candidate";
+  qualification_digest?: string;
+}
+
+export interface WorkloadCapabilityInventory {
+  schema: "rampage.workload-capability-inventory.v1";
+  authority: "exact_adapter_operation_from_verified_signed_offer";
+  candidate_authority: false;
+  nodes: Array<{
+    node_id: string;
+    offer_id: string;
+    observed_at: string;
+    expires_at: string;
+    signed_offer: boolean;
+    capabilities: WorkloadCapability[];
+  }>;
+}
+
+export interface FabricDiagnosticReport {
+  schema: "rampage.fabric-diagnostic-report.v1";
+  generated_at: string;
+  status: "healthy" | "attention" | "degraded" | "stopped";
+  health_score: number;
+  evidence_digest: string;
+  metrics: Record<string, unknown>;
+  autonomy: {
+    mode: "deterministic_thresholded_governor";
+    per_change_approval_required: false;
+    eligible_within_envelope: string[];
+    authority_expansion: "automatically_denied_outside_owner_envelope";
+    promotion_requirements: string[];
+  };
+  findings: Array<{
+    severity: "info" | "warning" | "critical";
+    code: string;
+    scope: string;
+    evidence: string;
+    proposal: Record<string, unknown>;
+  }>;
+}
+
+export type PromotionRisk =
+  | "r0_configuration"
+  | "r1_allowlisted_source"
+  | "r2_protected_change"
+  | "r3_authority_critical";
+
+export interface PromotionCandidate {
+  schema: "rampage.promotion-candidate.v1";
+  proposal_id: string;
+  project_id: string;
+  base_revision: string;
+  candidate_digest: string;
+  changed_paths: string[];
+  risk: PromotionRisk;
+  gates: Array<{
+    name: string;
+    passed: boolean;
+    evidence_digest: string;
+    independent: boolean;
+  }>;
+  requested_at: string;
+  expires_at: string;
+}
+
+export interface PromotionCanaryLease {
+  schema: "rampage.promotion-canary-lease.v1";
+  canary_id: string;
+  proposal_id: string;
+  project_id: string;
+  candidate_digest: string;
+  risk: PromotionRisk;
+  max_traffic_basis_points: number;
+  max_error_regression_basis_points: number;
+  max_latency_regression_basis_points: number;
+  max_cost_regression_basis_points: number;
+  issued_at: string;
+  expires_at: string;
+  nonce: string;
+  fencing_epoch: number;
+  signature: string;
 }
 
 export type ComputeStrategy =
@@ -128,6 +224,46 @@ export interface OpenAiChatCompletion {
     finish_reason: string;
   }>;
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+}
+
+export interface GatewayCapabilities {
+  schema: "rampage.gateway-capabilities.v1";
+  execution: {
+    topology: "whole_model_one_contributor";
+    cross_host_shared_memory: false;
+    terminal_success_requires_signed_receipt: true;
+  };
+  protocols: Array<{
+    id: "openai.chat_completions" | "anthropic.messages";
+    paths: string[];
+    streaming: string;
+    content: string[];
+  }>;
+  unsupported: string[];
+}
+
+export interface AnthropicMessageRequest {
+  model: string;
+  max_tokens: number;
+  messages: Array<{
+    role: "user" | "assistant";
+    content: string | Array<{ type: "text"; text: string }>;
+  }>;
+  system?: string | Array<{ type: "text"; text: string }>;
+  stream?: false;
+  temperature?: number;
+  top_p?: number;
+}
+
+export interface AnthropicMessage {
+  id: string;
+  type: "message";
+  role: "assistant";
+  content: Array<{ type: "text"; text: string }>;
+  model: string;
+  stop_reason: "end_turn" | "max_tokens";
+  stop_sequence: null;
+  usage: { input_tokens: number; output_tokens: number };
 }
 
 export interface ModelSessionRequest {
@@ -254,6 +390,18 @@ export class RampageClient {
     return this.request("/v1/offers");
   }
 
+  workloadCapabilities(): Promise<WorkloadCapabilityInventory> {
+    return this.request("/v1/workload-capabilities");
+  }
+
+  selfScan(): Promise<FabricDiagnosticReport> {
+    return this.request("/v1/diagnostics/self-scan");
+  }
+
+  authorizePromotionCanary(candidate: PromotionCandidate): Promise<PromotionCanaryLease> {
+    return this.request("/v1/improvements/canary", this.json(candidate));
+  }
+
   planModelSession(request: ModelSessionRequest): Promise<ModelSessionPlan> {
     return this.request("/v1/model-sessions/plan", this.json(request));
   }
@@ -263,12 +411,30 @@ export class RampageClient {
     return { baseURL: `${this.baseUrl}/v1`, apiKey: this.token };
   }
 
+  openRouterConfig(): { baseURL: string; apiKey: string } {
+    if (!this.token) throw new Error("Rampage gateway requires the local controller token");
+    return { baseURL: `${this.baseUrl}/api/v1`, apiKey: this.token };
+  }
+
+  anthropicConfig(): { baseURL: string; apiKey: string } {
+    if (!this.token) throw new Error("Rampage gateway requires the local controller token");
+    return { baseURL: this.baseUrl, apiKey: this.token };
+  }
+
+  gatewayCapabilities(): Promise<GatewayCapabilities> {
+    return this.gatewayRequest("/v1/capabilities");
+  }
+
   models(): Promise<OpenAiModelList> {
     return this.gatewayRequest("/v1/models");
   }
 
   chatCompletion(request: OpenAiChatCompletionRequest): Promise<OpenAiChatCompletion> {
     return this.gatewayRequest("/v1/chat/completions", this.json(request));
+  }
+
+  anthropicMessage(request: AnthropicMessageRequest): Promise<AnthropicMessage> {
+    return this.gatewayRequest("/v1/messages", this.json(request));
   }
 
   cancelModelSession(sessionId: string): Promise<{ session_id: string; cancelled: true }> {

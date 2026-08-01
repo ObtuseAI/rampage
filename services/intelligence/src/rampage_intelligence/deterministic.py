@@ -57,7 +57,7 @@ def deterministic_plan(compiled: CompiledIntent) -> tuple[StageProposal, ...]:
                 summary="The request crosses a protected authority boundary.",
                 claims=("No execution capabilities were requested",),
                 uncertainties=compiled.blocked_authority_requests,
-                requires_human_review=True,
+                requires_governor_authorization=False,
             ),
         )
     return (
@@ -97,7 +97,6 @@ def deterministic_plan(compiled: CompiledIntent) -> tuple[StageProposal, ...]:
             stage="auditor_synthesizer",
             summary="Assemble evidence and request a Governor decision.",
             claims=("The synthesizer has proposal authority only",),
-            requires_human_review=True,
         ),
     )
 
@@ -138,11 +137,14 @@ def run_deterministic(intent: GoalIntent) -> WorkflowResult:
     stages = deterministic_plan(compiled)
     verification = verify_plan(compiled, stages)
     if compiled.capability_state is CapabilityState.BLOCKED:
-        action: Literal["request_leases", "human_review", "blocked"] = "blocked"
+        action: Literal["request_leases", "blocked"] = "blocked"
         explanation = "Protected authority request denied before planning."
     elif verification.passed:
-        action = "human_review"
-        explanation = "Deterministic plan is ready for review; no model or external tool was used."
+        action = "request_leases"
+        explanation = (
+            "Deterministic verification passed; the workflow may request only the typed "
+            "leases permitted by the owner-defined Governor envelope."
+        )
     else:
         action = "blocked"
         explanation = "Deterministic verification failed closed."

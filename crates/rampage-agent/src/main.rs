@@ -146,6 +146,8 @@ fn main() -> anyhow::Result<()> {
         }
     };
     adapters.extend(model_runtimes.iter().map(|profile| profile.adapter.clone()));
+    let workload_capabilities =
+        discovery::discover_workload_capabilities(&adapters, &model_runtimes);
     let offer = ResourceOfferV1 {
         schema: "rampage.resource-offer.v1".into(),
         offer_id: Uuid::now_v7(),
@@ -169,6 +171,7 @@ fn main() -> anyhow::Result<()> {
             owner_idle: discovered.owner_idle,
         },
         adapters,
+        workload_capabilities,
         model_runtimes,
         link_benchmark: None,
         mesh_endpoint: transport.signed_worker_endpoint(
@@ -1313,6 +1316,7 @@ mod tests {
                 owner_idle: true,
             },
             adapters: BTreeSet::from(["rampage.ollama.v1".into()]),
+            workload_capabilities: Vec::new(),
             model_runtimes: vec![runtime.clone()],
             link_benchmark: None,
             mesh_endpoint: Some(MeshEndpointRecordV1 {

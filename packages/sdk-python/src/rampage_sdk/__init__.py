@@ -38,6 +38,20 @@ class RampageClient:
         payload: list[dict[str, Any]] = response.json()
         return payload
 
+    def workload_capabilities(self) -> dict[str, Any]:
+        """Return operation-exact capabilities from verified live signed offers."""
+        return self._get("/v1/workload-capabilities")
+
+    def self_scan(self) -> dict[str, Any]:
+        """Run and return the deterministic fabric bottleneck and failure scan."""
+        return self._get("/v1/diagnostics/self-scan")
+
+    def authorize_promotion_canary(
+        self, candidate: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Request a signed, evidence-gated canary lease from the Rust Governor."""
+        return self._post("/v1/improvements/canary", candidate)
+
     def plan_model_session(self, request: dict[str, Any]) -> dict[str, Any]:
         """Preview a model placement; this endpoint never issues execution authority."""
         return self._post("/v1/model-sessions/plan", request)
@@ -52,6 +66,26 @@ class RampageClient:
             "api_key": token,
         }
 
+    def openrouter_config(self) -> dict[str, str]:
+        """Return values accepted by OpenAI-compatible clients using OpenRouter paths."""
+        token = self._client.headers.get("x-rampage-token")
+        if not token:
+            raise ValueError("Rampage gateway requires the local controller token")
+        return {
+            "base_url": f"{str(self._client.base_url).rstrip('/')}/api/v1",
+            "api_key": token,
+        }
+
+    def anthropic_config(self) -> dict[str, str]:
+        """Return values accepted by the official Anthropic client."""
+        token = self._client.headers.get("x-rampage-token")
+        if not token:
+            raise ValueError("Rampage gateway requires the local controller token")
+        return {"base_url": str(self._client.base_url).rstrip("/"), "api_key": token}
+
+    def gateway_capabilities(self) -> dict[str, Any]:
+        return self._gateway_get("/v1/capabilities")
+
     def models(self) -> dict[str, Any]:
         return self._gateway_get("/v1/models")
 
@@ -59,6 +93,11 @@ class RampageClient:
         if request.get("stream") is True:
             raise ValueError("use an OpenAI client with openai_config() for SSE streaming")
         return self._gateway_post("/v1/chat/completions", request)
+
+    def anthropic_message(self, request: dict[str, Any]) -> dict[str, Any]:
+        if request.get("stream") is True:
+            raise ValueError("use an Anthropic client with anthropic_config() for SSE streaming")
+        return self._gateway_post("/v1/messages", request)
 
     def cancel_model_session(self, session_id: str) -> dict[str, Any]:
         return self._gateway_post(f"/v1/model-sessions/{session_id}/cancel", {})

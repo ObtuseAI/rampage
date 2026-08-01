@@ -183,6 +183,58 @@ impl Ledger {
         .collect()
     }
 
+    /// Return the newest evidence window in chronological order.
+    ///
+    /// Diagnostics use this bounded query so a long-lived controller does not need to replay the
+    /// entire ledger on every self-scan. The database reads newest-first, then this method reverses
+    /// the result so consumers still see the canonical event order.
+    pub fn latest_events(&self, limit: u32) -> Result<Vec<LedgerEvent>, LedgerError> {
+        let connection = self.connection.lock().map_err(|_| LedgerError::Poisoned)?;
+        let mut statement = connection.prepare(
+            "SELECT sequence, recorded_at, event_type, subject_id, payload_json,
+                    previous_hash, event_hash
+             FROM ledger_events ORDER BY sequence DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit.min(10_000)], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?;
+        let mut events = rows
+            .map(|row| {
+                let (
+                    sequence,
+                    timestamp,
+                    event_type,
+                    subject_id,
+                    payload_json,
+                    previous_hash,
+                    event_hash,
+                ) = row?;
+                let recorded_at = DateTime::parse_from_rfc3339(&timestamp)
+                    .map_err(|error| serde_json::Error::io(std::io::Error::other(error)))?
+                    .with_timezone(&Utc);
+                Ok(LedgerEvent {
+                    sequence,
+                    recorded_at,
+                    event_type,
+                    subject_id,
+                    payload: serde_json::from_str(&payload_json)?,
+                    previous_hash,
+                    event_hash,
+                })
+            })
+            .collect::<Result<Vec<_>, LedgerError>>()?;
+        events.reverse();
+        Ok(events)
+    }
+
     pub fn events_for_subject(
         &self,
         subject_id: &str,
@@ -395,5 +447,22 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", temp.display(), suffix));
         }
+    }
+
+    #[test]
+    fn latest_events_returns_a_bounded_chronological_window() {
+        let ledger = Ledger::in_memory().unwrap();
+        for index in 0..5 {
+            ledger.append("window.test", "subject", &index).unwrap();
+        }
+        let events = ledger.latest_events(3).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 5]
+        );
+        assert!(ledger.latest_events(0).unwrap().is_empty());
     }
 }

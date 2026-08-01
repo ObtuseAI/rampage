@@ -16,7 +16,8 @@ def test_operates_without_model_or_network() -> None:
     result = run_deterministic(intent("Build and verify a local cache"))
     assert result.capability_state is CapabilityState.DETERMINISTIC_ONLY
     assert result.verification.passed
-    assert result.governor_action == "human_review"
+    assert result.governor_action == "request_leases"
+    assert all(not stage.requires_human_review for stage in result.stages)
     assert len(result.stages) >= 5
 
 

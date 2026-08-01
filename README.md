@@ -56,13 +56,17 @@ Rampage 0.2 is a working Windows x64 release candidate with evidence for the pat
 | OnePool | Three independent evaluation shards placed across bounded offers, completed with signed results, and recovered after restart |
 | Private mesh | Authenticated direct QUIC enrollment, control traffic, and artifact transport without a Tailscale dependency |
 | Storage fabric | Encrypted chunked CAS, signed storage leases, automatic input staging, replication, retrieval, and receipt outputs |
-| Real AI workload | OpenAI-compatible chat crossed authenticated QUIC to a worker's loopback Ollama, streamed back, and ended in a transcript-matched signed receipt |
+| Real AI workload | OpenAI, Anthropic Messages, and OpenRouter-style text requests crossed authenticated QUIC to a worker's loopback Ollama, streamed back, and ended in a transcript-matched signed receipt |
+| Universal capability contract | Signed offers advertise exact workload domain, adapter, operation, execution pattern, isolation, runtime digest, and qualification status; candidate profiles grant no authority |
+| Autonomous self-scan | Stable evidence digests cover routes, links, failures, denials, thermal/battery pressure, capability gaps, idle capacity, and protected-artifact replication |
 | Compute Strategy | Read-only Maximum Model, Speed Boost, Throughput, Efficiency, and Autonomous placement previews with exact capacity and qualification blockers |
 | Packaged product | Native Tauri shell, role-aware system tray, close-to-tray, start-at-login, four sidecars, clean explicit shutdown, installer, and automatic desktop launcher |
-| Verification | 60 Rust tests plus desktop, TypeScript SDK, Python intelligence, Python SDK, deterministic model-gateway, mesh, packaging, and lifecycle gates |
+| Verification | 76 Rust tests plus desktop, TypeScript SDK, Python intelligence, Python SDK, deterministic universal-gateway, mesh, packaging, and lifecycle gates |
 
-The complete qualification record—including artifact hashes and the unsigned-release boundary—is in
-[the release evidence](docs/RELEASE_EVIDENCE.md).
+The packaged 0.2 qualification record—including artifact hashes and the unsigned-release boundary—is
+in [the release evidence](docs/RELEASE_EVIDENCE.md). The newer API, workload-contract, self-scan,
+and signed-canary campaign is recorded separately in
+[universal-compute evidence](docs/UNIVERSAL_COMPUTE_EVIDENCE.md).
 
 ## The design graph
 
@@ -134,19 +138,20 @@ The planner reports visible versus compatible memory, requested weights plus KV 
 ranks, parallelism, predicted speedup, and the exact missing qualification. Planning remains
 read-only. Separately, the shipped whole-model lane can select an exact installed Ollama model on
 one contributor, mint a one-shot model-session lease, stream it over authenticated QUIC, and expose
-the result through a bearer-protected OpenAI Chat Completions subset. Cross-host tensor and pipeline
-launch remain gated until a backend proves runtime, topology, isolation, recovery, and measured
-benefit.
+the result through bounded OpenAI, Anthropic Messages, and OpenRouter-style text APIs. Cross-host
+tensor and pipeline launch remain gated until a backend proves runtime, topology, isolation,
+recovery, and measured benefit.
 
 ```powershell
 rampage model-plan local/70b-quantized --weights-gib 40 --kv-cache-gib 4 --strategy maximum-model-size
 rampage model-plan local/fast-chat --weights-gib 20 --kv-cache-gib 2 --strategy speed-boost
 ```
 
-See [Model Fabric](docs/MODEL_FABRIC.md) for the contracts, planner rules, topology thresholds, and
-the executable-backend boundary.
+See [Model Fabric](docs/MODEL_FABRIC.md) for planner rules and topology thresholds, and
+[Universal compute](docs/UNIVERSAL_COMPUTE.md) for the operation-exact workload contract, API
+surfaces, self-scan, and honest device roles.
 
-![Rampage desktop Compute Strategy selector showing Maximum Model, Speed Boost, Throughput, Efficiency, and Autonomous lanes above the accessible machine grid](docs/assets/rampage-model-fabric-grid.png)
+![Rampage desktop showing the universal AI gateway, Maximum Model strategy, five-machine fabric grid, and a healthy autonomously thresholded self-scan](docs/assets/rampage-model-fabric-grid.png)
 
 ## Recursively improving—without recursively expanding authority
 
@@ -157,6 +162,12 @@ The intelligence plane runs a durable improvement loop:
 DBOS workflows make the process recoverable. Pydantic AI adapters produce typed proposals. Scientific
 memory keeps experiments content-addressed. Deterministic replay, holdouts, adversarial review,
 replication, shadow, and canary gates determine whether an idea earns promotion.
+
+There is no per-change approval prompt inside an owner-defined autonomy envelope. Candidates that
+pass every deterministic threshold may request a signed, traffic-capped, epoch-fenced canary lease
+from the Rust Governor and automatic rollback.
+Authority-critical changes, path escapes, and any attempt to widen that envelope are automatically
+denied—not queued for an AI to approve itself.
 
 The model cannot mint leases, enroll peers, edit the Governor, access signing keys or secrets,
 promote itself, authorize destructive tools, change financial policy, or bypass STOP. Missing or
@@ -189,8 +200,9 @@ For a real local-model workload:
 rampage generate llama3.2:latest "Reply with RAMPAGE_OK" --gpu-memory-gb 4
 ```
 
-Or point an OpenAI client at the owner PC's loopback gateway. The API key is the local Rampage
-controller token; the desktop's **Copy API setup** button copies both values explicitly:
+Or point an OpenAI, Anthropic, or OpenRouter-compatible client at the owner PC's loopback gateway.
+The API key is the local Rampage controller token; the desktop's **Copy API setup** button copies
+the compatible base URLs explicitly:
 
 ```python
 from openai import OpenAI
@@ -203,9 +215,14 @@ reply = client.chat.completions.create(
 print(reply.choices[0].message.content)
 ```
 
-`GET /v1/models`, non-streaming and SSE `POST /v1/chat/completions`, and explicit session cancel
-are implemented. Unknown fields, inconsistent model aliases, replayed leases, stale epochs,
-oversized prompts, and unsigned terminal success all fail closed.
+`GET /v1/models`, non-streaming and SSE `POST /v1/chat/completions`, OpenRouter-style `/api/v1`
+aliases, Anthropic `POST /v1/messages`, capability discovery, and explicit session cancel are
+implemented. Unknown fields, unsupported modalities/tools, inconsistent model aliases, replayed
+leases, stale epochs, oversized prompts, and unsigned terminal success all fail closed.
+
+The desktop continuously displays the health score from `GET /v1/diagnostics/self-scan`.
+`GET /v1/workload-capabilities` exposes what each verified live offer can actually execute; the
+presence of a broad domain in the schema is not a claim that a backend is already shipped.
 
 For useful pooled evaluation work:
 

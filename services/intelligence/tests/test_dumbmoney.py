@@ -51,6 +51,6 @@ def test_proposal_cannot_be_constructed_with_authority() -> None:
                 media_type="application/json",
             ),
             summary="bounded compute proposal",
-            execution_authority=True,  # type: ignore[arg-type]
+            execution_authority=True,
             signature="signed",
         )

@@ -1,11 +1,14 @@
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from rampage_intelligence.api import app
 
 
-def test_api_advertises_proposal_only_deterministic_mode(monkeypatch) -> None:
+def test_api_advertises_proposal_only_deterministic_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("RAMPAGE_ENABLE_MODELS", "false")
     with TestClient(app) as client:
         health = client.get("/health")
@@ -23,7 +26,7 @@ def test_api_advertises_proposal_only_deterministic_mode(monkeypatch) -> None:
         assert response.json()["capability_state"] == "deterministic_only"
 
 
-def test_packaged_token_protects_intelligence_work(monkeypatch) -> None:
+def test_packaged_token_protects_intelligence_work(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RAMPAGE_TOKEN", "local-secret")
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200

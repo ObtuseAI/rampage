@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 NonEmpty = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+Sha256Digest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
 
 
 class StrictModel(BaseModel):
@@ -78,6 +79,7 @@ class StageProposal(StrictModel):
     capability_requests: tuple[CapabilityRequest, ...] = ()
     artifacts_expected: tuple[NonEmpty, ...] = ()
     requires_human_review: bool = False
+    requires_governor_authorization: bool = True
 
 
 class VerificationFinding(StrictModel):
@@ -101,7 +103,7 @@ class WorkflowResult(StrictModel):
     capability_state: CapabilityState
     stages: tuple[StageProposal, ...]
     verification: VerificationReport
-    governor_action: Literal["request_leases", "human_review", "blocked"]
+    governor_action: Literal["request_leases", "blocked"]
     explanation: NonEmpty
     completed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -120,10 +122,47 @@ class ImprovementProposal(StrictModel):
     proposal_id: UUID = Field(default_factory=uuid4)
     project_id: UUID
     base_revision: NonEmpty
+    candidate_digest: Sha256Digest
     changed_paths: tuple[NonEmpty, ...]
     change_summary: NonEmpty
     risk: RiskClass
     gates: tuple[EvidenceGate, ...]
+
+
+class AutonomyEnvelope(StrictModel):
+    schema_id: Literal["rampage.autonomy-envelope.v1"] = Field(
+        default="rampage.autonomy-envelope.v1", alias="schema"
+    )
+    envelope_id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    enabled: bool = True
+    max_risk: RiskClass = RiskClass.R1_ALLOWLISTED_SOURCE
+    allowed_path_prefixes: tuple[NonEmpty, ...] = ()
+    allow_protected_changes: bool = False
+    max_changed_paths: int = Field(default=32, ge=1, le=256)
+    require_independent_replication: bool = True
+    per_change_approval_required: Literal[False] = False
+    authority_expansion: Literal["deny"] = "deny"
+
+
+class PromotionEvaluationRequest(StrictModel):
+    proposal: ImprovementProposal
+    envelope: AutonomyEnvelope
+
+
+class GovernorPromotionCandidate(StrictModel):
+    schema_id: Literal["rampage.promotion-candidate.v1"] = Field(
+        default="rampage.promotion-candidate.v1", alias="schema"
+    )
+    proposal_id: UUID
+    project_id: UUID
+    base_revision: NonEmpty
+    candidate_digest: Sha256Digest
+    changed_paths: tuple[NonEmpty, ...]
+    risk: RiskClass
+    gates: tuple[EvidenceGate, ...]
+    requested_at: datetime
+    expires_at: datetime
 
 
 class PromotionDecision(StrictModel):
@@ -131,10 +170,13 @@ class PromotionDecision(StrictModel):
         default="rampage.promotion-decision.v1", alias="schema"
     )
     proposal_id: UUID
-    decision: Literal["eligible", "human_review", "denied"]
+    envelope_id: UUID
+    decision: Literal["eligible", "denied"]
     reason: NonEmpty
     missing_gates: tuple[NonEmpty, ...] = ()
+    per_change_approval_required: Literal[False] = False
     signed_by_governor: bool = False
+    governor_candidate: GovernorPromotionCandidate | None = None
 
 
 class ExperimentRecord(StrictModel):
