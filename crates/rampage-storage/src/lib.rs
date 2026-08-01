@@ -278,9 +278,10 @@ impl CasStore {
 
     /// Atomically consume one signed authority nonce while enforcing a monotonic fencing epoch.
     ///
-    /// The state lives beside the encrypted CAS index so replay and stale-epoch protection
-    /// survive process restarts. Callers must verify the lease signature before invoking this
-    /// method; this store deliberately does not possess the Governor's verification key.
+    /// The state lives in the local CAS index beside encrypted artifact payloads, so replay and
+    /// stale-epoch protection survive process restarts. Callers must verify the lease signature
+    /// before invoking this method; this store deliberately does not possess the Governor's
+    /// verification key.
     pub fn accept_authority(
         &self,
         scope: &str,

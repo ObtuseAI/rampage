@@ -43,8 +43,8 @@ Claims and receipts must match the controller's current epoch.
 Workers and artifact gateways verify the Governor signature first, then atomically consume the
 lease nonce and update their locally durable highest-seen epoch in the local CAS index beside the
 encrypted payloads. The same signed lease cannot execute or transfer twice, and a lower epoch
-remains rejected after the
-worker restarts. Lease expiry, one-shot nonce consumption, monotonic fencing, the local kill latch,
+remains rejected after the worker restarts. Lease expiry, one-shot nonce consumption, monotonic
+fencing, the local kill latch,
 and the evidence event are separate checks so no one volatile flag carries the whole safety claim.
 
 ## OnePool is a market of leases, not pooled RAM
