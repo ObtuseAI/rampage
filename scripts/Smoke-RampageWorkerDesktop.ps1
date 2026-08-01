@@ -5,7 +5,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$desktopExe = (Resolve-Path (Join-Path $root $DesktopExecutable)).Path
+$desktopPath = if ([System.IO.Path]::IsPathRooted($DesktopExecutable)) {
+    $DesktopExecutable
+} else {
+    Join-Path $root $DesktopExecutable
+}
+$desktopExe = (Resolve-Path $desktopPath).Path
 $controllerExe = (Resolve-Path (Join-Path $root 'target\release\rampage-controller.exe')).Path
 $cliExe = (Resolve-Path (Join-Path $root 'target\release\rampage.exe')).Path
 $smokeRoot = Join-Path $root ('output\worker-desktop-smoke-' + [guid]::NewGuid().ToString('N'))
@@ -16,6 +21,7 @@ $controllerUrl = "http://127.0.0.1:$ControllerPort"
 $oldBind = $env:RAMPAGE_BIND
 $oldData = $env:RAMPAGE_DATA_DIR
 $oldToken = $env:RAMPAGE_TOKEN
+$oldDiagnosticExit = $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS
 $controller = $null
 $desktop = $null
 
@@ -55,13 +61,15 @@ try {
     $env:RAMPAGE_DATA_DIR = $workerData
     $env:RAMPAGE_BIND = $oldBind
     $env:RAMPAGE_TOKEN = $oldToken
+    $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = '180000'
     $desktop = Start-Process -FilePath $desktopExe -PassThru
+    $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = $oldDiagnosticExit
 
     $joined = $false
     $node = $null
     $nodeOffer = $null
     $headers = @{ 'x-rampage-token' = (Get-Content -Raw (Join-Path $ownerData 'controller.token')).Trim() }
-    for ($attempt = 0; $attempt -lt 150; $attempt++) {
+    for ($attempt = 0; $attempt -lt 600; $attempt++) {
         if ($desktop.HasExited) {
             throw "packaged worker desktop exited before enrollment (exit=$($desktop.ExitCode))"
         }
@@ -109,7 +117,9 @@ try {
 
     $desktopId = $desktop.Id
     $null = $desktop.CloseMainWindow()
-    if (-not $desktop.WaitForExit(5000)) { Stop-ProcessTree -RootProcessId $desktopId }
+    Start-Sleep -Milliseconds 750
+    if ($desktop.HasExited) { throw 'closing the worker window exited instead of keeping its contribution in the tray' }
+    if (-not $desktop.WaitForExit(182000)) { Stop-ProcessTree -RootProcessId $desktopId; throw 'worker diagnostic exit did not complete' }
     Start-Sleep -Milliseconds 750
     $workerProcesses = @(Get-CimInstance Win32_Process | Where-Object {
         $_.CommandLine -and $_.CommandLine.Contains($workerData)
@@ -130,6 +140,8 @@ try {
         artifact_endpoint_signature = $true
         artifact_digest = $put.digest
         artifact_round_trip = $true
+        close_to_tray = $true
+        clean_explicit_exit = $true
         sidecar_leak = $false
         data_dir = $smokeRoot
     } | ConvertTo-Json
@@ -137,6 +149,13 @@ try {
     $env:RAMPAGE_BIND = $oldBind
     $env:RAMPAGE_DATA_DIR = $oldData
     $env:RAMPAGE_TOKEN = $oldToken
+    $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = $oldDiagnosticExit
     if ($desktop -and -not $desktop.HasExited) { Stop-ProcessTree -RootProcessId $desktop.Id }
     if ($controller -and -not $controller.HasExited) { Stop-ProcessTree -RootProcessId $controller.Id }
+    $lateWorkerProcesses = @(Get-CimInstance Win32_Process | Where-Object {
+        $_.CommandLine -and $_.CommandLine.Contains($workerData)
+    })
+    foreach ($process in $lateWorkerProcesses) {
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
 }

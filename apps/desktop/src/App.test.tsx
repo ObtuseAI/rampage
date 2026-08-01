@@ -9,7 +9,8 @@ afterEach(cleanup);
 
 beforeEach(() => {
   localStorage.setItem("rampage.onboarded", "true");
-  useRampage.setState({ onboarding: false, mode: "arena", commandOpen: false });
+  localStorage.setItem("rampage.compute-strategy", "maximum_model_size");
+  useRampage.setState({ onboarding: false, mode: "arena", commandOpen: false, computeStrategy: "maximum_model_size", modelPlan: null, modelPlanPending: false, runAtLogin: false });
   globalThis.fetch = vi.fn().mockRejectedValue(new Error("offline"));
 });
 
@@ -25,4 +26,18 @@ test("local stop does not depend on controller", () => {
   render(<App />);
   fireEvent.click(screen.getByRole("button", { name: "STOP" }));
   expect(useRampage.getState().capability).toBe("read_only");
+});
+
+test("separates maximum model size from measured speed boost", () => {
+  render(<App />);
+  expect(screen.getByRole("button", { name: /maximum model/i })).toHaveAttribute("aria-pressed", "true");
+  fireEvent.click(screen.getByRole("button", { name: /speed boost/i }));
+  expect(useRampage.getState().computeStrategy).toBe("speed_boost");
+  expect(screen.getByText(/use tensor peers only when measured links predict faster tokens/i)).toBeInTheDocument();
+  expect(localStorage.getItem("rampage.compute-strategy")).toBe("speed_boost");
+});
+
+test("exposes installed desktop lifecycle control", () => {
+  render(<App />);
+  expect(screen.getByRole("button", { name: "Start Rampage with Windows" })).toBeInTheDocument();
 });

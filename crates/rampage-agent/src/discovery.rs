@@ -1,5 +1,13 @@
-use rampage_protocol::{ResourceClass, ResourceQuantityV1};
-use std::{collections::BTreeMap, path::Path, process::Command};
+use rampage_protocol::{
+    ModelBackend, ModelMemoryKind, ModelParallelism, ModelRuntimeOfferV1, ModelRuntimeStatus,
+    ResourceClass, ResourceQuantityV1,
+};
+use serde::Deserialize;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    process::Command,
+};
 use sysinfo::{Disks, System};
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -116,6 +124,129 @@ pub fn ollama_available() -> bool {
         .build()
         .and_then(|client| client.get("http://127.0.0.1:11434/api/tags").send())
         .is_ok_and(|response| response.status().is_success())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelRuntimeManifestV1 {
+    schema: String,
+    profiles: Vec<ModelRuntimeOfferV1>,
+}
+
+/// Advertise only runtimes that are already local or backed by an explicit qualification
+/// manifest. Merely finding a GPU never implies that cross-host model sharding is safe.
+pub fn discover_model_runtimes(
+    resources: &[ResourceQuantityV1],
+    has_ollama: bool,
+) -> Result<Vec<ModelRuntimeOfferV1>, String> {
+    let mut profiles = Vec::new();
+    if has_ollama {
+        let gpu_bytes = resource_bytes(resources, ResourceClass::GpuMemory);
+        let ram_bytes = resource_bytes(resources, ResourceClass::RamWorkingSet);
+        let (memory_kind, available_model_bytes) = if gpu_bytes > 0 {
+            (ModelMemoryKind::DedicatedGpu, gpu_bytes)
+        } else {
+            (ModelMemoryKind::Host, ram_bytes)
+        };
+        if available_model_bytes > 0 {
+            let runtime_version = ollama_version().unwrap_or_else(|| "detected-local".into());
+            profiles.push(ModelRuntimeOfferV1 {
+                schema: ModelRuntimeOfferV1::SCHEMA.into(),
+                adapter: "rampage.ollama.v1".into(),
+                backend: ModelBackend::LocalOllama,
+                runtime_version: runtime_version.clone(),
+                runtime_digest: format!("shipped-local:{runtime_version}"),
+                compatibility_key: format!(
+                    "ollama-{}-{}-{runtime_version}",
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                ),
+                memory_kind,
+                available_model_bytes,
+                supported_parallelism: BTreeSet::from([
+                    ModelParallelism::WholeModel,
+                    ModelParallelism::Replica,
+                ]),
+                status: ModelRuntimeStatus::ShippedLocal,
+                certification_digest: None,
+            });
+        }
+    }
+
+    let Some(path) = std::env::var_os("RAMPAGE_MODEL_RUNTIME_MANIFEST") else {
+        return Ok(profiles);
+    };
+    let payload = std::fs::read(&path).map_err(|error| {
+        format!(
+            "could not read model runtime manifest {}: {error}",
+            Path::new(&path).display()
+        )
+    })?;
+    let manifest: ModelRuntimeManifestV1 = serde_json::from_slice(&payload)
+        .map_err(|error| format!("model runtime manifest is invalid: {error}"))?;
+    if manifest.schema != "rampage.model-runtime-manifest.v1" {
+        return Err("model runtime manifest has an unsupported schema".into());
+    }
+    if manifest.profiles.len() > 16 {
+        return Err("model runtime manifest exceeds the 16-profile limit".into());
+    }
+    let mut identities = BTreeSet::new();
+    for profile in manifest.profiles {
+        let adapter_matches_backend = matches!(
+            (profile.backend, profile.adapter.as_str()),
+            (ModelBackend::ExoMlx, "rampage.exo-mlx.v1")
+                | (ModelBackend::VllmRay, "rampage.vllm-ray.v1")
+        );
+        if profile.schema != ModelRuntimeOfferV1::SCHEMA
+            || profile.adapter.trim().is_empty()
+            || profile.runtime_version.trim().is_empty()
+            || profile.compatibility_key.trim().is_empty()
+            || profile.available_model_bytes == 0
+            || profile.status == ModelRuntimeStatus::ShippedLocal
+            || !adapter_matches_backend
+        {
+            return Err("model runtime manifest contains a malformed profile".into());
+        }
+        if !identities.insert((profile.backend, profile.compatibility_key.clone())) {
+            return Err("model runtime manifest contains a duplicate compatibility group".into());
+        }
+        if profile.status == ModelRuntimeStatus::Qualified
+            && !profile.is_qualified_for_distributed()
+        {
+            return Err(
+                "qualified model runtime profile lacks exact runtime/campaign digests or distributed parallelism"
+                    .into(),
+            );
+        }
+        profiles.push(profile);
+    }
+    Ok(profiles)
+}
+
+fn resource_bytes(resources: &[ResourceQuantityV1], class: ResourceClass) -> u64 {
+    resources
+        .iter()
+        .find(|resource| resource.class == class && resource.unit == "byte")
+        .map_or(0, |resource| resource.available)
+}
+
+fn ollama_version() -> Option<String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(750))
+        .build()
+        .ok()?;
+    let payload = client
+        .get("http://127.0.0.1:11434/api/version")
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json::<serde_json::Value>()
+        .ok()?;
+    payload
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
 }
 
 fn discover_nvidia_gpus() -> Vec<NvidiaGpu> {

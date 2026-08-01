@@ -13,9 +13,12 @@ $resolvedExecutable = (Resolve-Path $executablePath).Path
 $smokeRoot = Join-Path $root ('output\desktop-smoke-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $smokeRoot | Out-Null
 $oldData = $env:RAMPAGE_DATA_DIR
+$oldDiagnosticExit = $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS
 $env:RAMPAGE_DATA_DIR = $smokeRoot
+$env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = '30000'
 $desktop = Start-Process -FilePath $resolvedExecutable -PassThru
 $env:RAMPAGE_DATA_DIR = $oldData
+$env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = $oldDiagnosticExit
 
 try {
     $health = $null
@@ -37,6 +40,20 @@ try {
         $intelligence.capability -ne 'deterministic_only') {
         throw 'desktop did not autonomously start and enroll its local fabric'
     }
+    $null = $desktop.CloseMainWindow()
+    Start-Sleep -Milliseconds 750
+    if ($desktop.HasExited) { throw 'closing the desktop window exited instead of keeping the fabric in the tray' }
+    if (-not $desktop.WaitForExit(32000)) { throw 'desktop diagnostic exit did not complete' }
+    Start-Sleep -Milliseconds 500
+    $leaked = @(Get-Process | Where-Object {
+        $_.Path -and $_.Path.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $_.ProcessName -match '^rampage'
+    })
+    if ($leaked.Count -gt 0) {
+        $names = ($leaked | ForEach-Object { "$($_.ProcessName):$($_.Id)" }) -join ', '
+        foreach ($process in $leaked) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+        throw "desktop leaked Rampage sidecars after explicit tray-style exit: $names"
+    }
     [pscustomobject]@{
         result = 'PASS'
         controller = $health.status
@@ -47,21 +64,13 @@ try {
         mesh_endpoint_id = $health.mesh_endpoint_id
         nodes = $nodes.Count
         offers = $offers.Count
+        close_to_tray = $true
+        clean_explicit_exit = $true
         data_dir = $smokeRoot
     } | ConvertTo-Json
 } finally {
     if ($desktop -and -not $desktop.HasExited) {
         $null = $desktop.CloseMainWindow()
         if (-not $desktop.WaitForExit(5000)) { Stop-Process -Id $desktop.Id -Force }
-    }
-    Start-Sleep -Milliseconds 500
-    $leaked = @(Get-Process | Where-Object {
-        $_.Path -and $_.Path.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) -and
-        $_.ProcessName -match '^rampage'
-    })
-    if ($leaked.Count -gt 0) {
-        $names = ($leaked | ForEach-Object { "$($_.ProcessName):$($_.Id)" }) -join ', '
-        foreach ($process in $leaked) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
-        throw "desktop leaked Rampage sidecars after exit: $names"
     }
 }

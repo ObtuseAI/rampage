@@ -10,6 +10,8 @@ runtime boundary, topology, failure behavior, and measured benefit have passed t
 | --- | --- | --- |
 | Rampage native whole-job adapters | Shipped | Preferred for heterogeneous consumer machines and independent work |
 | Local Ollama | Shipped | Loopback-only, model must already exist, signed lease and receipt required |
+| Model strategy planner | Shipped | Read-only previews for maximum model, speed, throughput, efficiency, and balanced objectives; no execution authority |
+| Exo / MLX distributed | Candidate | Exact runtime/compatibility manifest and backend-specific topology campaign required before launch |
 | llama.cpp RPC | Blocked | No adapter or port exposure until an upstream patched release and Rampage isolation campaign exist |
 | vLLM single-node | Candidate | Linux/WSL qualification required; keep tensor parallelism inside a proven node topology |
 | vLLM multi-node pipeline/Ray | Candidate | Only for a model that cannot fit one node and only after measured topology beats whole-job/replica baselines |
@@ -60,3 +62,7 @@ alpha. Rampage may use it in research fixtures, but not as an autonomous product
 
 This design lets Rampage adopt a safer or faster backend later without letting a model or plugin
 turn an experimental network service into authority.
+
+The implemented strategy and runtime-profile contracts are described in
+[MODEL_FABRIC.md](MODEL_FABRIC.md). A `ready` planning result is still a preview; it cannot mint a
+lease or start a backend.

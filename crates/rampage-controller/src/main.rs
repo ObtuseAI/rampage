@@ -10,8 +10,8 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use rampage_controller::{
-    AdmissionPolicy, ResourceReservation, choose_offer_with_topology, plan_shard_set,
-    score_offer_with_topology,
+    AdmissionPolicy, ResourceReservation, choose_offer_with_topology, plan_model_session,
+    plan_shard_set, score_offer_with_topology,
 };
 use rampage_ledger::{Ledger, LedgerEvent};
 use rampage_mesh::{MeshConfig, MeshMode, MeshNode};
@@ -22,7 +22,7 @@ use rampage_protocol::{
     ArtifactRefV1, ArtifactTransferOperation, CapabilityLeaseV1, EnrollmentInviteV1,
     EnrollmentRequestV1, ExecutionReceiptV1, JobSpecV1, JobState, LINK_BENCHMARK_TRANSFER_BYTES,
     MAX_ARTIFACT_TRANSFER_BYTES, MeshControlRequestV1, MeshControlResponseV1, MeshEndpointRecordV1,
-    NodeIdentityV1, ResourceOfferV1, ShardSetV1, StorageClass, WorkClaimV1,
+    ModelSessionRequestV1, NodeIdentityV1, ResourceOfferV1, ShardSetV1, StorageClass, WorkClaimV1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -61,6 +61,7 @@ struct AppState {
     artifact_replicas: Arc<RwLock<HashMap<(String, Uuid), ArtifactRefV1>>>,
     artifact_store: Arc<rampage_storage::CasStore>,
     local_api_token: Arc<String>,
+    admission_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -221,6 +222,7 @@ async fn main() -> anyhow::Result<()> {
             load_or_create_secret(&data_dir.join("storage.key"))?,
         )?),
         local_api_token: local_api_token.clone(),
+        admission_gate: Arc::new(tokio::sync::Mutex::new(())),
     };
     let mesh_state = state.clone();
     let protected = Router::new()
@@ -232,6 +234,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/offers", get(list_offers).post(register_offer))
         .route("/v1/jobs", post(submit_job))
         .route("/v1/jobs/plan", post(plan_job))
+        .route("/v1/model-sessions/plan", post(plan_model_session_request))
         .route("/v1/shard-sets", post(submit_shard_set))
         .route("/v1/shard-sets/plan", post(plan_shard_set_request))
         .route("/v1/shard-sets/{set_id}", get(shard_set_status))
@@ -658,6 +661,7 @@ async fn submit_job(
             Json(json!({"error": error.to_string()})),
         )
     })?;
+    let _admission_guard = state.admission_gate.lock().await;
     if let Some(existing_job_id) = state
         .idempotency
         .read()
@@ -670,6 +674,14 @@ async fn submit_job(
             .map_err(lock_error)?
             .get(&existing_job_id)
     {
+        if serde_json::to_value(&existing.job).map_err(internal_error)?
+            != serde_json::to_value(&job).map_err(internal_error)?
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error": "job idempotency key is already bound to other data"})),
+            ));
+        }
         return Ok((StatusCode::OK, Json(existing.lease.clone())));
     }
     state
@@ -767,6 +779,7 @@ async fn submit_shard_set(
             Json(json!({"error": error.to_string()})),
         )
     })?;
+    let _admission_guard = state.admission_gate.lock().await;
 
     let existing = state
         .shard_sets
@@ -1178,6 +1191,27 @@ async fn plan_job(
         "scores": scores,
         "mutated": false
     })))
+}
+
+async fn plan_model_session_request(
+    State(state): State<AppState>,
+    Json(request): Json<ModelSessionRequestV1>,
+) -> Result<Json<rampage_controller::ModelSessionPlan>, (StatusCode, Json<Value>)> {
+    let now = chrono::Utc::now();
+    request.validate_at(now).map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": error.to_string()})),
+        )
+    })?;
+    let offers = state
+        .offers
+        .read()
+        .map_err(lock_error)?
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(Json(plan_model_session(&request, &offers, now)))
 }
 
 fn input_locality(

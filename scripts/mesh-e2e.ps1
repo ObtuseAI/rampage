@@ -1,11 +1,26 @@
+param(
+    [string]$ControllerExecutable = 'target\debug\rampage-controller.exe',
+    [string]$AgentExecutable = 'target\debug\rampage-agent.exe'
+)
+
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $runRoot = Join-Path $root ('output\mesh-e2e-' + [guid]::NewGuid().ToString('N'))
 $controllerData = Join-Path $runRoot 'controller'
 $agentData = Join-Path $runRoot 'agent'
 New-Item -ItemType Directory -Force -Path $controllerData, $agentData | Out-Null
-$controllerExe = Join-Path $root 'target\debug\rampage-controller.exe'
-$agentExe = Join-Path $root 'target\debug\rampage-agent.exe'
+$controllerPath = if ([System.IO.Path]::IsPathRooted($ControllerExecutable)) {
+    $ControllerExecutable
+} else {
+    Join-Path $root $ControllerExecutable
+}
+$agentPath = if ([System.IO.Path]::IsPathRooted($AgentExecutable)) {
+    $AgentExecutable
+} else {
+    Join-Path $root $AgentExecutable
+}
+$controllerExe = (Resolve-Path $controllerPath).Path
+$agentExe = (Resolve-Path $agentPath).Path
 $inviteFile = Join-Path $runRoot 'invite.json'
 $agentKey = Join-Path $agentData 'agent.key'
 

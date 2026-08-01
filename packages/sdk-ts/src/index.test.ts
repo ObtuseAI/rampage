@@ -39,6 +39,47 @@ describe("RampageClient", () => {
     vi.unstubAllGlobals();
   });
 
+  it("previews model strategy without implying execution authority", async () => {
+    const payload = {
+      schema: "rampage.model-session-plan.v1",
+      session_id: "session-1",
+      strategy: "speed_boost",
+      state: "qualification_required",
+      distributed: true,
+      required_bytes: 1,
+      observed_fabric_bytes: 2,
+      maximum_supported_bytes: 2,
+      predicted_speedup_milli: 1300,
+      placements: [],
+      blockers: ["qualification required"],
+      warnings: [],
+      proposed_local_endpoint: null,
+      execution_authority: "none_preview_only",
+      reason: "preview",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new RampageClient(undefined, "local-token");
+    const request = {
+      schema: "rampage.model-session-request.v1" as const,
+      session_id: "session-1",
+      model_id: "local/model",
+      estimated_weight_bytes: 1,
+      kv_cache_bytes: 0,
+      context_tokens: 4096,
+      strategy: "speed_boost" as const,
+      max_nodes: 4,
+      deadline: "2026-08-02T00:00:00Z",
+      idempotency_key: "session-1",
+    };
+    expect((await client.planModelSession(request)).execution_authority).toBe("none_preview_only");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://127.0.0.1:47831/v1/model-sessions/plan");
+    vi.unstubAllGlobals();
+  });
+
   it("uses the bounded shard-set planning and status routes", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({

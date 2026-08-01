@@ -1,10 +1,68 @@
 use std::{path::PathBuf, sync::Mutex, time::Duration};
 use sysinfo::{Pid, System};
-use tauri::{AppHandle, Manager};
+use tauri::{
+    AppHandle, Manager, WindowEvent,
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
+#[cfg(not(target_os = "windows"))]
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_shell::{ShellExt, process::CommandChild};
+#[cfg(target_os = "windows")]
+use winreg::{
+    RegKey, RegValue,
+    enums::{HKEY_CURRENT_USER, RegType},
+};
 
 #[derive(Default)]
 struct Sidecars(Mutex<Vec<CommandChild>>);
+
+const BACKGROUND_ARG: &str = "--background";
+const AUTOSTART_NAME: &str = "Rampage";
+#[cfg(target_os = "windows")]
+const AUTOSTART_RUN_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
+#[cfg(target_os = "windows")]
+const AUTOSTART_APPROVAL_KEY: &str =
+    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+
+fn launched_in_background<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter().any(|arg| arg.as_ref() == BACKGROUND_ARG)
+}
+
+fn should_focus_existing_instance(args: &[String]) -> bool {
+    !launched_in_background(args)
+}
+
+fn diagnostic_exit_delay(value: Option<&str>) -> Option<Duration> {
+    value
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|milliseconds| (1_000..=180_000).contains(milliseconds))
+        .map(Duration::from_millis)
+}
+
+fn schedule_diagnostic_exit(app: &AppHandle) {
+    let value = std::env::var("RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS").ok();
+    let Some(delay) = diagnostic_exit_delay(value.as_deref()) else {
+        return;
+    };
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(delay).await;
+        handle.exit(0);
+    });
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
 
 fn descendant_pids(system: &System, root: Pid, output: &mut Vec<Pid>) {
     for (pid, process) in system.processes() {
@@ -25,6 +83,12 @@ fn kill_process_tree(child: CommandChild) {
         if let Some(process) = system.process(pid) {
             let _ = process.kill();
         }
+    }
+    // Kill the root through the OS snapshot before asking the shell plugin to release it. During
+    // Tauri shutdown the plugin runtime is already winding down, so relying on its channel alone
+    // can strand a direct sidecar such as the controller.
+    if let Some(process) = system.process(Pid::from_u32(child.pid())) {
+        let _ = process.kill();
     }
     let _ = child.kill();
 }
@@ -53,6 +117,94 @@ fn fabric_mode(app: AppHandle) -> Result<&'static str, String> {
     } else {
         "owner"
     })
+}
+
+#[tauri::command]
+fn autostart_enabled(app: AppHandle) -> Result<bool, String> {
+    platform_autostart_enabled(&app)
+}
+
+#[tauri::command]
+fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    platform_set_autostart(&app, enabled)?;
+    platform_autostart_enabled(&app)
+}
+
+#[cfg(target_os = "windows")]
+fn autostart_command() -> Result<String, String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    Ok(format!("\"{}\" {BACKGROUND_ARG}", executable.display()))
+}
+
+#[cfg(target_os = "windows")]
+fn platform_autostart_enabled(_app: &AppHandle) -> Result<bool, String> {
+    let current_user = RegKey::predef(HKEY_CURRENT_USER);
+    let run = current_user
+        .open_subkey(AUTOSTART_RUN_KEY)
+        .map_err(|error| error.to_string())?;
+    let configured: String = match run.get_value(AUTOSTART_NAME) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(configured == autostart_command()?)
+}
+
+#[cfg(target_os = "windows")]
+fn platform_set_autostart(_app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let current_user = RegKey::predef(HKEY_CURRENT_USER);
+    let run = current_user
+        .open_subkey_with_flags(AUTOSTART_RUN_KEY, winreg::enums::KEY_SET_VALUE)
+        .map_err(|error| error.to_string())?;
+    if enabled {
+        run.set_value(AUTOSTART_NAME, &autostart_command()?)
+            .map_err(|error| error.to_string())?;
+        if let Ok(approved) = current_user
+            .open_subkey_with_flags(AUTOSTART_APPROVAL_KEY, winreg::enums::KEY_SET_VALUE)
+        {
+            approved
+                .set_raw_value(
+                    AUTOSTART_NAME,
+                    &RegValue {
+                        vtype: RegType::REG_BINARY,
+                        bytes: vec![2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+    } else {
+        if let Err(error) = run.delete_value(AUTOSTART_NAME)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error.to_string());
+        }
+        if let Ok(approved) = current_user
+            .open_subkey_with_flags(AUTOSTART_APPROVAL_KEY, winreg::enums::KEY_SET_VALUE)
+            && let Err(error) = approved.delete_value(AUTOSTART_NAME)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error.to_string());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_autostart_enabled(app: &AppHandle) -> Result<bool, String> {
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_set_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable()
+    } else {
+        manager.disable()
+    }
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -234,20 +386,129 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn install_desktop_lifecycle(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let role = if runtime_dir(app.handle())?
+        .join("remote-invite.json")
+        .is_file()
+    {
+        "Worker active"
+    } else {
+        "Owner fabric active"
+    };
+    let status = MenuItem::with_id(app, "fabric_status", role, false, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "Open Rampage", true, None::<&str>)?;
+    let start_at_login = CheckMenuItem::with_id(
+        app,
+        "start_at_login",
+        "Start with Windows",
+        true,
+        platform_autostart_enabled(app.handle()).unwrap_or(false),
+        None::<&str>,
+    )?;
+    let emergency_stop = MenuItem::with_id(
+        app,
+        "emergency_stop",
+        "Emergency stop sharing",
+        true,
+        None::<&str>,
+    )?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Rampage", true, None::<&str>)?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &status,
+            &open,
+            &start_at_login,
+            &emergency_stop,
+            &separator,
+            &quit,
+        ],
+    )?;
+    TrayIconBuilder::with_id("rampage")
+        .icon(
+            app.default_window_icon()
+                .ok_or("Rampage application icon is missing")?
+                .clone(),
+        )
+        .tooltip(format!("Rampage — {role}"))
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_main_window(app),
+            "start_at_login" => {
+                let enabled = platform_autostart_enabled(app).unwrap_or(false);
+                let result = platform_set_autostart(app, !enabled);
+                if result.is_err() {
+                    show_main_window(app);
+                }
+            }
+            "emergency_stop" => {
+                let _ = local_stop(app.clone());
+                show_main_window(app);
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                show_main_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+
+    if let Some(window) = app.get_webview_window("main")
+        && launched_in_background(std::env::args())
+    {
+        let _ = window.hide();
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if should_focus_existing_instance(&args) {
+                show_main_window(app);
+            }
+        }))
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("Rampage")
+                .arg(BACKGROUND_ARG)
+                .build(),
+        )
         .plugin(tauri_plugin_shell::init())
+        .on_window_event(|window, event| {
+            if window.label() == "main"
+                && let WindowEvent::CloseRequested { api, .. } = event
+            {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .manage(Sidecars::default())
         .setup(|app| {
             launch_fabric(app.handle()).map_err(std::io::Error::other)?;
+            install_desktop_lifecycle(app)?;
+            schedule_diagnostic_exit(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             local_stop,
             fabric_mode,
             controller_token,
-            join_remote
+            join_remote,
+            autostart_enabled,
+            set_autostart
         ])
         .build(tauri::generate_context!())
         .expect("error while building Rampage");
@@ -260,4 +521,44 @@ pub fn run() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_exact_background_argument_hides_the_window() {
+        assert!(launched_in_background(["rampage.exe", BACKGROUND_ARG]));
+        assert!(!launched_in_background([
+            "rampage.exe",
+            "--background-worker"
+        ]));
+    }
+
+    #[test]
+    fn diagnostic_exit_is_explicit_and_bounded() {
+        assert_eq!(
+            diagnostic_exit_delay(Some("1000")),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            diagnostic_exit_delay(Some("180000")),
+            Some(Duration::from_secs(180))
+        );
+        assert_eq!(diagnostic_exit_delay(Some("999")), None);
+        assert_eq!(diagnostic_exit_delay(Some("not-a-number")), None);
+        assert_eq!(diagnostic_exit_delay(None), None);
+    }
+
+    #[test]
+    fn second_instance_restores_only_interactive_launches() {
+        assert!(should_focus_existing_instance(&[
+            "rampage-desktop.exe".into()
+        ]));
+        assert!(!should_focus_existing_instance(&[
+            "rampage-desktop.exe".into(),
+            BACKGROUND_ARG.into()
+        ]));
+    }
 }

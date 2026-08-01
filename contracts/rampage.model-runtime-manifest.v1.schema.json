@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rampage.local/contracts/rampage.model-runtime-manifest.v1.schema.json",
+  "title": "Rampage Qualified Model Runtime Manifest V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "profiles"],
+  "properties": {
+    "schema": { "const": "rampage.model-runtime-manifest.v1" },
+    "profiles": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "adapter",
+          "backend",
+          "runtime_version",
+          "runtime_digest",
+          "compatibility_key",
+          "memory_kind",
+          "available_model_bytes",
+          "supported_parallelism",
+          "status"
+        ],
+        "properties": {
+          "schema": { "const": "rampage.model-runtime-offer.v1" },
+          "adapter": { "enum": ["rampage.exo-mlx.v1", "rampage.vllm-ray.v1"] },
+          "backend": { "enum": ["exo_mlx", "vllm_ray"] },
+          "runtime_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "runtime_digest": { "type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$" },
+          "compatibility_key": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "memory_kind": { "enum": ["dedicated_gpu", "unified", "host"] },
+          "available_model_bytes": { "type": "integer", "minimum": 1, "maximum": 17592186044416 },
+          "supported_parallelism": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "enum": ["whole_model", "pipeline", "tensor", "replica", "speculative"] }
+          },
+          "status": { "enum": ["candidate", "qualified"] },
+          "certification_digest": { "type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$" }
+        }
+      }
+    }
+  }
+}

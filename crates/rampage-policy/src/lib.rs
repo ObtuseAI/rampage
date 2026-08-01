@@ -577,6 +577,7 @@ mod tests {
                     owner_idle: true,
                 },
                 adapters: BTreeSet::from(["rampage.hash.v1".into()]),
+                model_runtimes: Vec::new(),
                 link_benchmark: None,
                 mesh_endpoint: None,
                 signature: "agent-signed".into(),

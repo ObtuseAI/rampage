@@ -53,6 +53,35 @@ def test_topology_uses_the_token_protected_offer_route() -> None:
     assert client.topology() == []
 
 
+def test_model_session_planning_is_exposed_as_preview_only() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-rampage-token"] == "local-token"
+        assert request.url.path == "/v1/model-sessions/plan"
+        return httpx.Response(
+            200,
+            json={
+                "schema": "rampage.model-session-plan.v1",
+                "execution_authority": "none_preview_only",
+                "state": "qualification_required",
+            },
+        )
+
+    client = RampageClient(token="local-token")
+    client._client.close()
+    client._client = httpx.Client(
+        base_url="http://127.0.0.1:47831",
+        headers={"x-rampage-token": "local-token"},
+        transport=httpx.MockTransport(handler),
+    )
+    result = client.plan_model_session(
+        {
+            "schema": "rampage.model-session-request.v1",
+            "strategy": "maximum_model_size",
+        }
+    )
+    assert result["execution_authority"] == "none_preview_only"
+
+
 def test_shard_set_plan_and_status_use_bounded_routes() -> None:
     requests: list[str] = []
 

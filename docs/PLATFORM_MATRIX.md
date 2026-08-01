@@ -3,9 +3,9 @@
 This matrix distinguishes shipped, source-portable, and architectural support. “Designed” is not a
 binary release claim.
 
-| Platform | Installable 0.1 package | Controller | Worker | Intended donation profile | Evidence |
+| Platform | Installable 0.2 package | Controller | Worker | Intended donation profile | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| Windows 11 x64 | MSI and NSIS | Shipped | Shipped | CPU, RAM cache, NVIDIA GPU/VRAM, disk | Full local, direct-QUIC, artifact, Ollama, desktop, and installer gates |
+| Windows 11 x64 | MSI and NSIS | Shipped | Shipped | CPU, RAM cache, NVIDIA GPU/VRAM, disk | Full local, direct-QUIC, artifact, Ollama, native tray lifecycle, desktop, and installer gates |
 | Windows 10 x64 | Not qualified | Source likely portable | Source likely portable | Same as Windows 11, hardware-dependent | Unexecuted |
 | macOS Apple Silicon | Not shipped | Rust source portable | Rust source portable | CPU/GPU whole jobs, RAM cache, disk | Unexecuted; native packaging and discovery adapters required |
 | Linux x64 | Not shipped | Rust source portable | Rust source portable | CPU, vendor GPU/VRAM, RAM cache, disk | Unexecuted; GTK dependency warning must be resolved or accepted before release |
@@ -20,6 +20,11 @@ Rampage pools schedulable work and encrypted artifacts. It does not pretend remo
 locally addressable hardware. Whole-job placement and independent shards are supported; cross-host
 tensor sharding remains disabled until a topology-aware backend passes dedicated correctness,
 performance, failure-recovery, and privacy gates.
+
+The five-way Model Fabric planner and desktop toggle are shipped on Windows x64. They may report a
+theoretical compatible placement but cannot launch it. Exo/MLX distributed execution is currently a
+macOS-focused candidate (with Linux CPU support upstream); vLLM/Ray remains a Linux/WSL homogeneous
+CUDA candidate. Neither is bundled or qualified by this release. See [MODEL_FABRIC.md](MODEL_FABRIC.md).
 
 Phones and tablets are useful when their constraints shape the workload: verification, hashing,
 embedding slices, preprocessing, evaluation shards, and cache replication. They are intentionally

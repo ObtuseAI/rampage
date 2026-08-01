@@ -1,9 +1,10 @@
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{Duration, Utc};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use rampage_protocol::{
-    ArtifactRefV1, JobSpecV1, ResourceClass, ResourceRequestV1, ShardSetV1, WorkloadTrust,
+    ArtifactRefV1, ComputeStrategy, JobSpecV1, ModelSessionRequestV1, ResourceClass,
+    ResourceRequestV1, ShardSetV1, WorkloadTrust,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,6 +57,21 @@ enum Command {
         max_tokens: u32,
         #[arg(long, default_value_t = 300)]
         timeout_seconds: u64,
+    },
+    /// Preview a governed local or distributed LLM placement without issuing execution authority.
+    ModelPlan {
+        #[arg(default_value = "local/target-model")]
+        model: String,
+        #[arg(long, default_value_t = 40)]
+        weights_gib: u64,
+        #[arg(long, default_value_t = 4)]
+        kv_cache_gib: u64,
+        #[arg(long, default_value_t = 32_768)]
+        context_tokens: u32,
+        #[arg(long, value_enum, default_value_t = StrategyArg::MaximumModelSize)]
+        strategy: StrategyArg,
+        #[arg(long, default_value_t = 8)]
+        max_nodes: u16,
     },
     /// Store a local file in the controller's encrypted content-addressed store.
     ArtifactPut {
@@ -158,6 +174,27 @@ enum Command {
     },
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum StrategyArg {
+    MaximumModelSize,
+    SpeedBoost,
+    MaximumThroughput,
+    Efficiency,
+    AutonomousBalanced,
+}
+
+impl From<StrategyArg> for ComputeStrategy {
+    fn from(value: StrategyArg) -> Self {
+        match value {
+            StrategyArg::MaximumModelSize => Self::MaximumModelSize,
+            StrategyArg::SpeedBoost => Self::SpeedBoost,
+            StrategyArg::MaximumThroughput => Self::MaximumThroughput,
+            StrategyArg::Efficiency => Self::Efficiency,
+            StrategyArg::AutonomousBalanced => Self::AutonomousBalanced,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -215,6 +252,30 @@ async fn main() -> anyhow::Result<()> {
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
+        }
+        Command::ModelPlan {
+            model,
+            weights_gib,
+            kv_cache_gib,
+            context_tokens,
+            strategy,
+            max_nodes,
+        } => {
+            let request = make_model_session_request(
+                model,
+                weights_gib,
+                kv_cache_gib,
+                context_tokens,
+                strategy.into(),
+                max_nodes,
+            )?;
+            print_json(
+                post_json(
+                    &format!("{}/v1/model-sessions/plan", cli.controller),
+                    &request,
+                )
+                .await?,
+            )
         }
         Command::ArtifactPut {
             path,
@@ -498,6 +559,35 @@ fn make_generation_job(
     }
 }
 
+fn make_model_session_request(
+    model: String,
+    weights_gib: u64,
+    kv_cache_gib: u64,
+    context_tokens: u32,
+    strategy: ComputeStrategy,
+    max_nodes: u16,
+) -> anyhow::Result<ModelSessionRequestV1> {
+    let gib = 1024_u64 * 1024 * 1024;
+    let request = ModelSessionRequestV1 {
+        schema: ModelSessionRequestV1::SCHEMA.into(),
+        session_id: Uuid::now_v7(),
+        model_id: model,
+        estimated_weight_bytes: weights_gib
+            .checked_mul(gib)
+            .context("model weight estimate overflowed")?,
+        kv_cache_bytes: kv_cache_gib
+            .checked_mul(gib)
+            .context("KV-cache estimate overflowed")?,
+        context_tokens,
+        strategy,
+        max_nodes,
+        deadline: Utc::now() + Duration::minutes(10),
+        idempotency_key: Uuid::now_v7().to_string(),
+    };
+    request.validate_at(Utc::now())?;
+    Ok(request)
+}
+
 fn make_artifact_hash_job(input: ArtifactRefV1) -> JobSpecV1 {
     JobSpecV1 {
         schema: JobSpecV1::SCHEMA.into(),
@@ -646,14 +736,11 @@ async fn fetch_json(url: &str) -> anyhow::Result<Value> {
     if let Some(token) = local_token() {
         request = request.header("x-rampage-token", token);
     }
-    request
+    let response = request
         .send()
         .await
-        .with_context(|| format!("request failed: {url}"))?
-        .error_for_status()?
-        .json()
-        .await
-        .context("response was not valid JSON")
+        .with_context(|| format!("request failed: {url}"))?;
+    decode_json_response(response, url).await
 }
 
 async fn post_json<T: serde::Serialize + ?Sized>(url: &str, body: &T) -> anyhow::Result<Value> {
@@ -662,27 +749,86 @@ async fn post_json<T: serde::Serialize + ?Sized>(url: &str, body: &T) -> anyhow:
     if let Some(token) = local_token() {
         request = request.header("x-rampage-token", token);
     }
-    request
+    let response = request
         .send()
         .await
-        .with_context(|| format!("request failed: {url}"))?
-        .error_for_status()?
-        .json()
+        .with_context(|| format!("request failed: {url}"))?;
+    decode_json_response(response, url).await
+}
+
+async fn decode_json_response(response: reqwest::Response, url: &str) -> anyhow::Result<Value> {
+    let status = response.status();
+    let body = response
+        .text()
         .await
-        .context("response was not valid JSON")
+        .with_context(|| format!("could not read response body: {url}"))?;
+    if !status.is_success() {
+        let reason = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| body.trim().to_owned());
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            anyhow::bail!(
+                "controller rejected authentication ({status}): {reason}; expected token at {} or RAMPAGE_TOKEN",
+                default_token_path().display()
+            );
+        }
+        anyhow::bail!("controller request failed ({status}): {reason}");
+    }
+    serde_json::from_str(&body).context("response was not valid JSON")
 }
 
 fn local_token() -> Option<String> {
     std::env::var("RAMPAGE_TOKEN")
         .ok()
-        .or_else(|| {
-            let data_dir = std::env::var_os("RAMPAGE_DATA_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(".rampage/runtime"));
-            std::fs::read_to_string(data_dir.join("controller.token")).ok()
-        })
+        .or_else(|| std::fs::read_to_string(default_token_path()).ok())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn default_token_path() -> PathBuf {
+    if let Some(data_dir) = std::env::var_os("RAMPAGE_DATA_DIR") {
+        return PathBuf::from(data_dir).join("controller.token");
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(app_data) = std::env::var_os("APPDATA") {
+        return PathBuf::from(app_data)
+            .join("ai.obtuse.rampage")
+            .join("runtime")
+            .join("controller.token");
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("ai.obtuse.rampage")
+            .join("runtime")
+            .join("controller.token");
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
+            return PathBuf::from(data_home)
+                .join("ai.obtuse.rampage")
+                .join("runtime")
+                .join("controller.token");
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("ai.obtuse.rampage")
+                .join("runtime")
+                .join("controller.token");
+        }
+    }
+    PathBuf::from(".rampage/runtime/controller.token")
 }
 
 fn parse_storage_class(value: &str) -> anyhow::Result<&'static str> {

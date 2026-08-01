@@ -15,6 +15,7 @@ $readme = Get-Content -LiteralPath $readmePath -Raw
 foreach ($required in @(
     'Your machines.',
     'assets/rampage-arena-live.png',
+    'assets/rampage-model-fabric-grid.png',
     'assets/og-rampage.png',
     'architecture-graph',
     'AI DIRECT AUTHORITY',
@@ -25,7 +26,7 @@ foreach ($required in @(
     }
 }
 
-foreach ($required in @('```mermaid', 'docs/assets/rampage-arena-live.png', 'Built—not imagined')) {
+foreach ($required in @('```mermaid', 'docs/assets/rampage-arena-live.png', 'docs/assets/rampage-model-fabric-grid.png', 'Built—not imagined')) {
     if (-not $readme.Contains($required)) {
         throw "README showcase is missing required content: $required"
     }
