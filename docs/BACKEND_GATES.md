@@ -11,6 +11,7 @@ runtime boundary, topology, failure behavior, and measured benefit have passed t
 | Rampage native whole-job adapters | Shipped | Preferred for heterogeneous consumer machines and independent work |
 | Local Ollama | Shipped | Loopback-only, model must already exist, signed lease and receipt required |
 | Model strategy planner | Shipped | Read-only previews for maximum model, speed, throughput, efficiency, and balanced objectives; no execution authority |
+| Durable authority substrate | Shipped | Hash-chained controller epoch, one-shot durable worker/storage nonces, restart-preserving recovery, and STOP fencing |
 | Exo / MLX distributed | Candidate | Exact runtime/compatibility manifest and backend-specific topology campaign required before launch |
 | llama.cpp RPC | Blocked | No adapter or port exposure until an upstream patched release and Rampage isolation campaign exist |
 | vLLM single-node | Candidate | Linux/WSL qualification required; keep tensor parallelism inside a proven node topology |
@@ -62,6 +63,12 @@ alpha. Rampage may use it in research fixtures, but not as an autonomous product
 
 This design lets Rampage adopt a safer or faster backend later without letting a model or plugin
 turn an experimental network service into authority.
+
+The generic authority substrate for gate 4 and the stale-lease portion of gate 7 is implemented:
+signed job and storage authority carries the controller epoch; worker-local nonce consumption and
+highest-seen epochs survive restart; owner STOP advances the hash-chained epoch; and the controller
+rejects claims and receipts from the old generation. A distributed backend still needs its own
+model-session lease, peer allowlist enforcement, process teardown, and injected-failure campaign.
 
 The implemented strategy and runtime-profile contracts are described in
 [MODEL_FABRIC.md](MODEL_FABRIC.md). A `ready` planning result is still a preview; it cannot mint a

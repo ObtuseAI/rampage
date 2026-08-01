@@ -271,7 +271,7 @@ fn execute_one_work_item(
     let receipt = rampage_agent::execute_claim_with_store(
         &claim,
         identity.node_id,
-        identity.fencing_epoch,
+        claim.lease.fencing_epoch,
         signing_key,
         artifact_store,
     )?;
@@ -671,9 +671,17 @@ async fn serve_artifact_gateway(
                         )?;
                         anyhow::ensure!(
                             request.lease.node_id == node_id
-                                && request.lease.is_active_at(Utc::now(), 0),
+                                && request
+                                    .lease
+                                    .is_active_at(Utc::now(), request.lease.fencing_epoch),
                             "storage lease is not active for this node"
                         );
+                        store.accept_authority(
+                            "governor",
+                            request.lease.fencing_epoch,
+                            &request.lease.nonce,
+                            request.lease.expires_at,
+                        )?;
                         match request.lease.operation {
                             ArtifactTransferOperation::Put => {
                                 let required_replicas =

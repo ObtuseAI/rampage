@@ -33,6 +33,20 @@ All state transitions -> hash-chained evidence ledger
   parity, role-aware system tray, close-to-tray, start-at-login, explanations, replay, and owner
   controls. Explicit Quit owns deterministic sidecar cleanup.
 
+## Durable authority
+
+Signing a lease is necessary but not sufficient. The controller keeps a monotonic authority epoch
+in the hash-chained SQLite ledger. A normal crash or process restart reuses that durable epoch so
+recoverable work remains valid; an explicit owner STOP advances it before any later admission.
+Claims and receipts must match the controller's current epoch.
+
+Workers and artifact gateways verify the Governor signature first, then atomically consume the
+lease nonce and update their locally durable highest-seen epoch in the local CAS index beside the
+encrypted payloads. The same signed lease cannot execute or transfer twice, and a lower epoch
+remains rejected after the
+worker restarts. Lease expiry, one-shot nonce consumption, monotonic fencing, the local kill latch,
+and the evidence event are separate checks so no one volatile flag carries the whole safety claim.
+
 ## OnePool is a market of leases, not pooled RAM
 
 Remote RAM cannot safely or efficiently become transparent local RAM across commodity networks.
@@ -58,10 +72,10 @@ Donated drive space is a distributed content-addressed artifact layer, not a mou
 The controller ingests an artifact into its encrypted CAS, then obtains a short-lived signed storage
 lease before opening the worker's artifact QUIC protocol. Cache and scratch replicas may be
 recomputed; protected data requires at least two declared replicas. Every transfer validates its
-SHA-256 address, every worker encrypts chunks with its own local key, and replication, retrieval,
-input staging, and output registration become ledger events. Jobs declare artifact references; the
-controller stages missing inputs before issuing work, and receipts can return remotely retrievable
-outputs.
+SHA-256 address, every storage lease is consumed once, every worker encrypts chunks with its own
+local key, and replication, retrieval, input staging, and output registration become ledger events.
+Jobs declare artifact references; the controller stages missing inputs before issuing work, and
+receipts can return remotely retrievable outputs.
 
 ## Scheduling hierarchy
 
