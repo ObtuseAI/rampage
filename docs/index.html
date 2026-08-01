@@ -57,11 +57,11 @@
     </section>
 
     <section class="signal-strip" aria-label="Release qualification highlights">
-      <div><strong>44</strong><span>Rust tests</span></div>
+      <div><strong>49</strong><span>Rust tests</span></div>
       <div><strong>3/3</strong><span>shards recovered</span></div>
       <div><strong>QUIC</strong><span>direct private mesh</span></div>
       <div><strong>0</strong><span>AI authority grants</span></div>
-      <div><strong>STOP</strong><span>local and independent</span></div>
+      <div><strong>STOP</strong><span>local + epoch fenced</span></div>
     </section>
 
     <section class="showcase section" id="proof">
@@ -103,9 +103,9 @@
         <div class="graph-row graph-core">
           <div class="graph-node controller"><small>CONTROL</small><strong>Controller</strong><span>schedule · recover · reconcile</span></div>
           <div class="graph-connector">→</div>
-          <div class="graph-node governor"><small>TRUST KERNEL</small><strong>Governor</strong><span>policy · signatures · fencing</span></div>
+          <div class="graph-node governor"><small>TRUST KERNEL</small><strong>Governor</strong><span>policy · signatures · durable fencing</span></div>
           <div class="graph-connector">→</div>
-          <div class="graph-node lease"><small>NARROW WAIST</small><strong>Capability lease</strong><span>exact · scoped · expiring</span></div>
+          <div class="graph-node lease"><small>NARROW WAIST</small><strong>Capability lease</strong><span>exact · scoped · expiring · one-shot</span></div>
         </div>
         <div class="graph-arrow fan"><span>authenticated QUIC</span></div>
         <div class="graph-row graph-workers">
@@ -169,12 +169,12 @@
     <section class="section evidence">
       <div class="section-heading"><p class="eyebrow">NOT VAPORWARE</p><h2>Every big claim has a smaller proof.</h2></div>
       <div class="evidence-grid">
-        <article><b>LEASE</b><h3>Exact resource authority</h3><p>The Governor signs only the requested minimum resources after independently checking the selected offer.</p></article>
+        <article><b>LEASE</b><h3>Exact durable authority</h3><p>The Governor signs only checked minimum resources. Workers persist consumed nonces and the highest authority epoch across restart.</p></article>
         <article><b>SHARD</b><h3>Atomic pooled work</h3><p>A complete set is planned against one reservation book and admitted all-or-nothing, with explicit success thresholds.</p></article>
         <article><b>MESH</b><h3>Owned private transport</h3><p>Signed endpoint identity, pinned peers, and narrow QUIC routes replace dependency on a third-party tailnet.</p></article>
-        <article><b>CAS</b><h3>Encrypted donated storage</h3><p>Signed transfer leases bind digest, direction, node, size, class, expiry, and fencing epoch.</p></article>
+        <article><b>CAS</b><h3>Encrypted donated storage</h3><p>One-shot signed transfer leases bind digest, direction, node, size, class, expiry, and fencing epoch.</p></article>
         <article><b>RECEIPT</b><h3>Verifiable completion</h3><p>Workers sign the job result and artifact references; controller restart reconstructs durable status.</p></article>
-        <article><b>STOP</b><h3>Human-owned interruption</h3><p>The local kill latch remains usable when AI, network, controller, or remote peers are unavailable.</p></article>
+        <article><b>STOP</b><h3>Human-owned interruption</h3><p>Owner STOP advances the hash-chained epoch; old claims and receipts remain fenced after restart.</p></article>
       </div>
     </section>
 
