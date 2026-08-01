@@ -32,6 +32,11 @@ export interface ResourceOffer {
     available_model_bytes: number;
     status: "shipped_local" | "candidate" | "qualified";
     supported_parallelism: string[];
+    installed_models?: Array<{
+      model_id: string;
+      artifact_digest: string;
+      artifact_size_bytes: number;
+    }>;
   }>;
   link_benchmark?: {
     rtt_micros_p50: number;

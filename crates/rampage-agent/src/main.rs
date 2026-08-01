@@ -6,9 +6,11 @@ use clap::Parser;
 use ed25519_dalek::SigningKey;
 use rampage_protocol::{
     ArtifactTransferOperation, ArtifactTransferResponseV1, AvailabilityV1, DeviceKind,
-    EnrollmentInviteV1, EnrollmentRequestV1, ExecutionReceiptV1, LINK_BENCHMARK_TRANSFER_BYTES,
-    LinkBenchmarkV1, MeshControlRequestV1, MeshEndpointRecordV1, NodeIdentityV1, ResourceOfferV1,
-    StorageClass, WorkClaimV1,
+    EnrollmentInviteV1, EnrollmentRequestV1, ExecutionReceiptV1, JobState,
+    LINK_BENCHMARK_TRANSFER_BYTES, LinkBenchmarkV1, MAX_MODEL_OUTPUT_BYTES, MeshControlRequestV1,
+    MeshEndpointRecordV1, ModelExecutionReceiptV1, ModelInvocationFrameKind,
+    ModelInvocationFrameV1, ModelInvocationRequestV1, ModelUsageV1, NodeIdentityV1,
+    ResourceOfferV1, StorageClass, WorkClaimV1,
 };
 use rand::{RngCore, rngs::OsRng};
 use sha2::{Digest, Sha256};
@@ -50,6 +52,23 @@ struct Args {
     serve: bool,
 }
 
+fn ollama_loopback_base_url() -> anyhow::Result<String> {
+    let configured =
+        std::env::var("RAMPAGE_OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+    let parsed = reqwest::Url::parse(&configured)?;
+    anyhow::ensure!(
+        parsed.scheme() == "http"
+            && matches!(parsed.host_str(), Some("127.0.0.1" | "::1"))
+            && parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.query().is_none()
+            && parsed.fragment().is_none()
+            && matches!(parsed.path(), "" | "/"),
+        "RAMPAGE_OLLAMA_URL must be a plain HTTP loopback IP origin without credentials or a path"
+    );
+    Ok(configured.trim_end_matches('/').to_string())
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let data_dir = std::env::var_os("RAMPAGE_DATA_DIR")
@@ -67,6 +86,7 @@ fn main() -> anyhow::Result<()> {
     let identity_file = args.key_file.with_extension("identity.json");
     let (node_id, owner_id) =
         load_or_create_identity_ids(&identity_file, args.node_id, args.owner_id)?;
+    let ollama_base_url = ollama_loopback_base_url()?;
     let invitation = if let Some(path) = &args.invite_file {
         Some(serde_json::from_slice::<EnrollmentInviteV1>(&fs::read(
             path,
@@ -81,6 +101,7 @@ fn main() -> anyhow::Result<()> {
         &data_dir,
         node_id,
         artifact_store.clone(),
+        &ollama_base_url,
     )?;
     let identity = NodeIdentityV1 {
         schema: "rampage.node-identity.v1".into(),
@@ -109,12 +130,15 @@ fn main() -> anyhow::Result<()> {
         "rampage.eval-shard.v1".into(),
         "rampage.artifact-hash.v1".into(),
     ]);
-    let has_ollama = discovery::ollama_available();
+    let has_ollama = discovery::ollama_available(&ollama_base_url);
     if has_ollama {
         adapters.insert("rampage.ollama.v1".into());
     }
-    let model_runtimes = match discovery::discover_model_runtimes(&discovered.resources, has_ollama)
-    {
+    let model_runtimes = match discovery::discover_model_runtimes(
+        &discovered.resources,
+        has_ollama,
+        &ollama_base_url,
+    ) {
         Ok(profiles) => profiles,
         Err(error) => {
             eprintln!("model runtime profiles rejected; continuing fail-closed: {error}");
@@ -350,6 +374,7 @@ impl ControllerTransport {
         data_dir: &std::path::Path,
         node_id: Uuid,
         artifact_store: std::sync::Arc<rampage_storage::CasStore>,
+        ollama_base_url: &str,
     ) -> anyhow::Result<Self> {
         let Some(invitation) = invitation else {
             anyhow::ensure!(
@@ -390,12 +415,14 @@ impl ControllerTransport {
             signing_key.to_bytes(),
             &rampage_mesh::MeshConfig::default(),
         ))?;
-        runtime.spawn(serve_artifact_gateway(
+        runtime.spawn(serve_worker_gateway(
             endpoint.clone(),
             mesh_record.endpoint_id.clone(),
             node_id,
             governor_key.to_string(),
             artifact_store,
+            SigningKey::from_bytes(&signing_key.to_bytes()),
+            ollama_base_url.to_string(),
         ));
         Ok(Self::Mesh(MeshController {
             runtime,
@@ -633,25 +660,45 @@ fn validate_probe_response(
     Ok(())
 }
 
-async fn serve_artifact_gateway(
+async fn serve_worker_gateway(
     endpoint: iroh::Endpoint,
     controller_endpoint_id: String,
     node_id: Uuid,
     governor_public_key: String,
     store: std::sync::Arc<rampage_storage::CasStore>,
+    signing_key: SigningKey,
+    ollama_base_url: String,
 ) {
     while let Some(incoming) = endpoint.accept().await {
         let store = store.clone();
         let controller_endpoint_id = controller_endpoint_id.clone();
         let governor_public_key = governor_public_key.clone();
+        let signing_key = signing_key.clone();
+        let ollama_base_url = ollama_base_url.clone();
         tokio::spawn(async move {
             let Ok(connection) = incoming.await else {
                 return;
             };
-            if connection.alpn() != rampage_mesh::ARTIFACT_ALPN
-                || connection.remote_id().to_string() != controller_endpoint_id
-            {
-                connection.close(1_u8.into(), b"artifact peer denied");
+            let peer = connection.remote_id().to_string();
+            if peer != controller_endpoint_id {
+                connection.close(1_u8.into(), b"worker peer denied");
+                return;
+            }
+            if connection.alpn() == rampage_mesh::MODEL_ALPN {
+                serve_model_connection(
+                    connection,
+                    &peer,
+                    node_id,
+                    &governor_public_key,
+                    store,
+                    signing_key,
+                    ollama_base_url,
+                )
+                .await;
+                return;
+            }
+            if connection.alpn() != rampage_mesh::ARTIFACT_ALPN {
+                connection.close(1_u8.into(), b"worker protocol denied");
                 return;
             }
             while let Ok((mut send, mut receive)) = connection.accept_bi().await {
@@ -754,6 +801,381 @@ async fn serve_artifact_gateway(
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct OllamaChatChunk {
+    model: Option<String>,
+    message: Option<OllamaChatMessage>,
+    #[serde(default)]
+    done: bool,
+    done_reason: Option<String>,
+    prompt_eval_count: Option<u64>,
+    eval_count: Option<u64>,
+    error: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OllamaChatMessage {
+    #[serde(default)]
+    content: String,
+}
+
+struct OllamaCompletion {
+    finish_reason: String,
+    usage: Option<ModelUsageV1>,
+}
+
+async fn serve_model_connection(
+    connection: iroh::endpoint::Connection,
+    controller_endpoint_id: &str,
+    node_id: Uuid,
+    governor_public_key: &str,
+    store: std::sync::Arc<rampage_storage::CasStore>,
+    signing_key: SigningKey,
+    ollama_base_url: String,
+) {
+    while let Ok((mut send, mut receive)) = connection.accept_bi().await {
+        let controller_endpoint_id = controller_endpoint_id.to_string();
+        let governor_public_key = governor_public_key.to_string();
+        let store = store.clone();
+        let signing_key = signing_key.clone();
+        let ollama_base_url = ollama_base_url.clone();
+        tokio::spawn(async move {
+            let parsed = rampage_mesh::read_model_request(&mut receive).await;
+            let request_id = parsed
+                .as_ref()
+                .map(|request| request.request_id)
+                .unwrap_or_else(|_| Uuid::nil());
+            let result = async {
+                let request = parsed?;
+                rampage_policy::verify_model_session_lease_with_key(
+                    &governor_public_key,
+                    &request.lease,
+                )?;
+                anyhow::ensure!(
+                    request
+                        .lease
+                        .is_active_at(Utc::now(), request.lease.fencing_epoch)
+                        && request.is_valid_for(node_id, &controller_endpoint_id),
+                    "model invocation is outside its signed authority"
+                );
+                verify_local_ollama_model(&request, &ollama_base_url).await?;
+                store.accept_authority(
+                    "governor",
+                    request.lease.fencing_epoch,
+                    &request.lease.nonce,
+                    request.lease.expires_at,
+                )?;
+                run_ollama_invocation(&mut send, &request, &signing_key, &ollama_base_url).await
+            }
+            .await;
+            if let Err(error) = result {
+                let message = bounded_error(&error.to_string());
+                let frame = ModelInvocationFrameV1 {
+                    schema: ModelInvocationFrameV1::SCHEMA.into(),
+                    request_id,
+                    sequence: 0,
+                    kind: ModelInvocationFrameKind::Error,
+                    content: String::new(),
+                    finish_reason: None,
+                    error: Some(message),
+                    receipt: None,
+                };
+                let _ = rampage_mesh::write_model_frame(&mut send, &frame).await;
+            }
+            let _ = send.finish();
+        });
+    }
+}
+
+async fn verify_local_ollama_model(
+    request: &ModelInvocationRequestV1,
+    ollama_base_url: &str,
+) -> anyhow::Result<()> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let response = client
+        .get(format!("{ollama_base_url}/api/tags"))
+        .send()
+        .await?
+        .error_for_status()?;
+    let payload = bounded_json(response, 1024 * 1024).await?;
+    let exact = payload
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|models| {
+            models.iter().any(|model| {
+                let identifier = model
+                    .get("model")
+                    .or_else(|| model.get("name"))
+                    .and_then(serde_json::Value::as_str);
+                let digest = model
+                    .get("digest")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|value| {
+                        if value.starts_with("sha256:") {
+                            value.to_ascii_lowercase()
+                        } else {
+                            format!("sha256:{}", value.to_ascii_lowercase())
+                        }
+                    });
+                let size = model.get("size").and_then(serde_json::Value::as_u64);
+                identifier == Some(request.lease.model_id.as_str())
+                    && digest.as_deref() == Some(request.lease.model_digest.as_str())
+                    && size.is_some_and(|value| value > 0)
+            })
+        });
+    anyhow::ensure!(
+        exact,
+        "the leased Ollama model is not installed with the advertised digest"
+    );
+    Ok(())
+}
+
+async fn run_ollama_invocation(
+    send: &mut iroh::endpoint::SendStream,
+    request: &ModelInvocationRequestV1,
+    signing_key: &SigningKey,
+    ollama_base_url: &str,
+) -> anyhow::Result<()> {
+    let started_at = Utc::now();
+    let remaining = (request.lease.expires_at - started_at)
+        .to_std()
+        .unwrap_or_else(|_| std::time::Duration::from_secs(1));
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(remaining)
+        .build()?;
+    let mut options = serde_json::Map::from_iter([(
+        "num_predict".into(),
+        serde_json::json!(request.max_output_tokens),
+    )]);
+    if let Some(value) = request.temperature {
+        options.insert("temperature".into(), serde_json::json!(value));
+    }
+    if let Some(value) = request.top_p {
+        options.insert("top_p".into(), serde_json::json!(value));
+    }
+    let response = client
+        .post(format!("{ollama_base_url}/api/chat"))
+        .json(&serde_json::json!({
+            "model": request.lease.model_id,
+            "messages": request.messages,
+            "stream": true,
+            "options": options
+        }))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let reason = bounded_http_error(response).await;
+        anyhow::bail!("local Ollama rejected the model session ({status}): {reason}");
+    }
+
+    let mut response = response;
+    let mut buffered = Vec::new();
+    let mut output = Vec::new();
+    let mut sequence = 0_u64;
+    let mut completion = None;
+    let execution = async {
+        while let Some(chunk) = response.chunk().await? {
+            buffered.extend_from_slice(&chunk);
+            anyhow::ensure!(
+                buffered.len() <= 256 * 1024,
+                "Ollama emitted an oversized frame"
+            );
+            while let Some(newline) = buffered.iter().position(|byte| *byte == b'\n') {
+                let line = buffered.drain(..=newline).collect::<Vec<_>>();
+                if line[..line.len().saturating_sub(1)]
+                    .iter()
+                    .all(u8::is_ascii_whitespace)
+                {
+                    continue;
+                }
+                completion = process_ollama_line(
+                    send,
+                    request,
+                    &line[..line.len().saturating_sub(1)],
+                    &mut output,
+                    &mut sequence,
+                )
+                .await?;
+                if completion.is_some() {
+                    break;
+                }
+            }
+            if completion.is_some() {
+                break;
+            }
+        }
+        if completion.is_none() && !buffered.iter().all(u8::is_ascii_whitespace) {
+            completion =
+                process_ollama_line(send, request, &buffered, &mut output, &mut sequence).await?;
+        }
+        completion.ok_or_else(|| anyhow::anyhow!("Ollama stream ended without a terminal frame"))
+    }
+    .await;
+
+    let finished_at = Utc::now();
+    let (state, finish_reason, usage, error) = match execution {
+        Ok(completion) => (
+            JobState::Succeeded,
+            Some(completion.finish_reason),
+            completion.usage,
+            None,
+        ),
+        Err(error) => (
+            JobState::Failed,
+            None,
+            None,
+            Some(bounded_error(&error.to_string())),
+        ),
+    };
+    let mut receipt = ModelExecutionReceiptV1 {
+        schema: ModelExecutionReceiptV1::SCHEMA.into(),
+        receipt_id: Uuid::now_v7(),
+        lease_id: request.lease.lease_id,
+        session_id: request.lease.session_id,
+        request_id: request.request_id,
+        node_id: request.lease.node_id,
+        state,
+        started_at,
+        finished_at,
+        output_digest: format!("sha256:{}", hex::encode(Sha256::digest(&output))),
+        output_bytes: output.len() as u64,
+        usage,
+        error: error.clone(),
+        signature: String::new(),
+    };
+    rampage_policy::sign_model_receipt(signing_key, &mut receipt);
+    let frame = ModelInvocationFrameV1 {
+        schema: ModelInvocationFrameV1::SCHEMA.into(),
+        request_id: request.request_id,
+        sequence,
+        kind: if state == JobState::Succeeded {
+            ModelInvocationFrameKind::Complete
+        } else {
+            ModelInvocationFrameKind::Error
+        },
+        content: String::new(),
+        finish_reason,
+        error,
+        receipt: Some(receipt),
+    };
+    rampage_mesh::write_model_frame(send, &frame).await
+}
+
+async fn process_ollama_line(
+    send: &mut iroh::endpoint::SendStream,
+    request: &ModelInvocationRequestV1,
+    line: &[u8],
+    output: &mut Vec<u8>,
+    sequence: &mut u64,
+) -> anyhow::Result<Option<OllamaCompletion>> {
+    let chunk: OllamaChatChunk = serde_json::from_slice(line)?;
+    if let Some(error) = chunk.error {
+        anyhow::bail!("Ollama stream failed: {}", bounded_error(&error));
+    }
+    if let Some(model) = chunk.model {
+        anyhow::ensure!(
+            model == request.lease.model_id,
+            "Ollama response model differs from its lease"
+        );
+    }
+    if let Some(content) = chunk.message.map(|message| message.content)
+        && !content.is_empty()
+    {
+        anyhow::ensure!(
+            output.len().saturating_add(content.len()) <= MAX_MODEL_OUTPUT_BYTES as usize,
+            "model output exceeded the bounded response size"
+        );
+        output.extend_from_slice(content.as_bytes());
+        for content in utf8_chunks(&content, 16 * 1024) {
+            let frame = ModelInvocationFrameV1 {
+                schema: ModelInvocationFrameV1::SCHEMA.into(),
+                request_id: request.request_id,
+                sequence: *sequence,
+                kind: ModelInvocationFrameKind::Delta,
+                content: content.to_string(),
+                finish_reason: None,
+                error: None,
+                receipt: None,
+            };
+            rampage_mesh::write_model_frame(send, &frame).await?;
+            *sequence = sequence.saturating_add(1);
+        }
+    }
+    if !chunk.done {
+        return Ok(None);
+    }
+    Ok(Some(OllamaCompletion {
+        finish_reason: chunk.done_reason.unwrap_or_else(|| "stop".into()),
+        usage: chunk.prompt_eval_count.zip(chunk.eval_count).map(
+            |(prompt_tokens, completion_tokens)| ModelUsageV1 {
+                prompt_tokens,
+                completion_tokens,
+            },
+        ),
+    }))
+}
+
+async fn bounded_http_error(mut response: reqwest::Response) -> String {
+    let mut bytes = Vec::new();
+    while bytes.len() < 4_096 {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = 4_096 - bytes.len();
+                bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+            _ => break,
+        }
+    }
+    bounded_error(&String::from_utf8_lossy(&bytes))
+}
+
+async fn bounded_json(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> anyhow::Result<serde_json::Value> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        anyhow::ensure!(
+            bytes.len().saturating_add(chunk.len()) <= max_bytes,
+            "loopback service response exceeded its bounded size"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn bounded_error(error: &str) -> String {
+    error.chars().take(512).collect()
+}
+
+fn utf8_chunks(value: &str, max_bytes: usize) -> Vec<&str> {
+    if value.len() <= max_bytes {
+        return vec![value];
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < value.len() {
+        let mut end = (start + max_bytes).min(value.len());
+        while end > start && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            end = value[start..]
+                .char_indices()
+                .nth(1)
+                .map_or(value.len(), |(offset, _)| start + offset);
+        }
+        chunks.push(&value[start..end]);
+        start = end;
+    }
+    chunks
+}
+
 fn load_or_create_secret(path: &std::path::Path) -> anyhow::Result<[u8; 32]> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -813,4 +1235,266 @@ fn parse_device_kind(value: &str) -> anyhow::Result<DeviceKind> {
         _ => anyhow::bail!("unsupported device kind {value}"),
     };
     Ok(kind)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        Json, Router,
+        body::Body,
+        response::Response,
+        routing::{get, post},
+    };
+    use rampage_protocol::{
+        InstalledModelV1, ModelBackend, ModelChatMessageV1, ModelMemoryKind, ModelParallelism,
+        ModelRuntimeOfferV1, ModelRuntimeStatus, ModelSessionLeaseV1, ResourceClass,
+        ResourceQuantityV1,
+    };
+
+    async fn fake_tags() -> Json<serde_json::Value> {
+        Json(serde_json::json!({"models": [{
+            "name": "test:latest",
+            "model": "test:latest",
+            "size": 1024_u64,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }]}))
+    }
+
+    async fn fake_chat() -> Response {
+        Response::builder()
+            .header("content-type", "application/x-ndjson")
+            .body(Body::from(concat!(
+                "{\"model\":\"test:latest\",\"message\":{\"role\":\"assistant\",\"content\":\"hello \"},\"done\":false}\n",
+                "{\"model\":\"test:latest\",\"message\":{\"role\":\"assistant\",\"content\":\"world\"},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":2,\"eval_count\":2}\n"
+            )))
+            .unwrap()
+    }
+
+    fn model_offer(
+        node_id: Uuid,
+        worker: &iroh::Endpoint,
+        model: InstalledModelV1,
+    ) -> (ResourceOfferV1, ModelRuntimeOfferV1) {
+        let now = Utc::now();
+        let runtime = ModelRuntimeOfferV1 {
+            schema: ModelRuntimeOfferV1::SCHEMA.into(),
+            adapter: "rampage.ollama.v1".into(),
+            backend: ModelBackend::LocalOllama,
+            runtime_version: "test".into(),
+            runtime_digest: "shipped-local:test".into(),
+            compatibility_key: "ollama-test".into(),
+            memory_kind: ModelMemoryKind::Host,
+            available_model_bytes: 4096,
+            supported_parallelism: BTreeSet::from([ModelParallelism::WholeModel]),
+            status: ModelRuntimeStatus::ShippedLocal,
+            installed_models: vec![model],
+            certification_digest: None,
+        };
+        let address = worker.addr();
+        let offer = ResourceOfferV1 {
+            schema: "rampage.resource-offer.v1".into(),
+            offer_id: Uuid::now_v7(),
+            node_id,
+            observed_at: now,
+            expires_at: now + Duration::minutes(2),
+            resources: vec![ResourceQuantityV1 {
+                class: ResourceClass::RamWorkingSet,
+                capacity: 4096,
+                available: 4096,
+                unit: "byte".into(),
+                labels: BTreeMap::new(),
+            }],
+            availability: AvailabilityV1 {
+                on_ac_power: true,
+                battery_percent: None,
+                thermal_headroom_percent: 80,
+                foreground_allowed: true,
+                owner_idle: true,
+            },
+            adapters: BTreeSet::from(["rampage.ollama.v1".into()]),
+            model_runtimes: vec![runtime.clone()],
+            link_benchmark: None,
+            mesh_endpoint: Some(MeshEndpointRecordV1 {
+                schema: MeshEndpointRecordV1::SCHEMA.into(),
+                endpoint_id: address.id.to_string(),
+                direct_addresses: address.ip_addrs().map(ToString::to_string).collect(),
+                relay_urls: vec![],
+                issued_at: now,
+                expires_at: now + Duration::minutes(2),
+                signature: "transport-test".into(),
+            }),
+            signature: "offer-test".into(),
+        };
+        (offer, runtime)
+    }
+
+    fn invocation(lease: ModelSessionLeaseV1) -> ModelInvocationRequestV1 {
+        ModelInvocationRequestV1 {
+            schema: ModelInvocationRequestV1::SCHEMA.into(),
+            request_id: Uuid::now_v7(),
+            lease,
+            messages: vec![ModelChatMessageV1 {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            max_output_tokens: 16,
+            stream: true,
+            temperature: None,
+            top_p: None,
+        }
+    }
+
+    async fn collect_frames(
+        controller: &iroh::Endpoint,
+        worker: &iroh::Endpoint,
+        request: &ModelInvocationRequestV1,
+    ) -> Vec<ModelInvocationFrameV1> {
+        let mut stream = rampage_mesh::invoke_model(controller, worker.addr(), request)
+            .await
+            .unwrap();
+        let mut frames = Vec::new();
+        loop {
+            let frame = stream.next_frame().await.unwrap();
+            let terminal = matches!(
+                frame.kind,
+                ModelInvocationFrameKind::Complete | ModelInvocationFrameKind::Error
+            );
+            frames.push(frame);
+            if terminal {
+                return frames;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn model_gateway_streams_signed_receipt_and_rejects_replay_and_stale_epoch() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ollama_url = format!("http://{}", listener.local_addr().unwrap());
+        let ollama_app = Router::new()
+            .route("/api/tags", get(fake_tags))
+            .route("/api/chat", post(fake_chat));
+        let ollama = tokio::spawn(async move {
+            axum::serve(listener, ollama_app).await.unwrap();
+        });
+
+        let governor =
+            rampage_policy::Governor::ephemeral(rampage_policy::GovernorConfig::default());
+        let governor_key = hex::encode(governor.verifying_key().to_bytes());
+        let controller =
+            rampage_mesh::bind_endpoint([71_u8; 32], &rampage_mesh::MeshConfig::default())
+                .await
+                .unwrap();
+        let agent_key = SigningKey::from_bytes(&[72_u8; 32]);
+        let worker =
+            rampage_mesh::bind_endpoint(agent_key.to_bytes(), &rampage_mesh::MeshConfig::default())
+                .await
+                .unwrap();
+        let node_id = Uuid::now_v7();
+        let temp = tempfile::tempdir().unwrap();
+        let store =
+            std::sync::Arc::new(rampage_storage::CasStore::open(temp.path(), [73_u8; 32]).unwrap());
+        let gateway = tokio::spawn(serve_worker_gateway(
+            worker.clone(),
+            controller.id().to_string(),
+            node_id,
+            governor_key.clone(),
+            store,
+            agent_key.clone(),
+            ollama_url,
+        ));
+        let model = InstalledModelV1 {
+            schema: InstalledModelV1::SCHEMA.into(),
+            model_id: "test:latest".into(),
+            artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            artifact_size_bytes: 1024,
+        };
+        let (offer, runtime) = model_offer(node_id, &worker, model.clone());
+        let lease = governor
+            .authorize_model_session_at_epoch(
+                &offer,
+                &runtime,
+                &model,
+                &controller.id().to_string(),
+                rampage_policy::ModelSessionLimits {
+                    max_prompt_bytes: 1024,
+                    max_output_tokens: 16,
+                },
+                5,
+            )
+            .unwrap();
+        let request = invocation(lease);
+        let frames = collect_frames(&controller, &worker, &request).await;
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].content, "hello ");
+        assert_eq!(frames[1].content, "world");
+        assert_eq!(frames[2].kind, ModelInvocationFrameKind::Complete);
+        let receipt = frames[2].receipt.as_ref().unwrap();
+        let identity = NodeIdentityV1 {
+            schema: "rampage.node-identity.v1".into(),
+            node_id,
+            owner_id: Uuid::now_v7(),
+            display_name: "worker".into(),
+            device_kind: DeviceKind::Desktop,
+            platform: "test".into(),
+            public_key: hex::encode(agent_key.verifying_key().to_bytes()),
+            enrolled_at: Utc::now(),
+            fencing_epoch: 0,
+        };
+        assert!(rampage_policy::verify_model_receipt(&identity, receipt).is_ok());
+        assert_eq!(receipt.output_bytes, 11);
+        assert_eq!(receipt.usage.as_ref().unwrap().completion_tokens, 2);
+
+        let replay = collect_frames(&controller, &worker, &request).await;
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].kind, ModelInvocationFrameKind::Error);
+        assert!(replay[0].receipt.is_none());
+
+        let epoch_six = invocation(
+            governor
+                .authorize_model_session_at_epoch(
+                    &offer,
+                    &runtime,
+                    &model,
+                    &controller.id().to_string(),
+                    rampage_policy::ModelSessionLimits {
+                        max_prompt_bytes: 1024,
+                        max_output_tokens: 16,
+                    },
+                    6,
+                )
+                .unwrap(),
+        );
+        assert_eq!(
+            collect_frames(&controller, &worker, &epoch_six)
+                .await
+                .last()
+                .unwrap()
+                .kind,
+            ModelInvocationFrameKind::Complete
+        );
+        let stale = invocation(
+            governor
+                .authorize_model_session_at_epoch(
+                    &offer,
+                    &runtime,
+                    &model,
+                    &controller.id().to_string(),
+                    rampage_policy::ModelSessionLimits {
+                        max_prompt_bytes: 1024,
+                        max_output_tokens: 16,
+                    },
+                    5,
+                )
+                .unwrap(),
+        );
+        let stale_frames = collect_frames(&controller, &worker, &stale).await;
+        assert_eq!(stale_frames.len(), 1);
+        assert_eq!(stale_frames[0].kind, ModelInvocationFrameKind::Error);
+
+        controller.close().await;
+        worker.close().await;
+        gateway.abort();
+        ollama.abort();
+    }
 }

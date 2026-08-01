@@ -1,9 +1,9 @@
 # Model Fabric
 
 Rampage exposes one owner-facing **Compute Strategy** while keeping model placement evidence and
-execution authority separate. The initial strategy plane is implemented as a read-only controller
-planner, CLI command, TypeScript SDK method, and desktop selector. It never starts a backend or
-issues a lease.
+execution authority separate. The strategy planner, CLI preview, SDK method, and desktop selector
+remain read-only and never mint a lease. A separate shipped whole-model lane can execute an exact
+installed Ollama model on one authenticated contributor through a dedicated model-session lease.
 
 ## The five strategies
 
@@ -38,7 +38,10 @@ code path that mints a capability lease or launches a process.
 
 ## Runtime profiles
 
-The shipped local Ollama adapter advertises a `shipped_local` whole-model profile automatically.
+The shipped local Ollama adapter advertises a `shipped_local` whole-model profile automatically,
+including a bounded inventory of locally installed model identifiers, artifact sizes, and content
+digests from `/api/tags`. A machine with separate system RAM and VRAM advertises `hybrid` capacity;
+that means one host's Ollama layer offload, never a shared address space across hosts.
 Advanced engines must arrive through a strict `rampage.model-runtime-manifest.v1` profile containing
 an exact runtime digest, compatibility key, supported parallelism, available model memory, and—when
 declared qualified—a certification evidence digest. Invalid manifests are rejected as a unit and
@@ -96,7 +99,30 @@ rampage model-plan local/fast-chat `
 The desktop provides the same five-way selection, target model and memory inputs, visible versus
 compatible memory, predicted speed, selected ranks, and the first fail-closed gate reason.
 
-## Next executable gate
+## Shipped whole-model gateway
+
+The owner controller exposes a loopback-only OpenAI Chat Completions subset:
+
+- `GET /v1/models` lists only live, eligible model identifiers whose digest is consistent across
+  every advertising contributor.
+- `POST /v1/chat/completions` supports text-only `system`, `user`, and `assistant` messages,
+  non-streaming responses, and SSE streaming.
+- `POST /v1/model-sessions/{id}/cancel` cancels an active session. Owner STOP also cancels all
+  active sessions and advances the durable authority epoch.
+
+Every route requires `Authorization: Bearer <controller token>`. The controller selects a signed
+offer, and the non-agentic Governor mints `rampage.model-session-lease.v1` for one node, exact model
+digest, exact runtime, whole-model parallelism, prompt/output bounds, authenticated controller peer,
+expiry, one-shot nonce, and fencing epoch. The worker re-queries its loopback Ollama inventory before
+execution, verifies the Governor signature, durably consumes the nonce/epoch, and calls only its
+configured loopback Ollama origin. The terminal receipt signs the exact output SHA-256, byte count,
+state, timestamps, and Ollama-reported usage. The controller verifies the signer and transcript
+before returning non-streaming success or the final streaming completion frame.
+
+This is real remote whole-model execution. It can let a smaller owner PC use a model that fits a
+single stronger contributor. It does not combine memory from multiple hosts for one inference.
+
+## Next distributed executable gate
 
 The generic durable-authority foundation is now implemented. Controller epochs live in the
 hash-chained ledger, survive normal restart, and advance on owner STOP. Job and storage leases carry
@@ -104,8 +130,10 @@ that signed epoch; workers and artifact gateways durably consume each nonce once
 epochs after restart. The end-to-end campaign proves restart recovery, STOP advancement, stale
 claim denial, and authenticated artifact transfer under the new rules.
 
-The distributed launcher and loopback OpenAI-compatible model gateway are not shipped yet. They
-still require a dedicated model-session lease, backend process isolation, peer-specific allowlists,
-model/runtime digest verification, streaming failure semantics, deterministic process cleanup, and
-a completed backend qualification campaign. Until those exist, Rampage may prove a placement
-candidate but cannot claim that cross-host single-model inference is operational.
+The dedicated whole-model lease, peer binding, model digest revalidation, bounded streaming failure
+semantics, cancellation, durable replay protection, deterministic process campaign, and loopback
+OpenAI-compatible gateway are shipped for local Ollama. The remaining gate is a genuinely
+distributed launcher for pipeline or tensor ranks. It still requires backend-specific process
+isolation, exact peer allowlists, model/rank artifact verification, teardown, injected failure, and
+performance qualification. Until that campaign passes, Rampage cannot claim that multiple hosts
+combine memory for one inference.

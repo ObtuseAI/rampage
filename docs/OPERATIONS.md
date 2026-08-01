@@ -37,8 +37,24 @@ Default storage contribution is 10 GiB, divided into cache and scratch. Set
 unless `RAMPAGE_ALLOW_PROTECTED_STORAGE=true`, and the CAS refuses a protected object without at
 least two declared replicas. `RAMPAGE_EDGE_FOREGROUND=true` is required for edge eligibility.
 
-Rampage detects local Ollama at `127.0.0.1:11434`; the Ollama adapter is not advertised when that
-endpoint is unavailable. Models are never downloaded silently.
+Rampage detects local Ollama at `127.0.0.1:11434`; `RAMPAGE_OLLAMA_URL` may select a different plain
+HTTP loopback IP origin for testing or a non-default local service port. Hostnames, credentials,
+paths, queries, fragments, HTTPS, and non-loopback destinations are rejected. The Ollama adapter is
+not advertised when the endpoint is unavailable, and models are never downloaded silently.
+
+## OpenAI-compatible model gateway
+
+The owner controller exposes `http://127.0.0.1:47831/v1`. Use the controller token as the bearer API
+key. The desktop **Copy API setup** action provides `OPENAI_BASE_URL` and `OPENAI_API_KEY`; protect
+the copied token like any local credential. `GET /v1/models` returns eligible consistent installed
+models. Chat Completions accepts a bounded text-only subset and supports SSE. The response header
+`x-rampage-session-id` identifies the explicit cancel route.
+
+Unknown request fields are rejected. Prompts are capped at one MiB, outputs at 32,768 requested
+tokens and 16 MiB of transcript, model aliases with conflicting digests are hidden, and execution
+cannot download a missing model. Owner STOP cancels active controller sessions and fences later
+authority. A client disconnect drops the QUIC/loopback request path rather than leaving the
+controller waiting for an unobserved result.
 
 ## Artifact flow
 

@@ -42,6 +42,27 @@ class RampageClient:
         """Preview a model placement; this endpoint never issues execution authority."""
         return self._post("/v1/model-sessions/plan", request)
 
+    def openai_config(self) -> dict[str, str]:
+        """Return values accepted by the official OpenAI client for the local Rampage gateway."""
+        token = self._client.headers.get("x-rampage-token")
+        if not token:
+            raise ValueError("Rampage gateway requires the local controller token")
+        return {
+            "base_url": f"{str(self._client.base_url).rstrip('/')}/v1",
+            "api_key": token,
+        }
+
+    def models(self) -> dict[str, Any]:
+        return self._gateway_get("/v1/models")
+
+    def chat_completion(self, request: dict[str, Any]) -> dict[str, Any]:
+        if request.get("stream") is True:
+            raise ValueError("use an OpenAI client with openai_config() for SSE streaming")
+        return self._gateway_post("/v1/chat/completions", request)
+
+    def cancel_model_session(self, session_id: str) -> dict[str, Any]:
+        return self._gateway_post(f"/v1/model-sessions/{session_id}/cancel", {})
+
     def plan_shard_set(self, shard_set: dict[str, Any]) -> dict[str, Any]:
         return self._post("/v1/shard-sets/plan", shard_set)
 
@@ -132,6 +153,24 @@ class RampageClient:
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         response = self._client.post(path, json=body)
+        response.raise_for_status()
+        payload: dict[str, Any] = response.json()
+        return payload
+
+    def _gateway_headers(self) -> dict[str, str]:
+        token = self._client.headers.get("x-rampage-token")
+        if not token:
+            raise ValueError("Rampage gateway requires the local controller token")
+        return {"authorization": f"Bearer {token}"}
+
+    def _gateway_get(self, path: str) -> dict[str, Any]:
+        response = self._client.get(path, headers=self._gateway_headers())
+        response.raise_for_status()
+        payload: dict[str, Any] = response.json()
+        return payload
+
+    def _gateway_post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        response = self._client.post(path, json=body, headers=self._gateway_headers())
         response.raise_for_status()
         payload: dict[str, Any] = response.json()
         return payload

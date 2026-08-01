@@ -13,6 +13,9 @@ model and producing the fastest possible response.
   proposal-only adaptive planning lanes.
 - Signed agent offers can advertise bounded Ollama, Exo/MLX, or vLLM/Ray runtime profiles through a
   strict manifest and digest contract.
+- A bearer-protected OpenAI Chat Completions subset now moves a whole installed Ollama model request
+  to one capable contributor over authenticated QUIC, with streaming, cancellation, a one-shot
+  fenced model-session lease, and a signed transcript receipt.
 - The controller, CLI, Rust SDK, TypeScript SDK, Python SDK, and native desktop all share the same
   versioned model-session planning contract.
 - The native Tauri shell now has a role-aware Windows tray, close-to-tray behavior, Start with
@@ -24,16 +27,17 @@ model and producing the fastest possible response.
 ## The boundary that matters
 
 The 0.2 planner is real and read-only. It never turns a capacity estimate into execution authority.
-Cross-host model launch and the proposed loopback inference gateway remain disabled until a backend
-passes correctness, isolation, topology, streaming-failure, cleanup, and measured-benefit gates.
-That distinction is the foundation for making Rampage ambitious without making it reckless.
+The separately qualified whole-model Ollama lane is operational for a model that fits one
+contributor. Cross-host tensor and pipeline launch remain disabled until a backend passes
+correctness, isolation, topology, cleanup, failure, and measured-benefit gates. That distinction is
+the foundation for making Rampage ambitious without making it reckless.
 
 ## Verification
 
-The release candidate passes 44 Rust tests, strict all-target Clippy, 4 desktop tests and production
-build, 5 TypeScript SDK tests, 13 intelligence tests, 5 Python SDK tests, authenticated direct-QUIC
-mesh and artifact proofs, a real Ollama generation receipt, native owner/worker lifecycle probes,
-and a silent NSIS install/shortcut/uninstall smoke.
+The release candidate passes 60 Rust tests, strict all-target Clippy, 5 desktop tests and production
+build, 6 TypeScript SDK tests, 13 intelligence tests, 6 Python SDK tests, authenticated direct-QUIC
+mesh and artifact proofs, deterministic OpenAI-gateway process evidence, a real Ollama generation
+receipt, native owner/worker lifecycle probes, and a silent NSIS install/shortcut/uninstall smoke.
 
 The Windows artifacts are still unsigned. See [release evidence](RELEASE_EVIDENCE.md) before
 distribution.

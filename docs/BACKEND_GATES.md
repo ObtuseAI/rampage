@@ -10,6 +10,7 @@ runtime boundary, topology, failure behavior, and measured benefit have passed t
 | --- | --- | --- |
 | Rampage native whole-job adapters | Shipped | Preferred for heterogeneous consumer machines and independent work |
 | Local Ollama | Shipped | Loopback-only, model must already exist, signed lease and receipt required |
+| Remote whole-model Ollama gateway | Shipped | Bearer-protected loopback OpenAI subset; authenticated QUIC; exact installed digest; one-shot fenced lease; signed transcript receipt |
 | Model strategy planner | Shipped | Read-only previews for maximum model, speed, throughput, efficiency, and balanced objectives; no execution authority |
 | Durable authority substrate | Shipped | Hash-chained controller epoch, one-shot durable worker/storage nonces, restart-preserving recovery, and STOP fencing |
 | Exo / MLX distributed | Candidate | Exact runtime/compatibility manifest and backend-specific topology campaign required before launch |
@@ -64,11 +65,11 @@ alpha. Rampage may use it in research fixtures, but not as an autonomous product
 This design lets Rampage adopt a safer or faster backend later without letting a model or plugin
 turn an experimental network service into authority.
 
-The generic authority substrate for gate 4 and the stale-lease portion of gate 7 is implemented:
-signed job and storage authority carries the controller epoch; worker-local nonce consumption and
-highest-seen epochs survive restart; owner STOP advances the hash-chained epoch; and the controller
-rejects claims and receipts from the old generation. A distributed backend still needs its own
-model-session lease, peer allowlist enforcement, process teardown, and injected-failure campaign.
+The generic authority substrate for gate 4 and the stale-lease portion of gate 7 is implemented for
+jobs, storage, and whole-model Ollama sessions. Model authority is exact, peer-bound, expiring,
+one-shot, and fenced; the worker revalidates the installed digest and signs the output transcript.
+A multi-rank distributed backend still needs rank-specific peer allowlists, process isolation,
+teardown, and its own injected-failure and performance campaign.
 
 The implemented strategy and runtime-profile contracts are described in
 [MODEL_FABRIC.md](MODEL_FABRIC.md). A `ready` planning result is still a preview; it cannot mint a

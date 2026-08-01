@@ -26,6 +26,13 @@ function controllerHeaders(json = false): HeadersInit {
   return headers;
 }
 
+function controllerBearerHeaders(json = false): HeadersInit {
+  const headers: Record<string, string> = {};
+  if (localControllerToken) headers.authorization = `Bearer ${localControllerToken}`;
+  if (json) headers["content-type"] = "application/json";
+  return headers;
+}
+
 interface IntelligenceHealth {
   status: "ready";
   capability: CapabilityState;
@@ -66,6 +73,7 @@ interface RampageState {
   kvCacheGiB: number;
   modelPlan: ModelSessionPlan | null;
   modelPlanPending: boolean;
+  gatewayModels: string[];
   setMode: (mode: "arena" | "grid") => void;
   setSelectedNode: (id: string) => void;
   setCommandOpen: (open: boolean) => void;
@@ -75,6 +83,7 @@ interface RampageState {
   setTargetModelGiB: (gib: number) => void;
   setKvCacheGiB: (gib: number) => void;
   planModelSession: () => Promise<void>;
+  copyGatewayConfig: () => Promise<void>;
   finishOnboarding: () => void;
   refresh: () => Promise<void>;
   createInvite: () => Promise<void>;
@@ -153,6 +162,7 @@ export const useRampage = create<RampageState>((set, get) => ({
   kvCacheGiB: Number(localStorage.getItem("rampage.kv-cache-gib") ?? 4),
   modelPlan: null,
   modelPlanPending: false,
+  gatewayModels: [],
   setMode: (mode) => set({ mode }),
   setSelectedNode: (selectedNode) => set({ selectedNode }),
   setCommandOpen: (commandOpen) => set({ commandOpen }),
@@ -216,6 +226,15 @@ export const useRampage = create<RampageState>((set, get) => ({
       });
     }
   },
+  copyGatewayConfig: async () => {
+    localControllerToken ??= await invoke<string>("controller_token");
+    await navigator.clipboard.writeText(
+      `OPENAI_BASE_URL=${controller}/v1\nOPENAI_API_KEY=${localControllerToken}`,
+    );
+    set({
+      lastAction: "OpenAI-compatible loopback gateway settings copied. Treat the API key as a local secret.",
+    });
+  },
   finishOnboarding: () => {
     localStorage.setItem("rampage.onboarded", "true");
     set({ onboarding: false });
@@ -231,6 +250,7 @@ export const useRampage = create<RampageState>((set, get) => ({
           killLatch: false,
           connected: true,
           capability: "local_reduced",
+          gatewayModels: [],
           nodes: [{
             id: "worker",
             name: "This Worker",
@@ -253,16 +273,20 @@ export const useRampage = create<RampageState>((set, get) => ({
         return;
       }
       localControllerToken ??= await invoke<string>("controller_token").catch(() => null);
-      const [healthResponse, offersResponse, eventsResponse, intelligenceResponse] = await Promise.all([
+      const [healthResponse, offersResponse, eventsResponse, modelsResponse, intelligenceResponse] = await Promise.all([
         fetch(`${controller}/health`),
         fetch(`${controller}/v1/offers`, { headers: controllerHeaders() }),
         fetch(`${controller}/v1/events?after=0&limit=120`, { headers: controllerHeaders() }),
+        fetch(`${controller}/v1/models`, { headers: controllerBearerHeaders() }).catch(() => null),
         fetch(`${intelligence}/health`).catch(() => null),
       ]);
       if (!healthResponse.ok || !offersResponse.ok || !eventsResponse.ok) throw new Error("controller unavailable");
       const health = (await healthResponse.json()) as ControllerHealth;
       const offers = (await offersResponse.json()) as ResourceOffer[];
       const events = (await eventsResponse.json()) as LedgerEvent[];
+      const gatewayModels = modelsResponse?.ok
+        ? ((await modelsResponse.json()) as { data: Array<{ id: string }> }).data.map((model) => model.id)
+        : [];
       const intelligenceHealth = intelligenceResponse?.ok
         ? ((await intelligenceResponse.json()) as IntelligenceHealth)
         : null;
@@ -284,6 +308,7 @@ export const useRampage = create<RampageState>((set, get) => ({
               : offers[0].node_id)
           : "",
         events,
+        gatewayModels,
         killLatch: health.kill_latch,
         lastAction: (() => {
           const latest = events.at(-1);
@@ -299,6 +324,7 @@ export const useRampage = create<RampageState>((set, get) => ({
         connected: false,
         capability: "deterministic_only",
         nodes: import.meta.env.DEV ? get().nodes : [],
+        gatewayModels: [],
         selectedNode: import.meta.env.DEV ? get().selectedNode : "",
         lastAction: error instanceof Error ? `Fabric unavailable: ${error.message}` : "Fabric unavailable.",
         lastSync: new Date(),

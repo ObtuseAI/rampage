@@ -1,10 +1,11 @@
 use rampage_protocol::{
-    ModelBackend, ModelMemoryKind, ModelParallelism, ModelRuntimeOfferV1, ModelRuntimeStatus,
-    ResourceClass, ResourceQuantityV1,
+    InstalledModelV1, ModelBackend, ModelMemoryKind, ModelParallelism, ModelRuntimeOfferV1,
+    ModelRuntimeStatus, ResourceClass, ResourceQuantityV1,
 };
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::Read,
     path::Path,
     process::Command,
 };
@@ -118,12 +119,86 @@ pub fn discover(mut labels: BTreeMap<String, String>, data_dir: &Path) -> Discov
     }
 }
 
-pub fn ollama_available() -> bool {
+pub fn ollama_available(base_url: &str) -> bool {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_millis(750))
         .build()
-        .and_then(|client| client.get("http://127.0.0.1:11434/api/tags").send())
+        .and_then(|client| client.get(format!("{base_url}/api/tags")).send())
         .is_ok_and(|response| response.status().is_success())
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaTags {
+    #[serde(default)]
+    models: Vec<OllamaTag>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaTag {
+    name: Option<String>,
+    model: Option<String>,
+    size: u64,
+    digest: String,
+}
+
+fn discover_ollama_models(base_url: &str) -> Result<Vec<InstalledModelV1>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .map_err(|error| format!("could not build Ollama discovery client: {error}"))?;
+    let response = client
+        .get(format!("{base_url}/api/tags"))
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(|error| format!("could not list local Ollama models: {error}"))?;
+    let mut payload = Vec::new();
+    response
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut payload)
+        .map_err(|error| format!("could not read local Ollama model list: {error}"))?;
+    if payload.len() > 1024 * 1024 {
+        return Err("local Ollama model list exceeds the one MiB safety limit".into());
+    }
+    parse_ollama_models(&payload)
+}
+
+fn parse_ollama_models(payload: &[u8]) -> Result<Vec<InstalledModelV1>, String> {
+    let payload: OllamaTags = serde_json::from_slice(payload)
+        .map_err(|error| format!("local Ollama model list is invalid: {error}"))?;
+    if payload.models.len() > 128 {
+        return Err("local Ollama model list exceeds the 128-model safety limit".into());
+    }
+    let mut models = Vec::with_capacity(payload.models.len());
+    let mut names = BTreeSet::new();
+    for candidate in payload.models {
+        let model_id = candidate
+            .model
+            .filter(|value| !value.trim().is_empty())
+            .or(candidate.name)
+            .ok_or_else(|| "local Ollama model omitted its identifier".to_string())?;
+        let normalized_id = model_id.trim().to_ascii_lowercase();
+        if normalized_id.ends_with(":cloud") || normalized_id.ends_with("-cloud") {
+            continue;
+        }
+        let digest = candidate.digest.trim().to_ascii_lowercase();
+        let artifact_digest = if digest.starts_with("sha256:") {
+            digest
+        } else {
+            format!("sha256:{digest}")
+        };
+        let model = InstalledModelV1 {
+            schema: InstalledModelV1::SCHEMA.into(),
+            model_id,
+            artifact_digest,
+            artifact_size_bytes: candidate.size,
+        };
+        if !model.is_valid() || !names.insert(model.model_id.clone()) {
+            return Err("local Ollama model list contains a malformed or duplicate entry".into());
+        }
+        models.push(model);
+    }
+    models.sort_by(|left, right| left.model_id.cmp(&right.model_id));
+    Ok(models)
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,18 +213,23 @@ struct ModelRuntimeManifestV1 {
 pub fn discover_model_runtimes(
     resources: &[ResourceQuantityV1],
     has_ollama: bool,
+    ollama_base_url: &str,
 ) -> Result<Vec<ModelRuntimeOfferV1>, String> {
     let mut profiles = Vec::new();
     if has_ollama {
         let gpu_bytes = resource_bytes(resources, ResourceClass::GpuMemory);
         let ram_bytes = resource_bytes(resources, ResourceClass::RamWorkingSet);
-        let (memory_kind, available_model_bytes) = if gpu_bytes > 0 {
+        let (memory_kind, available_model_bytes) = if gpu_bytes > 0 && ram_bytes > 0 {
+            (ModelMemoryKind::Hybrid, gpu_bytes.saturating_add(ram_bytes))
+        } else if gpu_bytes > 0 {
             (ModelMemoryKind::DedicatedGpu, gpu_bytes)
         } else {
             (ModelMemoryKind::Host, ram_bytes)
         };
         if available_model_bytes > 0 {
-            let runtime_version = ollama_version().unwrap_or_else(|| "detected-local".into());
+            let runtime_version =
+                ollama_version(ollama_base_url).unwrap_or_else(|| "detected-local".into());
+            let installed_models = discover_ollama_models(ollama_base_url)?;
             profiles.push(ModelRuntimeOfferV1 {
                 schema: ModelRuntimeOfferV1::SCHEMA.into(),
                 adapter: "rampage.ollama.v1".into(),
@@ -168,6 +248,7 @@ pub fn discover_model_runtimes(
                     ModelParallelism::Replica,
                 ]),
                 status: ModelRuntimeStatus::ShippedLocal,
+                installed_models,
                 certification_digest: None,
             });
         }
@@ -204,6 +285,7 @@ pub fn discover_model_runtimes(
             || profile.available_model_bytes == 0
             || profile.status == ModelRuntimeStatus::ShippedLocal
             || !adapter_matches_backend
+            || !profile.installed_models.is_empty()
         {
             return Err("model runtime manifest contains a malformed profile".into());
         }
@@ -230,13 +312,13 @@ fn resource_bytes(resources: &[ResourceQuantityV1], class: ResourceClass) -> u64
         .map_or(0, |resource| resource.available)
 }
 
-fn ollama_version() -> Option<String> {
+fn ollama_version(base_url: &str) -> Option<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_millis(750))
         .build()
         .ok()?;
     let payload = client
-        .get("http://127.0.0.1:11434/api/version")
+        .get(format!("{base_url}/api/version"))
         .send()
         .ok()?
         .error_for_status()
@@ -378,5 +460,47 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].memory_free_mib, 20_100);
         assert_eq!(parsed[1].utilization_percent, 40);
+    }
+
+    #[test]
+    fn parses_bounded_ollama_inventory_with_content_digests() {
+        let models = parse_ollama_models(
+            serde_json::json!({"models": [{
+                "name": "gemma3:4b",
+                "model": "gemma3:4b",
+                "size": 3_338_801_804_u64,
+                "digest": "a2af6cc3eb7fa8be8504abaf9b04e88f17a119ec3f04a3addf55f92841195f5a",
+                "details": {"format": "gguf"}
+            }]})
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model_id, "gemma3:4b");
+        assert_eq!(
+            models[0].artifact_digest,
+            "sha256:a2af6cc3eb7fa8be8504abaf9b04e88f17a119ec3f04a3addf55f92841195f5a"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_ollama_aliases() {
+        let payload = serde_json::json!({"models": [
+            {"name": "same", "model": "same", "size": 1, "digest": "a".repeat(64)},
+            {"name": "same", "model": "same", "size": 1, "digest": "b".repeat(64)}
+        ]});
+        assert!(parse_ollama_models(payload.to_string().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn excludes_ollama_cloud_aliases_from_local_execution_inventory() {
+        let payload = serde_json::json!({"models": [
+            {"name": "remote:cloud", "model": "remote:cloud", "size": 1, "digest": "a".repeat(64)},
+            {"name": "local:latest", "model": "local:latest", "size": 2, "digest": "b".repeat(64)}
+        ]});
+        let models = parse_ollama_models(payload.to_string().as_bytes()).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model_id, "local:latest");
     }
 }
