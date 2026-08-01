@@ -132,6 +132,16 @@ impl Governor {
         offer: &ResourceOfferV1,
         selected_node: Uuid,
     ) -> Result<CapabilityLeaseV1, Denial> {
+        self.authorize_job_at_epoch(job, offer, selected_node, 0)
+    }
+
+    pub fn authorize_job_at_epoch(
+        &self,
+        job: &JobSpecV1,
+        offer: &ResourceOfferV1,
+        selected_node: Uuid,
+        fencing_epoch: u64,
+    ) -> Result<CapabilityLeaseV1, Denial> {
         let now = Utc::now();
         self.check_job_at(job, offer, selected_node, now)?;
         let expires_at = std::cmp::min(
@@ -173,7 +183,7 @@ impl Governor {
             issued_at: now,
             expires_at,
             nonce: Uuid::new_v4().simple().to_string(),
-            fencing_epoch: 0,
+            fencing_epoch,
             signature: String::new(),
         };
         lease.signature = self.sign_lease(&lease);
@@ -289,6 +299,18 @@ impl Governor {
         storage_class: StorageClass,
         operation: ArtifactTransferOperation,
     ) -> Result<StorageLeaseV1, Denial> {
+        self.authorize_storage_at_epoch(offer, digest, size_bytes, storage_class, operation, 0)
+    }
+
+    pub fn authorize_storage_at_epoch(
+        &self,
+        offer: &ResourceOfferV1,
+        digest: &str,
+        size_bytes: u64,
+        storage_class: StorageClass,
+        operation: ArtifactTransferOperation,
+        fencing_epoch: u64,
+    ) -> Result<StorageLeaseV1, Denial> {
         let now = Utc::now();
         if self.config.killed {
             return Err(Denial::KillLatch);
@@ -325,7 +347,7 @@ impl Governor {
             issued_at: now,
             expires_at: now + Duration::seconds(self.config.lease_ttl_seconds.max(1)),
             nonce: Uuid::new_v4().simple().to_string(),
-            fencing_epoch: 0,
+            fencing_epoch,
             signature: String::new(),
         };
         lease.signature = hex::encode(
@@ -595,6 +617,43 @@ mod tests {
         assert_eq!(lease.granted[0].capacity, 1);
         assert_eq!(lease.granted[0].available, 1);
         assert!(governor.verify_lease(&lease).is_ok());
+    }
+
+    #[test]
+    fn issued_authority_carries_the_signed_fencing_epoch() {
+        let governor = Governor::ephemeral(GovernorConfig::default());
+        let (job, mut offer) = fixtures("desktop", true);
+        offer.resources.push(ResourceQuantityV1 {
+            class: ResourceClass::StorageCache,
+            capacity: 4096,
+            available: 4096,
+            unit: "byte".into(),
+            labels: BTreeMap::new(),
+        });
+        let lease = governor
+            .authorize_job_at_epoch(&job, &offer, offer.node_id, 23)
+            .unwrap();
+        assert_eq!(lease.fencing_epoch, 23);
+        assert!(governor.verify_lease(&lease).is_ok());
+
+        let storage_lease = governor
+            .authorize_storage_at_epoch(
+                &offer,
+                &format!("sha256:{}", "b".repeat(64)),
+                1024,
+                StorageClass::Cache,
+                ArtifactTransferOperation::Put,
+                23,
+            )
+            .unwrap();
+        assert_eq!(storage_lease.fencing_epoch, 23);
+        assert!(
+            verify_storage_lease_with_key(
+                &hex::encode(governor.verifying_key().to_bytes()),
+                &storage_lease
+            )
+            .is_ok()
+        );
     }
 
     #[test]

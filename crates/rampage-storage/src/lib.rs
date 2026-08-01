@@ -73,6 +73,14 @@ pub enum StorageError {
     InvalidDigest,
     #[error("protected storage requires at least two declared replicas")]
     ProtectedRequiresReplication,
+    #[error("invalid authority scope, nonce, or fencing epoch")]
+    InvalidAuthority,
+    #[error("authority lease has expired")]
+    ExpiredAuthority,
+    #[error("authority nonce has already been consumed")]
+    ReplayedAuthorityNonce,
+    #[error("stale authority fencing epoch {supplied}; current epoch is {current}")]
+    StaleFencingEpoch { current: u64, supplied: u64 },
     #[error("storage lock is poisoned")]
     Poisoned,
 }
@@ -99,7 +107,19 @@ impl CasStore {
                 storage_class TEXT NOT NULL,
                 required_replicas INTEGER NOT NULL,
                 created_at TEXT NOT NULL
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS authority_fences (
+                scope TEXT PRIMARY KEY,
+                fencing_epoch INTEGER NOT NULL CHECK(fencing_epoch >= 0)
+            );
+            CREATE TABLE IF NOT EXISTS consumed_authority_nonces (
+                scope TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                expires_at_millis INTEGER NOT NULL,
+                PRIMARY KEY(scope, nonce)
+            );
+            CREATE INDEX IF NOT EXISTS idx_authority_nonce_expiry
+                ON consumed_authority_nonces(expires_at_millis);",
         )?;
         Ok(Self {
             root,
@@ -256,6 +276,70 @@ impl CasStore {
         record.ok_or_else(|| StorageError::NotFound(digest.into()))
     }
 
+    /// Atomically consume one signed authority nonce while enforcing a monotonic fencing epoch.
+    ///
+    /// The state lives in the local CAS index beside encrypted artifact payloads, so replay and
+    /// stale-epoch protection survive process restarts. Callers must verify the lease signature
+    /// before invoking this method; this store deliberately does not possess the Governor's
+    /// verification key.
+    pub fn accept_authority(
+        &self,
+        scope: &str,
+        fencing_epoch: u64,
+        nonce: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        if scope.is_empty()
+            || scope.len() > 128
+            || nonce.is_empty()
+            || nonce.len() > 128
+            || !scope.is_ascii()
+            || !nonce.is_ascii()
+        {
+            return Err(StorageError::InvalidAuthority);
+        }
+        let now_millis = Utc::now().timestamp_millis();
+        let expires_at_millis = expires_at.timestamp_millis();
+        if expires_at_millis <= now_millis {
+            return Err(StorageError::ExpiredAuthority);
+        }
+        let epoch = i64::try_from(fencing_epoch).map_err(|_| StorageError::InvalidAuthority)?;
+        let mut connection = self.index.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM consumed_authority_nonces WHERE expires_at_millis <= ?1",
+            params![now_millis],
+        )?;
+        let current: Option<i64> = transaction
+            .query_row(
+                "SELECT fencing_epoch FROM authority_fences WHERE scope = ?1",
+                params![scope],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current.is_some_and(|current| epoch < current) {
+            return Err(StorageError::StaleFencingEpoch {
+                current: current.unwrap_or_default() as u64,
+                supplied: fencing_epoch,
+            });
+        }
+        let inserted = transaction.execute(
+            "INSERT OR IGNORE INTO consumed_authority_nonces(scope, nonce, expires_at_millis)
+             VALUES (?1, ?2, ?3)",
+            params![scope, nonce, expires_at_millis],
+        )?;
+        if inserted != 1 {
+            return Err(StorageError::ReplayedAuthorityNonce);
+        }
+        transaction.execute(
+            "INSERT INTO authority_fences(scope, fencing_epoch) VALUES (?1, ?2)
+             ON CONFLICT(scope) DO UPDATE SET fencing_epoch = MAX(fencing_epoch, excluded.fencing_epoch)",
+            params![scope, epoch],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     fn object_dir(&self, digest: &str) -> Result<PathBuf, StorageError> {
         let hash = digest
             .strip_prefix("sha256:")
@@ -371,6 +455,59 @@ mod tests {
         assert!(matches!(
             store.head("not-a-digest"),
             Err(StorageError::InvalidDigest)
+        ));
+    }
+
+    #[test]
+    fn authority_replay_and_stale_epochs_are_rejected_across_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let expiry = Utc::now() + chrono::Duration::minutes(5);
+        {
+            let store = CasStore::open(temp.path(), [5_u8; 32]).unwrap();
+            store
+                .accept_authority("governor", 7, "nonce-one", expiry)
+                .unwrap();
+            assert!(matches!(
+                store.accept_authority("governor", 7, "nonce-one", expiry),
+                Err(StorageError::ReplayedAuthorityNonce)
+            ));
+            store
+                .accept_authority("governor", 8, "nonce-two", expiry)
+                .unwrap();
+            assert!(matches!(
+                store.accept_authority("governor", 7, "nonce-three", expiry),
+                Err(StorageError::StaleFencingEpoch {
+                    current: 8,
+                    supplied: 7
+                })
+            ));
+        }
+        let reopened = CasStore::open(temp.path(), [5_u8; 32]).unwrap();
+        assert!(matches!(
+            reopened.accept_authority("governor", 8, "nonce-two", expiry),
+            Err(StorageError::ReplayedAuthorityNonce)
+        ));
+        assert!(matches!(
+            reopened.accept_authority("governor", 7, "nonce-four", expiry),
+            Err(StorageError::StaleFencingEpoch {
+                current: 8,
+                supplied: 7
+            })
+        ));
+    }
+
+    #[test]
+    fn expired_authority_is_not_consumed() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = CasStore::open(temp.path(), [6_u8; 32]).unwrap();
+        assert!(matches!(
+            store.accept_authority(
+                "governor",
+                1,
+                "expired",
+                Utc::now() - chrono::Duration::seconds(1)
+            ),
+            Err(StorageError::ExpiredAuthority)
         ));
     }
 }

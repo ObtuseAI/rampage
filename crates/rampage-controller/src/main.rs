@@ -31,7 +31,10 @@ use std::{
     collections::{BTreeSet, HashMap},
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
@@ -62,6 +65,7 @@ struct AppState {
     artifact_store: Arc<rampage_storage::CasStore>,
     local_api_token: Arc<String>,
     admission_gate: Arc<tokio::sync::Mutex<()>>,
+    fencing_epoch: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -93,6 +97,7 @@ struct Health {
     mesh_mode: &'static str,
     mesh_endpoint_id: String,
     mesh_sockets: Vec<String>,
+    fencing_epoch: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,6 +168,10 @@ async fn main() -> anyhow::Result<()> {
     ledger
         .verify()
         .context("refusing to start with an invalid evidence ledger")?;
+    let fencing_epoch = match ledger.current_fencing_epoch("controller")? {
+        0 => ledger.advance_fencing_epoch("controller")?,
+        current => current,
+    };
     let address: SocketAddr = std::env::var("RAMPAGE_BIND")
         .unwrap_or_else(|_| "127.0.0.1:47831".into())
         .parse()?;
@@ -187,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
         completed_receipts,
         shard_sets,
         artifact_replicas,
-    ) = restore_state(&ledger)?;
+    ) = restore_state(&ledger, fencing_epoch)?;
     let mesh_config = mesh_config_from_env(&nodes)?;
     let mesh = Arc::new(
         rampage_mesh::bind_node(
@@ -223,6 +232,7 @@ async fn main() -> anyhow::Result<()> {
         )?),
         local_api_token: local_api_token.clone(),
         admission_gate: Arc::new(tokio::sync::Mutex::new(())),
+        fencing_epoch: Arc::new(AtomicU64::new(fencing_epoch)),
     };
     let mesh_state = state.clone();
     let protected = Router::new()
@@ -428,6 +438,7 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
             .into_iter()
             .map(|socket| socket.to_string())
             .collect(),
+        fencing_epoch: state.fencing_epoch.load(Ordering::Acquire),
     })
 }
 
@@ -456,16 +467,35 @@ async fn require_local_token(
 async fn local_stop(
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let _admission_guard = state.admission_gate.lock().await;
+    if state.kill_latch_path.is_file() {
+        return Ok((
+            StatusCode::OK,
+            Json(json!({
+                "stopped": true,
+                "fencing_epoch": state.fencing_epoch.load(Ordering::Acquire),
+                "duplicate": true
+            })),
+        ));
+    }
     std::fs::write(state.kill_latch_path.as_ref(), b"owner-stop-v1\n").map_err(internal_error)?;
+    let fencing_epoch = state
+        .ledger
+        .advance_fencing_epoch("controller")
+        .map_err(internal_error)?;
+    state.fencing_epoch.store(fencing_epoch, Ordering::Release);
     state
         .ledger
         .append(
             "fabric.owner_stop",
             "local-fabric",
-            &json!({"source": "local-api"}),
+            &json!({"source": "local-api", "fencing_epoch": fencing_epoch}),
         )
         .map_err(internal_error)?;
-    Ok((StatusCode::ACCEPTED, Json(json!({"stopped": true}))))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"stopped": true, "fencing_epoch": fencing_epoch})),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -484,6 +514,7 @@ async fn local_resume(
             Json(json!({"error": "exact owner resume confirmation is required"})),
         ));
     }
+    let _admission_guard = state.admission_gate.lock().await;
     if state.kill_latch_path.is_file() {
         std::fs::remove_file(state.kill_latch_path.as_ref()).map_err(internal_error)?;
     }
@@ -495,7 +526,13 @@ async fn local_resume(
             &json!({"source": "local-api", "explicit_confirmation": true}),
         )
         .map_err(internal_error)?;
-    Ok((StatusCode::ACCEPTED, Json(json!({"stopped": false}))))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "stopped": false,
+            "fencing_epoch": state.fencing_epoch.load(Ordering::Acquire)
+        })),
+    ))
 }
 
 async fn register_offer(
@@ -721,7 +758,12 @@ async fn submit_job(
     };
     let lease = state
         .governor
-        .authorize_job(&job, offer, offer.node_id)
+        .authorize_job_at_epoch(
+            &job,
+            offer,
+            offer.node_id,
+            state.fencing_epoch.load(Ordering::Acquire),
+        )
         .map_err(|error| {
             (
                 StatusCode::FORBIDDEN,
@@ -897,7 +939,12 @@ async fn submit_shard_set(
         leases.push(
             state
                 .governor
-                .authorize_job(job, offer, placement.node_id)
+                .authorize_job_at_epoch(
+                    job,
+                    offer,
+                    placement.node_id,
+                    state.fencing_epoch.load(Ordering::Acquire),
+                )
                 .map_err(|error| {
                     (
                         StatusCode::CONFLICT,
@@ -1279,6 +1326,7 @@ async fn claim_work(
     State(state): State<AppState>,
     Query(query): Query<ClaimQuery>,
 ) -> Result<Json<Option<WorkClaimV1>>, (StatusCode, Json<Value>)> {
+    let _admission_guard = state.admission_gate.lock().await;
     if state.kill_latch_path.is_file() {
         return Err((
             StatusCode::LOCKED,
@@ -1297,14 +1345,14 @@ async fn claim_work(
         ));
     }
     let mut assignments = state.assignments.write().map_err(lock_error)?;
+    let current_epoch = state.fencing_epoch.load(Ordering::Acquire);
+    let now = chrono::Utc::now();
     let Some(assignment) = assignments
         .values_mut()
         .filter(|assignment| {
             !assignment.claimed
                 && assignment.lease.node_id == query.node_id
-                && assignment
-                    .lease
-                    .is_active_at(chrono::Utc::now(), assignment.lease.fencing_epoch)
+                && assignment.lease.is_active_at(now, current_epoch)
         })
         .min_by_key(|assignment| assignment.lease.issued_at)
     else {
@@ -1386,6 +1434,13 @@ async fn submit_receipt(
             })),
         ));
     }
+    let _admission_guard = state.admission_gate.lock().await;
+    if state.kill_latch_path.is_file() {
+        return Err((
+            StatusCode::LOCKED,
+            Json(json!({"error": "owner kill latch is active"})),
+        ));
+    }
     let assignment = state
         .assignments
         .read()
@@ -1401,10 +1456,13 @@ async fn submit_receipt(
     if assignment.lease.lease_id != receipt.lease_id
         || assignment.lease.node_id != receipt.node_id
         || !assignment.claimed
+        || assignment.lease.fencing_epoch != state.fencing_epoch.load(Ordering::Acquire)
+        || receipt.started_at < assignment.lease.issued_at
+        || receipt.started_at > assignment.lease.expires_at
     {
         return Err((
             StatusCode::CONFLICT,
-            Json(json!({"error": "receipt does not match the claimed lease"})),
+            Json(json!({"error": "receipt does not match the current claimed lease authority"})),
         ));
     }
     for output in &receipt.outputs {
@@ -1613,12 +1671,13 @@ async fn stage_job_inputs(
             .map_err(internal_error)?;
         let storage_lease = state
             .governor
-            .authorize_storage(
+            .authorize_storage_at_epoch(
                 offer,
                 &input.digest,
                 input.size_bytes,
                 input.storage_class,
                 ArtifactTransferOperation::Put,
+                state.fencing_epoch.load(Ordering::Acquire),
             )
             .map_err(|error| {
                 (
@@ -1674,6 +1733,7 @@ async fn replicate_artifact(
     State(state): State<AppState>,
     Json(request): Json<ArtifactReplicateRequest>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let _admission_guard = state.admission_gate.lock().await;
     if state.kill_latch_path.is_file() {
         return Err((
             StatusCode::LOCKED,
@@ -1696,12 +1756,13 @@ async fn replicate_artifact(
     let (offer, endpoint) = remote_offer(&state, request.node_id)?;
     let lease = state
         .governor
-        .authorize_storage(
+        .authorize_storage_at_epoch(
             &offer,
             &source.digest,
             source.size_bytes,
             request.storage_class,
             ArtifactTransferOperation::Put,
+            state.fencing_epoch.load(Ordering::Acquire),
         )
         .map_err(|error| {
             (
@@ -1757,6 +1818,13 @@ async fn retrieve_artifact(
     State(state): State<AppState>,
     Json(request): Json<ArtifactRetrieveRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let _admission_guard = state.admission_gate.lock().await;
+    if state.kill_latch_path.is_file() {
+        return Err((
+            StatusCode::LOCKED,
+            Json(json!({"error": "owner kill latch is active"})),
+        ));
+    }
     let remote_artifact = state
         .artifact_replicas
         .read()
@@ -1772,12 +1840,13 @@ async fn retrieve_artifact(
     let (offer, endpoint) = remote_offer(&state, request.node_id)?;
     let lease = state
         .governor
-        .authorize_storage(
+        .authorize_storage_at_epoch(
             &offer,
             &remote_artifact.digest,
             remote_artifact.size_bytes,
             remote_artifact.storage_class,
             ArtifactTransferOperation::Get,
+            state.fencing_epoch.load(Ordering::Acquire),
         )
         .map_err(|error| {
             (
@@ -1924,7 +1993,7 @@ type RestoredState = (
     HashMap<(String, Uuid), ArtifactRefV1>,
 );
 
-fn restore_state(ledger: &Ledger) -> anyhow::Result<RestoredState> {
+fn restore_state(ledger: &Ledger, fencing_epoch: u64) -> anyhow::Result<RestoredState> {
     let mut nodes = HashMap::new();
     let mut offers = HashMap::new();
     let mut invites = HashMap::new();
@@ -1991,6 +2060,7 @@ fn restore_state(ledger: &Ledger) -> anyhow::Result<RestoredState> {
                     };
                     let lease: CapabilityLeaseV1 = serde_json::from_value(lease_value.clone())?;
                     if lease.expires_at > now
+                        && lease.fencing_epoch == fencing_epoch
                         && let Some(job) = proposed_jobs.get(&lease.job_id).cloned()
                     {
                         assignments.insert(
@@ -2020,6 +2090,7 @@ fn restore_state(ledger: &Ledger) -> anyhow::Result<RestoredState> {
                         .collect::<HashMap<_, _>>();
                     for lease in &leases {
                         if lease.expires_at > now
+                            && lease.fencing_epoch == fencing_epoch
                             && let Some(job) = jobs.get(&lease.job_id).cloned()
                         {
                             assignments.insert(

@@ -21,6 +21,8 @@ pub enum ExecutionError {
     InactiveLease,
     #[error("lease signature is invalid")]
     InvalidLease,
+    #[error("durable authority state rejected the lease: {0}")]
+    AuthorityState(String),
     #[error("adapter or operation is not implemented by this worker")]
     UnsupportedAdapter,
     #[error("required argument {0} is absent")]
@@ -70,12 +72,22 @@ fn execute_claim_inner(
     {
         return Err(ExecutionError::LeaseMismatch);
     }
+    verify_lease_with_key(&claim.governor_public_key, &claim.lease)
+        .map_err(|_| ExecutionError::InvalidLease)?;
     let now = Utc::now();
     if !claim.lease.is_active_at(now, fencing_epoch) {
         return Err(ExecutionError::InactiveLease);
     }
-    verify_lease_with_key(&claim.governor_public_key, &claim.lease)
-        .map_err(|_| ExecutionError::InvalidLease)?;
+    if let Some(store) = store {
+        store
+            .accept_authority(
+                "governor",
+                claim.lease.fencing_epoch,
+                &claim.lease.nonce,
+                claim.lease.expires_at,
+            )
+            .map_err(|error| ExecutionError::AuthorityState(error.to_string()))?;
+    }
 
     let started_at = Utc::now();
     let execution = run_adapter(claim, store);
@@ -374,6 +386,20 @@ mod tests {
         assert!(matches!(
             execute_claim(&claim, node_id, 0, &key),
             Err(ExecutionError::LeaseMismatch)
+        ));
+    }
+
+    #[test]
+    fn durable_worker_authority_rejects_lease_replay() {
+        let key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let node_id = Uuid::now_v7();
+        let claim = claim(&key, node_id);
+        let temp = tempfile::tempdir().unwrap();
+        let store = rampage_storage::CasStore::open(temp.path(), [8_u8; 32]).unwrap();
+        execute_claim_with_store(&claim, node_id, claim.lease.fencing_epoch, &key, &store).unwrap();
+        assert!(matches!(
+            execute_claim_with_store(&claim, node_id, claim.lease.fencing_epoch, &key, &store),
+            Err(ExecutionError::AuthorityState(_))
         ));
     }
 }

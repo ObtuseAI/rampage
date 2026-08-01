@@ -65,6 +65,9 @@ try {
     if ($initialHealth.mesh_endpoint_id -ne $restartedHealth.mesh_endpoint_id) {
         throw 'mesh identity did not survive restart'
     }
+    if ($initialHealth.fencing_epoch -ne $restartedHealth.fencing_epoch) {
+        throw 'normal controller restart unexpectedly invalidated active authority'
+    }
     $restoredNodes = Invoke-RestMethod "$controllerUrl/v1/nodes" -Headers $headers
     if ($restoredNodes.Count -ne 1) { throw 'enrolled node did not survive restart' }
 
@@ -132,12 +135,29 @@ try {
     if ($recoveredShardStatus.status -ne 'succeeded' -or $recoveredShardStatus.succeeded -ne 3) {
         throw "durable shard status did not survive restart: $($recoveredShardStatus | ConvertTo-Json -Compress)"
     }
+    $fencedLease = (& $cliExe --controller $controllerUrl run --value 'must be fenced' | Out-String) |
+        ConvertFrom-Json
+    $preStopHealth = Invoke-RestMethod "$controllerUrl/health"
     & $cliExe --controller $controllerUrl stop | Out-Null
     $stopped = Invoke-RestMethod "$controllerUrl/health"
     if (-not $stopped.kill_latch) { throw 'kill latch did not set' }
+    if ($stopped.fencing_epoch -le $preStopHealth.fencing_epoch) {
+        throw 'owner stop did not advance the durable fencing epoch'
+    }
     & $cliExe --controller $controllerUrl resume --confirm-owner-resume | Out-Null
     $resumed = Invoke-RestMethod "$controllerUrl/health"
     if ($resumed.kill_latch) { throw 'explicit resume failed' }
+    if ($resumed.fencing_epoch -ne $stopped.fencing_epoch) {
+        throw 'resume unexpectedly changed the fenced authority generation'
+    }
+    & $agentExe --controller $controllerUrl --key-file (Join-Path $e2eRoot 'agent.key') `
+        --work-once | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'post-fence worker poll failed' }
+    $postFenceEvents = Invoke-RestMethod "$controllerUrl/v1/events?after=0&limit=1000" -Headers $headers
+    $staleClaims = @($postFenceEvents | Where-Object {
+        $_.event_type -eq 'job.claimed' -and $_.subject_id -eq "$($fencedLease.job_id)"
+    })
+    if ($staleClaims.Count -ne 0) { throw 'a pre-stop lease remained claimable after fencing' }
 
     [pscustomobject]@{
         result = 'PASS'
@@ -150,6 +170,8 @@ try {
         shard_threshold_met = $shardStatus.threshold_met
         shard_restart_recovery = $true
         stop_resume = $true
+        durable_fencing = $true
+        stale_authority_denied = $true
         restart_recovery = $true
         tokenless_request_denied = $true
         artifacts = $e2eRoot

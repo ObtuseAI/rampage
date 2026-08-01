@@ -52,14 +52,14 @@ Rampage 0.2 is a working Windows x64 release candidate with evidence for the pat
 
 | Proof surface | Validated result |
 | --- | --- |
-| Trust kernel | Scoped, expiring Ed25519 capability leases; exact resource grants; fencing; fail-closed admission |
+| Trust kernel | Scoped Ed25519 leases; durable one-shot nonces; restart-safe monotonic epochs; STOP fencing; fail-closed admission |
 | OnePool | Three independent evaluation shards placed across bounded offers, completed with signed results, and recovered after restart |
 | Private mesh | Authenticated direct QUIC enrollment, control traffic, and artifact transport without a Tailscale dependency |
 | Storage fabric | Encrypted chunked CAS, signed storage leases, automatic input staging, replication, retrieval, and receipt outputs |
 | Real AI workload | A remote worker called its loopback Ollama runtime and returned the verified result in a signed receipt |
 | Compute Strategy | Read-only Maximum Model, Speed Boost, Throughput, Efficiency, and Autonomous placement previews with exact capacity and qualification blockers |
 | Packaged product | Native Tauri shell, role-aware system tray, close-to-tray, start-at-login, four sidecars, clean explicit shutdown, installer, and automatic desktop launcher |
-| Verification | 44 Rust tests plus desktop, TypeScript SDK, Python intelligence, Python SDK, mesh, packaging, and lifecycle gates |
+| Verification | 49 Rust tests plus desktop, TypeScript SDK, Python intelligence, Python SDK, mesh, packaging, and lifecycle gates |
 
 The complete qualification record—including artifact hashes and the unsigned-release boundary—is in
 [the release evidence](docs/RELEASE_EVIDENCE.md).
@@ -97,6 +97,11 @@ flowchart LR
 
 The narrow waist is the capability lease. Interfaces above it can become dramatically smarter;
 devices and engines below it can become dramatically more diverse. Neither change bypasses policy.
+
+That waist is durable, not merely signed. A normal controller restart preserves the current
+authority generation and recoverable work. Owner STOP advances the hash-chained generation;
+controllers reject old claims and receipts, while workers and artifact gateways persist consumed
+nonces and the highest epoch they have observed so replay remains denied after restart.
 
 ## OnePool: pool the work, not the address space
 

@@ -98,8 +98,14 @@ compatible memory, predicted speed, selected ranks, and the first fail-closed ga
 
 ## Next executable gate
 
-The distributed launcher and loopback model gateway are not shipped yet. They require a new signed
-model-session lease, backend process isolation, peer-specific allowlists, model/runtime digest
-verification, streaming failure semantics, lease cleanup, and a completed qualification campaign.
-Until those exist, Rampage may prove a placement candidate but cannot claim that cross-host single-
-model inference is operational.
+The generic durable-authority foundation is now implemented. Controller epochs live in the
+hash-chained ledger, survive normal restart, and advance on owner STOP. Job and storage leases carry
+that signed epoch; workers and artifact gateways durably consume each nonce once and reject lower
+epochs after restart. The end-to-end campaign proves restart recovery, STOP advancement, stale
+claim denial, and authenticated artifact transfer under the new rules.
+
+The distributed launcher and loopback OpenAI-compatible model gateway are not shipped yet. They
+still require a dedicated model-session lease, backend process isolation, peer-specific allowlists,
+model/runtime digest verification, streaming failure semantics, deterministic process cleanup, and
+a completed backend qualification campaign. Until those exist, Rampage may prove a placement
+candidate but cannot claim that cross-host single-model inference is operational.

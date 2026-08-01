@@ -29,3 +29,6 @@ uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_System_Power"] }
+
+[dev-dependencies]
+tempfile.workspace = true

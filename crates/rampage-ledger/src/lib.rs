@@ -1,7 +1,7 @@
 //! Durable append-only, hash-chained evidence ledger.
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -38,6 +38,8 @@ pub enum LedgerError {
     HashMismatch { sequence: u64 },
     #[error("ledger lock is poisoned")]
     Poisoned,
+    #[error("fencing epoch overflow for authority scope {0}")]
+    FencingEpochOverflow(String),
 }
 
 pub struct Ledger {
@@ -60,7 +62,11 @@ impl Ledger {
                 event_hash TEXT NOT NULL UNIQUE
             );
             CREATE INDEX IF NOT EXISTS idx_ledger_subject
-                ON ledger_events(subject_id, sequence);",
+                ON ledger_events(subject_id, sequence);
+            CREATE TABLE IF NOT EXISTS authority_epochs (
+                scope TEXT PRIMARY KEY,
+                fencing_epoch INTEGER NOT NULL CHECK(fencing_epoch >= 0)
+            );",
         )?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -77,53 +83,58 @@ impl Ledger {
         subject_id: &str,
         payload: &T,
     ) -> Result<LedgerEvent, LedgerError> {
-        let payload = serde_json::to_value(payload)?;
-        let payload_json = serde_json::to_string(&payload)?;
-        let recorded_at = Utc::now();
         let mut connection = self.connection.lock().map_err(|_| LedgerError::Poisoned)?;
         let transaction = connection.transaction()?;
-        let previous: Option<(u64, String)> = transaction
+        let event = append_in_transaction(&transaction, event_type, subject_id, payload)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    /// Atomically advance and evidence a durable authority fencing epoch.
+    ///
+    /// Authority-revoking transitions call this before issuing any new authority. The epoch row
+    /// and its hash-chained evidence event commit in the same SQLite transaction, so a crash cannot
+    /// publish a new epoch without preserving the evidence that invalidates older leases.
+    pub fn advance_fencing_epoch(&self, scope: &str) -> Result<u64, LedgerError> {
+        let mut connection = self.connection.lock().map_err(|_| LedgerError::Poisoned)?;
+        let transaction = connection.transaction()?;
+        let current: Option<u64> = transaction
             .query_row(
-                "SELECT sequence, event_hash FROM ledger_events ORDER BY sequence DESC LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                "SELECT fencing_epoch FROM authority_epochs WHERE scope = ?1",
+                params![scope],
+                |row| row.get(0),
             )
             .optional()?;
-        let sequence = previous.as_ref().map_or(1, |(sequence, _)| sequence + 1);
-        let previous_hash = previous
-            .map(|(_, hash)| hash)
-            .unwrap_or_else(|| GENESIS_HASH.to_string());
-        let event_hash = calculate_hash(
-            sequence,
-            recorded_at,
-            event_type,
-            subject_id,
-            &payload_json,
-            &previous_hash,
-        );
+        let next = current
+            .unwrap_or(0)
+            .checked_add(1)
+            .filter(|epoch| *epoch <= i64::MAX as u64)
+            .ok_or_else(|| LedgerError::FencingEpochOverflow(scope.to_string()))?;
         transaction.execute(
-            "INSERT INTO ledger_events
-             (recorded_at, event_type, subject_id, payload_json, previous_hash, event_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                recorded_at.to_rfc3339(),
-                event_type,
-                subject_id,
-                payload_json,
-                previous_hash,
-                event_hash
-            ],
+            "INSERT INTO authority_epochs(scope, fencing_epoch) VALUES (?1, ?2)
+             ON CONFLICT(scope) DO UPDATE SET fencing_epoch = excluded.fencing_epoch",
+            params![scope, next],
+        )?;
+        append_in_transaction(
+            &transaction,
+            "authority.epoch.advanced",
+            scope,
+            &serde_json::json!({"fencing_epoch": next}),
         )?;
         transaction.commit()?;
-        Ok(LedgerEvent {
-            sequence,
-            recorded_at,
-            event_type: event_type.to_string(),
-            subject_id: subject_id.to_string(),
-            payload,
-            previous_hash,
-            event_hash,
-        })
+        Ok(next)
+    }
+
+    pub fn current_fencing_epoch(&self, scope: &str) -> Result<u64, LedgerError> {
+        let connection = self.connection.lock().map_err(|_| LedgerError::Poisoned)?;
+        Ok(connection
+            .query_row(
+                "SELECT fencing_epoch FROM authority_epochs WHERE scope = ?1",
+                params![scope],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
     }
 
     pub fn events(&self, after_sequence: u64, limit: u32) -> Result<Vec<LedgerEvent>, LedgerError> {
@@ -260,6 +271,58 @@ impl Ledger {
     }
 }
 
+fn append_in_transaction<T: Serialize>(
+    transaction: &Transaction<'_>,
+    event_type: &str,
+    subject_id: &str,
+    payload: &T,
+) -> Result<LedgerEvent, LedgerError> {
+    let payload = serde_json::to_value(payload)?;
+    let payload_json = serde_json::to_string(&payload)?;
+    let recorded_at = Utc::now();
+    let previous: Option<(u64, String)> = transaction
+        .query_row(
+            "SELECT sequence, event_hash FROM ledger_events ORDER BY sequence DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let sequence = previous.as_ref().map_or(1, |(sequence, _)| sequence + 1);
+    let previous_hash = previous
+        .map(|(_, hash)| hash)
+        .unwrap_or_else(|| GENESIS_HASH.to_string());
+    let event_hash = calculate_hash(
+        sequence,
+        recorded_at,
+        event_type,
+        subject_id,
+        &payload_json,
+        &previous_hash,
+    );
+    transaction.execute(
+        "INSERT INTO ledger_events
+         (recorded_at, event_type, subject_id, payload_json, previous_hash, event_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            recorded_at.to_rfc3339(),
+            event_type,
+            subject_id,
+            payload_json,
+            previous_hash,
+            event_hash
+        ],
+    )?;
+    Ok(LedgerEvent {
+        sequence,
+        recorded_at,
+        event_type: event_type.to_string(),
+        subject_id: subject_id.to_string(),
+        payload,
+        previous_hash,
+        event_hash,
+    })
+}
+
 fn calculate_hash(
     sequence: u64,
     recorded_at: DateTime<Utc>,
@@ -307,5 +370,30 @@ mod tests {
             ledger.append("page.test", "subject", &index).unwrap();
         }
         assert_eq!(ledger.verify().unwrap(), 10_005);
+    }
+
+    #[test]
+    fn fencing_epoch_is_durable_and_hash_chained() {
+        let temp = std::env::temp_dir().join(format!(
+            "rampage-ledger-fence-{}-{}.db",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        {
+            let ledger = Ledger::open(&temp).unwrap();
+            assert_eq!(ledger.current_fencing_epoch("controller").unwrap(), 0);
+            assert_eq!(ledger.advance_fencing_epoch("controller").unwrap(), 1);
+            assert_eq!(ledger.advance_fencing_epoch("controller").unwrap(), 2);
+            assert_eq!(ledger.verify().unwrap(), 2);
+        }
+        {
+            let reopened = Ledger::open(&temp).unwrap();
+            assert_eq!(reopened.current_fencing_epoch("controller").unwrap(), 2);
+            assert_eq!(reopened.advance_fencing_epoch("controller").unwrap(), 3);
+            assert_eq!(reopened.verify().unwrap(), 3);
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", temp.display(), suffix));
+        }
     }
 }
