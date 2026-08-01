@@ -171,11 +171,12 @@
       <div class="evidence-grid">
         <article><b>LEASE</b><h3>Exact durable authority</h3><p>The Governor signs only checked minimum resources. Workers persist consumed nonces and the highest authority epoch across restart.</p></article>
         <article><b>SHARD</b><h3>Atomic pooled work</h3><p>A complete set is planned against one reservation book and admitted all-or-nothing, with explicit success thresholds.</p></article>
-        <article><b>MESH</b><h3>Owned private transport</h3><p>Signed endpoint identity, pinned peers, and narrow QUIC routes replace dependency on a third-party tailnet.</p></article>
+        <article><b>MESH</b><h3>Direct first. Owner relayed.</h3><p>Signed peers use direct QUIC when possible. Hard NAT falls back only to the bundled owner relay, with a fresh Governor-signed allowlist and resource caps—never a silent public fleet.</p></article>
         <article><b>CAS</b><h3>Encrypted donated storage</h3><p>One-shot signed transfer leases bind digest, direction, node, size, class, expiry, and fencing epoch.</p></article>
         <article><b>RECEIPT</b><h3>Verifiable completion</h3><p>Workers sign the job result and artifact references; controller restart reconstructs durable status.</p></article>
         <article><b>STOP</b><h3>Human-owned interruption</h3><p>Owner STOP advances the hash-chained epoch; old claims and receipts remain fenced after restart.</p></article>
       </div>
+      <p class="pool-note">The relay proof turns off every direct IP transport on both test peers, leaving the owner service as the only possible route, then exchanges an authenticated QUIC payload. The honest boundary: public-WAN and every-NAT qualification still require a multi-network campaign.</p>
     </section>
 
     <section class="section callout">

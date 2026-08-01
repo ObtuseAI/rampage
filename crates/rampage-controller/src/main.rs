@@ -30,8 +30,8 @@ use rampage_protocol::{
     MeshEndpointRecordV1, ModelBackend, ModelChatMessageV1, ModelExecutionReceiptV1,
     ModelInvocationFrameKind, ModelInvocationRequestV1, ModelMemoryKind, ModelParallelism,
     ModelRuntimeOfferV1, ModelRuntimeStatus, ModelSessionLeaseV1, ModelSessionRequestV1,
-    ModelUsageV1, NodeIdentityV1, PromotionCanaryLeaseV1, PromotionCandidateV1, ResourceClass,
-    ResourceOfferV1, ShardSetV1, StorageClass, WorkClaimV1,
+    ModelUsageV1, NodeIdentityV1, PromotionCanaryLeaseV1, PromotionCandidateV1,
+    RelayAccessManifestV1, ResourceClass, ResourceOfferV1, ShardSetV1, StorageClass, WorkClaimV1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -363,6 +363,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/artifacts/replicate", post(replicate_artifact))
         .route("/v1/artifacts/retrieve", post(retrieve_artifact))
         .route("/v1/benchmarks/link", post(link_probe))
+        .route("/v1/mesh/relay-access", get(relay_access_manifest))
         .route("/v1/governor/key", get(governor_key))
         .route("/v1/improvements/canary", post(authorize_promotion_canary))
         .route("/v1/projects/discover", post(discover_project))
@@ -2426,14 +2427,14 @@ fn build_diagnostic_report(
         }
         match &offer.mesh_endpoint {
             None => findings.push(diagnostic_finding(
-                DiagnosticSeverity::Critical,
-                "AUTHENTICATED_ROUTE_MISSING",
+                DiagnosticSeverity::Info,
+                "LOOPBACK_POLLING_ONLY",
                 offer.node_id.to_string(),
-                "The offer has no signed mesh endpoint, so the controller cannot execute remote work.",
+                "The contributor uses the token-protected loopback polling lane and cannot receive mesh-only model or artifact traffic.",
                 "refresh_signed_mesh_endpoint",
                 "r0_configuration",
-                true,
-                "endpoint identity must match enrollment and the signed offer",
+                false,
+                "local polling jobs remain eligible; mesh-only operations still require a signed endpoint",
             )),
             Some(endpoint)
                 if endpoint.direct_addresses.is_empty() && endpoint.relay_urls.is_empty() =>
@@ -3322,6 +3323,35 @@ async fn governor_key(State(state): State<AppState>) -> Json<Value> {
         "schema": "rampage.governor-key.v1",
         "public_key": hex::encode(state.governor.verifying_key().to_bytes())
     }))
+}
+
+async fn relay_access_manifest(
+    State(state): State<AppState>,
+) -> Result<Response, (StatusCode, Json<Value>)> {
+    let now = chrono::Utc::now();
+    let mut allowed_endpoint_ids = state
+        .nodes
+        .read()
+        .map_err(lock_error)?
+        .values()
+        .map(|identity| identity.public_key.clone())
+        .collect::<BTreeSet<_>>();
+    allowed_endpoint_ids.insert(state.mesh.endpoint_id());
+    let mut manifest = RelayAccessManifestV1 {
+        schema: RelayAccessManifestV1::SCHEMA.into(),
+        fabric_id: String::new(),
+        generation: state.fencing_epoch.load(Ordering::Acquire),
+        allowed_endpoint_ids,
+        issued_at: now,
+        expires_at: now + chrono::Duration::minutes(10),
+        signature: String::new(),
+    };
+    state.governor.sign_relay_access_manifest(&mut manifest);
+    let mut response = Json(manifest).into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 async fn authorize_promotion_canary(
@@ -4394,8 +4424,8 @@ async fn process_mesh_control(
     match outgoing.send().await {
         Ok(response) => {
             let status = response.status().as_u16();
-            match response.bytes().await {
-                Ok(bytes) if bytes.len() <= 1024 * 1024 => MeshControlResponseV1 {
+            match bounded_mesh_controller_response(response).await {
+                Ok(bytes) => MeshControlResponseV1 {
                     schema: MeshControlResponseV1::SCHEMA.into(),
                     request_id: request.request_id,
                     status,
@@ -4415,6 +4445,30 @@ async fn process_mesh_control(
             "local controller unavailable",
         ),
     }
+}
+
+async fn bounded_mesh_controller_response(
+    mut response: reqwest::Response,
+) -> anyhow::Result<Vec<u8>> {
+    const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+    anyhow::ensure!(
+        response.content_length().unwrap_or(0) <= MAX_RESPONSE_BYTES as u64,
+        "controller response exceeded one MiB"
+    );
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        append_bounded_bytes(&mut bytes, &chunk, MAX_RESPONSE_BYTES)?;
+    }
+    Ok(bytes)
+}
+
+fn append_bounded_bytes(buffer: &mut Vec<u8>, chunk: &[u8], limit: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        buffer.len().saturating_add(chunk.len()) <= limit,
+        "controller response exceeded one MiB"
+    );
+    buffer.extend_from_slice(chunk);
+    Ok(())
 }
 
 fn authorize_mesh_control(
@@ -4449,6 +4503,9 @@ fn authorize_mesh_control(
                     .ok_or_else(|| "offer body is missing".to_string())?,
             )
             .map_err(|_| "offer body is invalid".to_string())?;
+            if offer.mesh_endpoint.is_none() {
+                return Err("remote worker offer requires a signed mesh endpoint".into());
+            }
             require_mesh_node(state, peer, offer.node_id)
         }
         ("POST", "/v1/receipts") => {
@@ -4564,6 +4621,14 @@ mod tests {
             mesh_endpoint: None,
             signature: "signed".into(),
         }
+    }
+
+    #[test]
+    fn chunked_mesh_proxy_response_is_bounded_during_accumulation() {
+        let mut bytes = Vec::new();
+        append_bounded_bytes(&mut bytes, &[1, 2], 3).unwrap();
+        assert!(append_bounded_bytes(&mut bytes, &[3, 4], 3).is_err());
+        assert_eq!(bytes, vec![1, 2]);
     }
 
     #[test]
@@ -4743,8 +4808,8 @@ mod tests {
     }
 
     #[test]
-    fn governor_turns_unroutable_evidence_into_a_reversible_placement_exclusion() {
-        let offer = valid_model_offer();
+    fn diagnostics_preserve_local_polling_but_exclude_an_empty_mesh_route() {
+        let mut offer = valid_model_offer();
         let identity = NodeIdentityV1 {
             schema: "rampage.node-identity.v1".into(),
             node_id: offer.node_id,
@@ -4758,8 +4823,37 @@ mod tests {
         };
         let report = build_diagnostic_report(
             chrono::Utc::now(),
-            &HashMap::from([(identity.node_id, identity)]),
-            &HashMap::from([(offer.node_id, offer)]),
+            &HashMap::from([(identity.node_id, identity.clone())]),
+            &HashMap::from([(offer.node_id, offer.clone())]),
+            0,
+            &HashMap::new(),
+            &[],
+            false,
+        );
+        let constraints =
+            derive_autonomous_constraints(&Governor::ephemeral(GovernorConfig::default()), &report);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "LOOPBACK_POLLING_ONLY")
+        );
+        assert!(constraints.excluded_nodes.is_empty());
+
+        let now = chrono::Utc::now();
+        offer.mesh_endpoint = Some(MeshEndpointRecordV1 {
+            schema: MeshEndpointRecordV1::SCHEMA.into(),
+            endpoint_id: "test-key".into(),
+            direct_addresses: Vec::new(),
+            relay_urls: Vec::new(),
+            issued_at: now,
+            expires_at: offer.expires_at,
+            signature: "signed".into(),
+        });
+        let report = build_diagnostic_report(
+            now,
+            &HashMap::from([(identity.node_id, identity.clone())]),
+            &HashMap::from([(offer.node_id, offer.clone())]),
             0,
             &HashMap::new(),
             &[],
@@ -4769,7 +4863,7 @@ mod tests {
             derive_autonomous_constraints(&Governor::ephemeral(GovernorConfig::default()), &report);
         assert_eq!(
             constraints.excluded_nodes.values().next().unwrap(),
-            &["AUTHENTICATED_ROUTE_MISSING".to_string()]
+            &["AUTHENTICATED_ROUTE_EMPTY".to_string()]
         );
         assert_eq!(constraints.evidence_digest, report.evidence_digest);
     }

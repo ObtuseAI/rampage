@@ -25,3 +25,6 @@ sysinfo.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -19,7 +19,8 @@ the authority to run wild.
 [**Launch the showcase**](https://obtuseai.github.io/rampage/) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Security](SECURITY.md) ·
-[Release evidence](docs/RELEASE_EVIDENCE.md)
+[Release evidence](docs/RELEASE_EVIDENCE.md) ·
+[Owner-relay evidence](docs/OWNER_RELAY_EVIDENCE.md)
 
 </div>
 
@@ -54,19 +55,21 @@ Rampage 0.2 is a working Windows x64 release candidate with evidence for the pat
 | --- | --- |
 | Trust kernel | Scoped Ed25519 leases; durable one-shot nonces; restart-safe monotonic epochs; STOP fencing; fail-closed admission |
 | OnePool | Three independent evaluation shards placed across bounded offers, completed with signed results, and recovered after restart |
-| Private mesh | Authenticated direct QUIC enrollment, control traffic, and artifact transport without a Tailscale dependency |
+| Private mesh | Authenticated direct QUIC plus a forced-relay proof through the bundled owner-operated relay; no Tailscale account or silent public relay |
 | Storage fabric | Encrypted chunked CAS, signed storage leases, automatic input staging, replication, retrieval, and receipt outputs |
 | Real AI workload | OpenAI, Anthropic Messages, and OpenRouter-style text requests crossed authenticated QUIC to a worker's loopback Ollama, streamed back, and ended in a transcript-matched signed receipt |
 | Universal capability contract | Signed offers advertise exact workload domain, adapter, operation, execution pattern, isolation, runtime digest, and qualification status; candidate profiles grant no authority |
 | Autonomous self-scan | Stable evidence digests cover routes, links, failures, denials, thermal/battery pressure, capability gaps, idle capacity, and protected-artifact replication |
 | Compute Strategy | Read-only Maximum Model, Speed Boost, Throughput, Efficiency, and Autonomous placement previews with exact capacity and qualification blockers |
-| Packaged product | Native Tauri shell, role-aware system tray, close-to-tray, start-at-login, four sidecars, clean explicit shutdown, installer, and automatic desktop launcher |
-| Verification | 76 Rust tests plus desktop, TypeScript SDK, Python intelligence, Python SDK, deterministic universal-gateway, mesh, packaging, and lifecycle gates |
+| Packaged product | Native Tauri shell, role-aware system tray, close-to-tray, start-at-login, governed sidecars, clean explicit shutdown, installer, and automatic desktop launcher |
+| Verification | Rust, desktop, TypeScript SDK, Python intelligence, Python SDK, deterministic universal-gateway, forced-relay mesh, packaging, and lifecycle gates |
 
 The packaged 0.2 qualification record—including artifact hashes and the unsigned-release boundary—is
 in [the release evidence](docs/RELEASE_EVIDENCE.md). The newer API, workload-contract, self-scan,
 and signed-canary campaign is recorded separately in
-[universal-compute evidence](docs/UNIVERSAL_COMPUTE_EVIDENCE.md).
+[universal-compute evidence](docs/UNIVERSAL_COMPUTE_EVIDENCE.md). The self-hosted hard-NAT fallback
+and its forced-relay transport proof are recorded in
+[owner-relay evidence](docs/OWNER_RELAY_EVIDENCE.md).
 
 ## The design graph
 
@@ -83,6 +86,7 @@ flowchart LR
     W1 <--> M["Authenticated QUIC mesh"]
     W2 <--> M
     W3 <--> M
+    M -. "hard-NAT fallback only" .-> R["Owner relay\nsigned admission · rate caps"]
     M <--> A["Encrypted artifact fabric\ncontent-addressed · bounded"]
     C --> E["Hash-chained evidence ledger"]
     G --> E
@@ -194,6 +198,13 @@ explicit Quit that releases the desktop-owned sidecars. Auto-start launches quie
 The current binaries are unsigned release candidates. Verify the published SHA-256 checksums and
 expect Windows reputation warnings until ObtuseAI publishes an Authenticode-signed build.
 
+Direct QUIC is automatic. If hard NAT or CGNAT blocks a useful direct path, the bundled
+`rampage-relay` can be placed behind the owner's HTTPS endpoint. It admits only endpoint identities
+in a fresh Governor-signed manifest, rate-limits every connection, and is launched automatically by
+the desktop when `rampage-relay.json` exists in the runtime directory. See
+[Owner relay](docs/OWNER_RELAY.md) for the exact one-time setup and unavoidable public-reachability
+boundary.
+
 For a real local-model workload:
 
 ```powershell
@@ -252,6 +263,7 @@ rampage artifact-hash $artifact.digest
 | `rampage-controller` | Scheduling, recovery, atomic shard admission, local API, and mesh gateway |
 | `rampage-agent` | Hardware discovery and allowlisted CPU/GPU/Ollama worker adapters |
 | `rampage-mesh` | Rampage-owned Iroh/QUIC identities and bounded remote control frames |
+| `rampage-relay` | Owner-hosted hard-NAT fallback with signed endpoint admission and resource limits |
 | `rampage-storage` | Encrypted, chunked content-addressed storage and durability classes |
 | `rampage-ledger` | Recoverable, paginated, hash-chained SQLite evidence |
 | `apps/desktop` | Tauri/React spatial Fabric Arena and accessible Ops Grid |
@@ -287,6 +299,7 @@ sidecar binaries, databases, keys, and logs are excluded from source control.
 [Operations](docs/OPERATIONS.md) ·
 [Backend admission gates](docs/BACKEND_GATES.md) ·
 [Model Fabric](docs/MODEL_FABRIC.md) ·
+[Owner relay](docs/OWNER_RELAY.md) ·
 [Platform matrix](docs/PLATFORM_MATRIX.md) ·
 [Security policy](SECURITY.md) ·
 [Release evidence](docs/RELEASE_EVIDENCE.md)

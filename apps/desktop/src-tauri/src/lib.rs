@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Mutex, time::Duration};
+use std::{io::Read, path::PathBuf, sync::Mutex, time::Duration};
 use sysinfo::{Pid, System};
 use tauri::{
     AppHandle, Manager, WindowEvent,
@@ -272,6 +272,85 @@ fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(
     Ok(())
 }
 
+fn launch_owner_relay_if_configured(
+    app: &AppHandle,
+    data_dir: &std::path::Path,
+) -> Result<(), String> {
+    let config = data_dir.join("rampage-relay.json");
+    if !config.is_file() {
+        return Ok(());
+    }
+    let (_, relay) = app
+        .shell()
+        .sidecar("rampage-relay")
+        .map_err(|error| error.to_string())?
+        .args([
+            "serve".into(),
+            "--config".into(),
+            config.to_string_lossy().into_owned(),
+        ])
+        .spawn()
+        .map_err(|error| format!("could not start owner relay: {error}"))?;
+    app.state::<Sidecars>()
+        .0
+        .lock()
+        .map_err(|_| "sidecar state lock poisoned".to_string())?
+        .push(relay);
+    Ok(())
+}
+
+fn read_bounded_regular_file(
+    path: &std::path::Path,
+    limit: u64,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let file =
+        std::fs::File::open(path).map_err(|error| format!("could not open {label}: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("could not inspect {label}: {error}"))?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(format!("{label} is not a bounded regular file"));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read {label}: {error}"))?;
+    if bytes.len() as u64 > limit {
+        return Err(format!("{label} exceeds its size limit"));
+    }
+    Ok(bytes)
+}
+
+fn configured_private_relay(data_dir: &std::path::Path) -> Result<Option<String>, String> {
+    let config_path = data_dir.join("rampage-relay.json");
+    if !config_path.is_file() {
+        return Ok(None);
+    }
+    let bytes = read_bounded_regular_file(&config_path, 1024 * 1024, "owner relay configuration")?;
+    let config: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    if config.get("schema").and_then(serde_json::Value::as_str)
+        != Some("rampage.owner-relay-config.v1")
+    {
+        return Err("owner relay configuration has an unsupported schema".into());
+    }
+    let public_url = config
+        .get("public_url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "owner relay configuration is missing public_url".to_string())?;
+    let parsed = reqwest::Url::parse(public_url).map_err(|error| error.to_string())?;
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err("owner relay public_url must be credential-free HTTPS".into());
+    }
+    Ok(Some(public_url.to_string()))
+}
+
 fn launch_fabric(app: &AppHandle) -> Result<(), String> {
     let data_dir = runtime_dir(app)?;
     std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
@@ -280,11 +359,16 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
     }
     let intelligence_dir = data_dir.join("intelligence");
     std::fs::create_dir_all(&intelligence_dir).map_err(|error| error.to_string())?;
-    let (_, controller) = app
+    let private_relay = configured_private_relay(&data_dir)?;
+    let mut controller_command = app
         .shell()
         .sidecar("rampage-controller")
         .map_err(|error| error.to_string())?
-        .env("RAMPAGE_DATA_DIR", &data_dir)
+        .env("RAMPAGE_DATA_DIR", &data_dir);
+    if let Some(relay) = private_relay {
+        controller_command = controller_command.env("RAMPAGE_PRIVATE_RELAYS", relay);
+    }
+    let (_, controller) = controller_command
         .spawn()
         .map_err(|error| format!("could not start controller: {error}"))?;
     app.state::<Sidecars>()
@@ -299,15 +383,24 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let token = std::fs::read_to_string(&token_path)
-        .map_err(|error| format!("controller token unavailable: {error}"))?;
+    let token = String::from_utf8(read_bounded_regular_file(
+        &token_path,
+        512,
+        "controller token",
+    )?)
+    .map_err(|_| "controller token is not UTF-8".to_string())?;
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        return Err("controller token is empty".into());
+    }
+    launch_owner_relay_if_configured(app, &data_dir)?;
     let (_, intelligence) = app
         .shell()
         .sidecar("rampage-intelligence")
         .map_err(|error| error.to_string())?
         .env("RAMPAGE_DATA_DIR", &intelligence_dir)
         .env("RAMPAGE_ENABLE_MODELS", "false")
-        .env("RAMPAGE_TOKEN", token.trim())
+        .env("RAMPAGE_TOKEN", &token)
         .spawn()
         .map_err(|error| format!("could not start intelligence service: {error}"))?;
     app.state::<Sidecars>()
@@ -337,7 +430,7 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
         }
         let Ok(response) = client
             .post("http://127.0.0.1:47831/v1/enrollment/invites")
-            .header("x-rampage-token", token.trim())
+            .header("x-rampage-token", &token)
             .json(&serde_json::json!({}))
             .send()
             .await
@@ -534,6 +627,35 @@ mod tests {
             "rampage.exe",
             "--background-worker"
         ]));
+    }
+
+    #[test]
+    fn owner_relay_config_only_exports_credential_free_https() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("rampage-relay.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "rampage.owner-relay-config.v1",
+                "public_url": "https://relay.example.test"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            configured_private_relay(temp.path()).unwrap().as_deref(),
+            Some("https://relay.example.test")
+        );
+        std::fs::write(
+            path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "rampage.owner-relay-config.v1",
+                "public_url": "https://user:secret@relay.example.test?token=leak"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(configured_private_relay(temp.path()).is_err());
     }
 
     #[test]

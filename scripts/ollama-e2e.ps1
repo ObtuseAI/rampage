@@ -111,6 +111,14 @@ try {
         $selfScan.evidence_digest -notmatch '^sha256:[0-9a-f]{64}$') {
         throw 'autonomously thresholded self-scan did not return stable evidence'
     }
+    $relayAccess = Invoke-RestMethod 'http://127.0.0.1:47831/v1/mesh/relay-access' -Headers $headers
+    if ($relayAccess.schema -ne 'rampage.relay-access-manifest.v1' -or
+        $relayAccess.fabric_id -notmatch '^sha256:[0-9a-f]{64}$' -or
+        $relayAccess.generation -lt 1 -or
+        @($relayAccess.allowed_endpoint_ids).Count -lt 2 -or
+        [string]::IsNullOrWhiteSpace($relayAccess.signature)) {
+        throw 'controller did not export a bounded Governor-signed owner-relay allowlist'
+    }
     $gateNames = @(
         'g0_schema_policy_static',
         'g1_deterministic_replay',
@@ -234,6 +242,7 @@ try {
         capability_discovery = $true
         workload_capability_contract = $true
         autonomously_thresholded_self_scan = $true
+        signed_owner_relay_access = $true
         signed_autonomous_canary = $true
         signed_receipt_evidence = $true
         tokenless_request_denied = $true

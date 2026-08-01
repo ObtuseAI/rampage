@@ -46,6 +46,10 @@ class RampageClient:
         """Run and return the deterministic fabric bottleneck and failure scan."""
         return self._get("/v1/diagnostics/self-scan")
 
+    def relay_access_manifest(self) -> dict[str, Any]:
+        """Return the fresh Governor-signed endpoint allowlist for an owner relay."""
+        return self._get("/v1/mesh/relay-access")
+
     def authorize_promotion_canary(
         self, candidate: dict[str, Any]
     ) -> dict[str, Any]:

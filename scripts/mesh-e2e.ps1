@@ -201,10 +201,19 @@ try {
         $outputReport.observed_digest -ne $jobStored.digest) {
         throw 'worker output did not prove the staged input digest'
     }
-    if (-not ($events.event_type -contains 'artifact.replicated') -or
-        -not ($events.event_type -contains 'artifact.retrieved') -or
-        -not ($events.event_type -contains 'artifact.input.staged') -or
-        -not ($events.event_type -contains 'artifact.output.recorded')) {
+    # job.receipted is durably appended immediately before artifact.output.recorded. Poll for the
+    # complete evidence set instead of reusing the receipt snapshot and racing the next append.
+    $artifactEvidence = $false
+    for ($attempt = 0; $attempt -lt 100; $attempt++) {
+        $events = @(Invoke-RestMethod 'http://127.0.0.1:47831/v1/events?after=0&limit=1000' -Headers $headers)
+        $artifactEvidence = ($events.event_type -contains 'artifact.replicated') -and
+            ($events.event_type -contains 'artifact.retrieved') -and
+            ($events.event_type -contains 'artifact.input.staged') -and
+            ($events.event_type -contains 'artifact.output.recorded')
+        if ($artifactEvidence) { break }
+        Start-Sleep -Milliseconds 50
+    }
+    if (-not $artifactEvidence) {
         throw 'artifact transfer evidence was not recorded'
     }
     [pscustomobject]@{
