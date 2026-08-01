@@ -32,7 +32,7 @@ try {
     if (-not $ready) { throw 'fake Ollama did not become ready' }
     & (Join-Path $PSScriptRoot 'ollama-e2e.ps1') `
         -Model 'rampage-test:latest' -OllamaUrl $ollamaUrl
-    if ($LASTEXITCODE -ne 0) { throw 'deterministic model gateway E2E failed' }
+    if (-not $?) { throw 'deterministic model gateway E2E failed' }
 } finally {
     if ($server -and -not $server.HasExited) {
         Stop-Process -Id $server.Id -Force
