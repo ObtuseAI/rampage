@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rampage.local/contracts/rampage.edge-session.v1.schema.json",
+  "title": "Rampage Edge Donation Session v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "node_id",
+    "device_kind",
+    "foreground_allowed",
+    "restart_tolerant_only",
+    "battery_floor_percent",
+    "thermal_floor_percent",
+    "expires_at"
+  ],
+  "properties": {
+    "schema": { "const": "rampage.edge-session.v1" },
+    "node_id": { "type": "string", "format": "uuid" },
+    "device_kind": { "enum": ["phone", "tablet", "console"] },
+    "foreground_allowed": { "const": true },
+    "restart_tolerant_only": { "const": true },
+    "battery_floor_percent": { "type": "integer", "minimum": 20, "maximum": 100 },
+    "thermal_floor_percent": { "type": "integer", "minimum": 20, "maximum": 100 },
+    "expires_at": { "type": "string", "format": "date-time" }
+  }
+}

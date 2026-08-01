@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://obtuse.ai/rampage/contracts/rampage.dumbmoney.telemetry-bundle.v1.schema.json",
+  "title": "Rampage DumbMoney Telemetry Bundle V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "producer", "cycle_id", "observed_at", "cells", "resource_demands", "evidence_refs", "digest"],
+  "properties": {
+    "schema": { "const": "rampage.dumbmoney.telemetry-bundle.v1" },
+    "producer": { "const": "dumbmoney" },
+    "cycle_id": { "type": "string", "minLength": 1 },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "cells": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "state", "queued_work", "authority"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "state": { "enum": ["ready", "working", "degraded", "blocked", "offline"] },
+          "queued_work": { "type": "integer", "minimum": 0 },
+          "authority": { "type": "string" }
+        }
+      }
+    },
+    "resource_demands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["work_id", "adapter", "restart_tolerant", "priority"],
+        "properties": {
+          "work_id": { "type": "string", "minLength": 1 },
+          "adapter": { "type": "string", "minLength": 1 },
+          "restart_tolerant": { "type": "boolean" },
+          "priority": { "type": "integer", "minimum": 0, "maximum": 100 }
+        }
+      }
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+    },
+    "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+  }
+}
+

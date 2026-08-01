@@ -1,0 +1,28 @@
+{
+  "schema": "dumbmoney.cell-manifest.v1",
+  "name": "rampage",
+  "role": "RESOURCE_FABRIC_AND_EXPERIMENT_EXECUTION_ONLY",
+  "universal_product": true,
+  "in_decision_path": false,
+  "execution_authority": false,
+  "credential_access": false,
+  "policy_mutation": false,
+  "capital_authority": false,
+  "broker_api_authority": false,
+  "may_trade": false,
+  "inputs": [
+    "rampage.dumbmoney.telemetry-bundle.v1"
+  ],
+  "outputs": [
+    "rampage.proposal-envelope.v1"
+  ],
+  "forbidden_targets": [
+    "dumbmoney_ledger",
+    "dumbmoney_runtime_database",
+    "dummy_credentials",
+    "dopey_credentials",
+    "broker_adapters",
+    "policy_decisions"
+  ]
+}
+

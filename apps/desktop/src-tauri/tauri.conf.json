@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Rampage",
+  "version": "0.1.0",
+  "identifier": "ai.obtuse.rampage",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{
+      "title": "Rampage",
+      "width": 1440,
+      "height": 900,
+      "minWidth": 960,
+      "minHeight": 640,
+      "decorations": true,
+      "transparent": false
+    }],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:47831 http://127.0.0.1:47832; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/rampage-controller",
+      "binaries/rampage-agent",
+      "binaries/rampage",
+      "binaries/rampage-intelligence"
+    ],
+    "targets": ["msi", "nsis"],
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows/installer-hooks.nsh"
+      }
+    },
+    "category": "DeveloperTool",
+    "shortDescription": "Your machines, acting as one governed compute fabric."
+  }
+}
