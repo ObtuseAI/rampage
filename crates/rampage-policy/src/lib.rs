@@ -8,7 +8,8 @@ use rampage_protocol::{
     MAX_MODEL_OUTPUT_TOKENS, MAX_MODEL_PROMPT_BYTES, MeshEndpointRecordV1, ModelBackend,
     ModelExecutionReceiptV1, ModelParallelism, ModelRuntimeOfferV1, ModelRuntimeStatus,
     ModelSessionLeaseV1, NodeIdentityV1, PromotionCanaryLeaseV1, PromotionCandidateV1,
-    PromotionRiskV1, ResourceClass, ResourceOfferV1, StorageClass, StorageLeaseV1,
+    PromotionRiskV1, RelayAccessManifestV1, ResourceClass, ResourceOfferV1, StorageClass,
+    StorageLeaseV1,
 };
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -566,6 +567,10 @@ impl Governor {
         );
     }
 
+    pub fn sign_relay_access_manifest(&self, manifest: &mut RelayAccessManifestV1) {
+        sign_relay_access_manifest(&self.signing_key, manifest);
+    }
+
     fn sign_lease(&self, lease: &CapabilityLeaseV1) -> String {
         hex::encode(self.signing_key.sign(&lease_message(lease)).to_bytes())
     }
@@ -727,6 +732,39 @@ fn storage_lease_message(lease: &StorageLeaseV1) -> Vec<u8> {
 pub fn sign_mesh_endpoint(signing_key: &SigningKey, endpoint: &mut MeshEndpointRecordV1) {
     endpoint.signature.clear();
     endpoint.signature = hex::encode(signing_key.sign(&contract_message(endpoint)).to_bytes());
+}
+
+pub fn relay_fabric_id(public_key: &str) -> Result<String, Denial> {
+    let public_key_bytes = hex::decode(public_key).map_err(|_| Denial::InvalidSignature)?;
+    let _: [u8; 32] = public_key_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| Denial::InvalidSignature)?;
+    Ok(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(public_key_bytes))
+    ))
+}
+
+pub fn sign_relay_access_manifest(signing_key: &SigningKey, manifest: &mut RelayAccessManifestV1) {
+    manifest.fabric_id = relay_fabric_id(&hex::encode(signing_key.verifying_key().to_bytes()))
+        .expect("a Governor verifying key is valid");
+    manifest.signature.clear();
+    manifest.signature = hex::encode(signing_key.sign(&contract_message(manifest)).to_bytes());
+}
+
+pub fn verify_relay_access_manifest_with_key(
+    public_key: &str,
+    manifest: &RelayAccessManifestV1,
+) -> Result<(), Denial> {
+    if !manifest.is_valid_at(Utc::now()) || manifest.fabric_id != relay_fabric_id(public_key)? {
+        return Err(Denial::InvalidSignature);
+    }
+    verify_contract_signature(public_key, &manifest.signature, &{
+        let mut unsigned = manifest.clone();
+        unsigned.signature.clear();
+        contract_message(&unsigned)
+    })
 }
 
 pub fn verify_mesh_endpoint_with_key(
@@ -1311,6 +1349,30 @@ mod tests {
         endpoint.direct_addresses[0] = "192.0.2.99:4000".into();
         assert_eq!(
             verify_mesh_endpoint_with_key(&public_key, &endpoint),
+            Err(Denial::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn signed_relay_access_is_fabric_bound_and_tamper_evident() {
+        let governor = Governor::ephemeral(GovernorConfig::default());
+        let public_key = hex::encode(governor.verifying_key().to_bytes());
+        let now = Utc::now();
+        let mut manifest = RelayAccessManifestV1 {
+            schema: RelayAccessManifestV1::SCHEMA.into(),
+            fabric_id: String::new(),
+            generation: 7,
+            allowed_endpoint_ids: BTreeSet::from(["ab".repeat(32)]),
+            issued_at: now,
+            expires_at: now + Duration::minutes(10),
+            signature: String::new(),
+        };
+        governor.sign_relay_access_manifest(&mut manifest);
+        assert_eq!(manifest.fabric_id, relay_fabric_id(&public_key).unwrap());
+        assert!(verify_relay_access_manifest_with_key(&public_key, &manifest).is_ok());
+        manifest.allowed_endpoint_ids.insert("cd".repeat(32));
+        assert_eq!(
+            verify_relay_access_manifest_with_key(&public_key, &manifest),
             Err(Denial::InvalidSignature)
         );
     }

@@ -15,6 +15,7 @@ pub const MAX_MODEL_SESSION_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
 pub const MAX_MODEL_PROMPT_BYTES: u64 = 1024 * 1024;
 pub const MAX_MODEL_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_MODEL_OUTPUT_TOKENS: u32 = 32 * 1024;
+pub const MAX_RELAY_ENDPOINTS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -779,6 +780,37 @@ impl MeshEndpointRecordV1 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RelayAccessManifestV1 {
+    pub schema: String,
+    pub fabric_id: String,
+    pub generation: u64,
+    pub allowed_endpoint_ids: BTreeSet<String>,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub signature: String,
+}
+
+impl RelayAccessManifestV1 {
+    pub const SCHEMA: &'static str = "rampage.relay-access-manifest.v1";
+
+    pub fn is_valid_at(&self, now: DateTime<Utc>) -> bool {
+        self.schema == Self::SCHEMA
+            && is_sha256_digest(&self.fabric_id)
+            && self.generation > 0
+            && !self.allowed_endpoint_ids.is_empty()
+            && self.allowed_endpoint_ids.len() <= MAX_RELAY_ENDPOINTS
+            && self.allowed_endpoint_ids.iter().all(|endpoint| {
+                endpoint.len() == 64 && endpoint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            && self.issued_at <= now
+            && self.expires_at > now
+            && self.expires_at - self.issued_at <= chrono::Duration::minutes(15)
+            && !self.signature.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MeshControlRequestV1 {
     pub schema: String,
     pub request_id: Uuid,
@@ -1424,5 +1456,27 @@ mod tests {
         assert!(!candidate.is_valid_at(now));
         candidate.changed_paths = vec!["C:\\policy.rs".into()];
         assert!(!candidate.is_valid_at(now));
+    }
+
+    #[test]
+    fn relay_access_manifest_is_short_lived_bounded_and_endpoint_exact() {
+        let now = Utc::now();
+        let mut manifest = RelayAccessManifestV1 {
+            schema: RelayAccessManifestV1::SCHEMA.into(),
+            fabric_id: format!("sha256:{}", "a".repeat(64)),
+            generation: 1,
+            allowed_endpoint_ids: BTreeSet::from(["b".repeat(64)]),
+            issued_at: now,
+            expires_at: now + chrono::Duration::minutes(10),
+            signature: "signed".into(),
+        };
+        assert!(manifest.is_valid_at(now));
+        manifest
+            .allowed_endpoint_ids
+            .insert("not-an-endpoint".into());
+        assert!(!manifest.is_valid_at(now));
+        manifest.allowed_endpoint_ids.remove("not-an-endpoint");
+        manifest.expires_at = now + chrono::Duration::minutes(16);
+        assert!(!manifest.is_valid_at(now));
     }
 }

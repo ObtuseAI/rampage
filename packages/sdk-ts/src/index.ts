@@ -127,6 +127,16 @@ export interface FabricDiagnosticReport {
   }>;
 }
 
+export interface RelayAccessManifest {
+  schema: "rampage.relay-access-manifest.v1";
+  fabric_id: string;
+  generation: number;
+  allowed_endpoint_ids: string[];
+  issued_at: string;
+  expires_at: string;
+  signature: string;
+}
+
 export type PromotionRisk =
   | "r0_configuration"
   | "r1_allowlisted_source"
@@ -396,6 +406,10 @@ export class RampageClient {
 
   selfScan(): Promise<FabricDiagnosticReport> {
     return this.request("/v1/diagnostics/self-scan");
+  }
+
+  relayAccessManifest(): Promise<RelayAccessManifest> {
+    return this.request("/v1/mesh/relay-access");
   }
 
   authorizePromotionCanary(candidate: PromotionCandidate): Promise<PromotionCanaryLease> {

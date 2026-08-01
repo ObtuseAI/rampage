@@ -27,6 +27,10 @@ All state transitions -> hash-chained evidence ledger
   promotion, and ledger verification. It remains usable with the intelligence sidecar removed.
 - **Control plane (Rust):** discovery, project twins, queues, scheduling, reconciliation, transport
   abstraction, and public APIs.
+- **Relay plane (Rust, optional):** direct paths remain preferred; `rampage-relay` supplies a
+  self-hosted hard-NAT fallback gated by a short-lived Governor-signed endpoint manifest, explicit
+  HTTPS deployment, bandwidth caps, and connection thresholds. No public relay is selected by
+  default.
 - **Intelligence plane (Python):** intent compilation, planning, research, building, criticism,
   adversarial review, evolution, and synthesis. It can only request typed capabilities.
 - **Experience plane (native Tauri/React):** one-click enrollment, spatial Arena, accessible 2D

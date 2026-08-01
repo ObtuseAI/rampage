@@ -1,0 +1,28 @@
+[package]
+name = "rampage-relay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+iroh.workspace = true
+iroh-relay.workspace = true
+rampage-policy = { path = "../rampage-policy" }
+rampage-protocol = { path = "../rampage-protocol" }
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "net"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+webpki-types.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+tempfile.workspace = true

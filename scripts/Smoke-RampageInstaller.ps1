@@ -42,6 +42,7 @@ try {
         'rampage-controller.exe',
         'rampage-agent.exe',
         'rampage.exe',
+        'rampage-relay.exe',
         'rampage-intelligence.exe'
     )
     foreach ($name in $required) {

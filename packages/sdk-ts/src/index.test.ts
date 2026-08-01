@@ -125,6 +125,27 @@ describe("RampageClient", () => {
     vi.unstubAllGlobals();
   });
 
+  it("exports the short-lived signed owner-relay allowlist", async () => {
+    const payload = {
+      schema: "rampage.relay-access-manifest.v1",
+      fabric_id: `sha256:${"a".repeat(64)}`,
+      generation: 3,
+      allowed_endpoint_ids: ["b".repeat(64)],
+      issued_at: "2026-08-01T00:00:00Z",
+      expires_at: "2026-08-01T00:10:00Z",
+      signature: "signed",
+    };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new RampageClient(undefined, "local-token");
+    expect((await client.relayAccessManifest()).generation).toBe(3);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://127.0.0.1:47831/v1/mesh/relay-access");
+    vi.unstubAllGlobals();
+  });
+
   it("requests signed canary authority with the complete evidence candidate", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       schema: "rampage.promotion-canary-lease.v1",

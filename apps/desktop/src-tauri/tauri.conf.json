@@ -35,6 +35,7 @@
       "binaries/rampage-controller",
       "binaries/rampage-agent",
       "binaries/rampage",
+      "binaries/rampage-relay",
       "binaries/rampage-intelligence"
     ],
     "targets": ["msi", "nsis"],

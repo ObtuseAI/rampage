@@ -7,7 +7,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $triple = (& rustc --print host-tuple).Trim()
-$cargoArgs = @('build', '-p', 'rampage-controller', '-p', 'rampage-agent', '-p', 'rampage-cli')
+$cargoArgs = @(
+    'build',
+    '-p', 'rampage-controller',
+    '-p', 'rampage-agent',
+    '-p', 'rampage-cli',
+    '-p', 'rampage-relay'
+)
 if ($Profile -eq 'release') { $cargoArgs += '--release' }
 & cargo @cargoArgs
 if ($LASTEXITCODE -ne 0) { throw 'Rust sidecar build failed' }
@@ -15,7 +21,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Rust sidecar build failed' }
 $source = Join-Path $root "target\$Profile"
 $destination = Join-Path $root 'apps\desktop\src-tauri\binaries'
 New-Item -ItemType Directory -Force -Path $destination | Out-Null
-foreach ($name in @('rampage-controller', 'rampage-agent', 'rampage')) {
+foreach ($name in @('rampage-controller', 'rampage-agent', 'rampage', 'rampage-relay')) {
     $extension = if ($IsWindows) { '.exe' } else { '' }
     Copy-Item -Force (Join-Path $source "$name$extension") `
         (Join-Path $destination "$name-$triple$extension")

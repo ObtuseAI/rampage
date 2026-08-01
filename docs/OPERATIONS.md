@@ -8,12 +8,19 @@ and operators can override it with `RAMPAGE_DATA_DIR`. The controller binds only
 The controller token and Governor, mesh, and node keys live inside the runtime directory and must
 not be copied between unrelated fabrics.
 
+An optional `rampage-relay.json` in the same runtime directory enables the bundled owner relay.
+The desktop injects its credential-free HTTPS URL into the controller before mesh bind, starts the
+relay after the controller token exists, and owns its shutdown with the other sidecars. Without
+that file, relay transport remains disabled and no public default is selected.
+
 ## Owner flow
 
 The owner installation launches controller, intelligence, and one local worker. The desktop waits
 for the controller token before launching dependent sidecars, creates a one-time invite for its own
 worker, and then discovers and advertises available resources. Additional invitations are complete
 signed JSON documents; transfer them directly to the intended device and never post them publicly.
+When an owner relay is configured, those signed documents include its HTTPS route. The joining
+worker enables only the explicitly signed route and still authenticates the controller endpoint.
 
 ## Worker flow
 

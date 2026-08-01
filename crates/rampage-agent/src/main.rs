@@ -369,6 +369,25 @@ struct MeshController {
     destination: iroh::EndpointAddr,
 }
 
+fn mesh_config_for_controller(
+    record: &MeshEndpointRecordV1,
+) -> anyhow::Result<rampage_mesh::MeshConfig> {
+    let mode = if record.relay_urls.is_empty() {
+        rampage_mesh::MeshMode::LocalOnly
+    } else {
+        rampage_mesh::MeshMode::PrivateRelay {
+            urls: record.relay_urls.clone(),
+        }
+    };
+    let config = rampage_mesh::MeshConfig {
+        schema: "rampage.mesh-config.v1".into(),
+        mode,
+        allowed_peer_keys: BTreeSet::from([record.endpoint_id.clone()]),
+    };
+    config.validate()?;
+    Ok(config)
+}
+
 impl ControllerTransport {
     fn new(
         controller: &str,
@@ -413,10 +432,11 @@ impl ControllerTransport {
         rampage_policy::verify_mesh_endpoint_with_key(governor_key, mesh_record)
             .map_err(|_| anyhow::anyhow!("invite mesh endpoint signature is invalid"))?;
         let destination = rampage_mesh::endpoint_addr_from_record(mesh_record)?;
+        let mesh_config = mesh_config_for_controller(mesh_record)?;
         let runtime = tokio::runtime::Runtime::new()?;
         let endpoint = runtime.block_on(rampage_mesh::bind_endpoint(
             signing_key.to_bytes(),
-            &rampage_mesh::MeshConfig::default(),
+            &mesh_config,
         ))?;
         runtime.spawn(serve_worker_gateway(
             endpoint.clone(),
@@ -1272,6 +1292,34 @@ mod tests {
                 "{\"model\":\"test:latest\",\"message\":{\"role\":\"assistant\",\"content\":\"world\"},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":2,\"eval_count\":2}\n"
             )))
             .unwrap()
+    }
+
+    #[test]
+    fn signed_controller_relays_are_the_only_worker_relay_candidates() {
+        let now = Utc::now();
+        let mut record = MeshEndpointRecordV1 {
+            schema: MeshEndpointRecordV1::SCHEMA.into(),
+            endpoint_id: "ab".repeat(32),
+            direct_addresses: Vec::new(),
+            relay_urls: vec!["https://relay.example.test".into()],
+            issued_at: now,
+            expires_at: now + Duration::minutes(2),
+            signature: "verified-before-helper".into(),
+        };
+        let config = mesh_config_for_controller(&record).unwrap();
+        assert_eq!(
+            config.mode,
+            rampage_mesh::MeshMode::PrivateRelay {
+                urls: vec!["https://relay.example.test".into()]
+            }
+        );
+        assert_eq!(
+            config.allowed_peer_keys,
+            BTreeSet::from([record.endpoint_id.clone()])
+        );
+
+        record.relay_urls = vec!["http://relay.example.test".into()];
+        assert!(mesh_config_for_controller(&record).is_err());
     }
 
     fn model_offer(

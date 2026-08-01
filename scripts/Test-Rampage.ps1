@@ -28,7 +28,7 @@ try {
 
     # E2E scripts execute standalone binaries, not Cargo test harnesses. Rebuild them explicitly so
     # process evidence can never be produced by stale target/debug executables.
-    & cargo build -p rampage-controller -p rampage-agent -p rampage-cli
+    & cargo build -p rampage-controller -p rampage-agent -p rampage-cli -p rampage-relay
     if ($LASTEXITCODE -ne 0) { throw 'debug sidecar build failed' }
     & .\scripts\e2e.ps1
     & .\scripts\mesh-e2e.ps1

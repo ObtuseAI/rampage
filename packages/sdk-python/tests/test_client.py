@@ -68,6 +68,17 @@ def test_capability_inventory_and_self_scan_are_token_protected() -> None:
                     "nodes": [],
                 },
             )
+        if request.url.path.endswith("relay-access"):
+            return httpx.Response(
+                200,
+                json={
+                    "schema": "rampage.relay-access-manifest.v1",
+                    "fabric_id": f"sha256:{'a' * 64}",
+                    "generation": 2,
+                    "allowed_endpoint_ids": ["b" * 64],
+                    "signature": "signed",
+                },
+            )
         return httpx.Response(
             200,
             json={
@@ -85,9 +96,11 @@ def test_capability_inventory_and_self_scan_are_token_protected() -> None:
     )
     assert not client.workload_capabilities()["candidate_authority"]
     assert not client.self_scan()["autonomy"]["per_change_approval_required"]
+    assert client.relay_access_manifest()["generation"] == 2
     assert requests == [
         "/v1/workload-capabilities",
         "/v1/diagnostics/self-scan",
+        "/v1/mesh/relay-access",
     ]
 
 
