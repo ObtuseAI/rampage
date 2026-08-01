@@ -17,8 +17,8 @@ from .models import (
     CapabilityState,
     ExperimentRecord,
     GoalIntent,
-    ImprovementProposal,
     PromotionDecision,
+    PromotionEvaluationRequest,
     StoredExperiment,
     WorkflowResult,
 )
@@ -114,10 +114,9 @@ async def get_experiment(digest: str, request: Request) -> StoredExperiment:
 
 @app.post("/v1/improvements/evaluate", response_model=PromotionDecision)
 async def improvement_eligibility(
-    proposal: ImprovementProposal,
-    trusted_autopilot: bool = False,
+    evaluation: PromotionEvaluationRequest,
 ) -> PromotionDecision:
-    return evaluate_promotion(proposal, trusted_autopilot=trusted_autopilot)
+    return evaluate_promotion(evaluation.proposal, envelope=evaluation.envelope)
 
 
 def main() -> None:

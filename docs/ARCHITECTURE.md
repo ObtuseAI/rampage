@@ -121,6 +121,16 @@ Evidence ascends through schema/policy, deterministic replay, quality/reliabilit
 holdout, adversarial security, independent replication, shadow, canary, then signed promotion.
 Unknown, ambiguous, or missing evidence fails closed.
 
+Promotion has no per-change approval step inside a preconfigured owner envelope. R0 configuration,
+R1 allowlisted source, and explicitly enabled R2 protected changes may become bounded canaries only
+after every evidence gate passes. R3 authority-critical changes, path escapes, and attempts to
+change the envelope are automatically denied. The intelligence sidecar remains proposal-only; the
+Rust Governor independently owns authority.
+
+The controller also runs a deterministic self-scan every 60 seconds. It hashes stable metrics and
+findings, appends evidence only when that digest changes, and proposes bounded remediation for
+capacity, topology, thermal/battery, failure, denial, model-inventory, and storage-replication gaps.
+
 ## Backend selection
 
 Execution engines are replaceable adapters below the trust boundary. Whole-job native adapters and
@@ -130,3 +140,9 @@ model QUIC protocol, an exact signed lease, and a signed terminal transcript rec
 model engines remain subject to the
 [backend gates](BACKEND_GATES.md); in particular, llama.cpp RPC is hard-disabled because its current
 upstream security state does not meet Rampage's admission standard.
+
+The same trust boundary now exposes bounded OpenAI, Anthropic Messages, and OpenRouter-style text
+surfaces. Universal non-AI work is described by signed `WorkloadCapabilityV1` profiles. The profile
+binds an exact adapter and operation to its workload domain, execution pattern, resource classes,
+isolation, runtime digest, and qualification state. Candidate profiles never authorize execution;
+see [Universal compute](UNIVERSAL_COMPUTE.md).

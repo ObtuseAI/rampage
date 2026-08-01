@@ -73,6 +73,232 @@ pub enum CapabilityState {
     Blocked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromotionRiskV1 {
+    R0Configuration,
+    R1AllowlistedSource,
+    R2ProtectedChange,
+    R3AuthorityCritical,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromotionEvidenceGateV1 {
+    pub name: String,
+    pub passed: bool,
+    pub evidence_digest: String,
+    pub independent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromotionCandidateV1 {
+    pub schema: String,
+    pub proposal_id: Uuid,
+    pub project_id: Uuid,
+    pub base_revision: String,
+    pub candidate_digest: String,
+    pub changed_paths: Vec<String>,
+    pub risk: PromotionRiskV1,
+    pub gates: Vec<PromotionEvidenceGateV1>,
+    pub requested_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl PromotionCandidateV1 {
+    pub const SCHEMA: &'static str = "rampage.promotion-candidate.v1";
+    pub const REQUIRED_GATES: [&'static str; 8] = [
+        "g0_schema_policy_static",
+        "g1_deterministic_replay",
+        "g2_quality_reliability_cost",
+        "g3_sealed_holdout",
+        "g4_adversarial_security",
+        "g5_independent_replication",
+        "g6_shadow",
+        "g7_canary_rollback",
+    ];
+
+    pub fn is_valid_at(&self, now: DateTime<Utc>) -> bool {
+        let names = self
+            .gates
+            .iter()
+            .map(|gate| gate.name.as_str())
+            .collect::<BTreeSet<_>>();
+        self.schema == Self::SCHEMA
+            && !self.base_revision.is_empty()
+            && self.base_revision.len() <= 128
+            && self.base_revision.is_ascii()
+            && is_sha256_digest(&self.candidate_digest)
+            && !self.changed_paths.is_empty()
+            && self.changed_paths.len() <= 32
+            && self.changed_paths.iter().all(|path| {
+                !path.is_empty()
+                    && path.len() <= 260
+                    && path.is_ascii()
+                    && !path.starts_with(['/', '\\'])
+                    && !path.contains(':')
+                    && path
+                        .split(['/', '\\'])
+                        .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+            })
+            && self.requested_at <= now
+            && now < self.expires_at
+            && (self.expires_at - self.requested_at).num_seconds() <= 1_800
+            && self.gates.len() == Self::REQUIRED_GATES.len()
+            && names.len() == Self::REQUIRED_GATES.len()
+            && Self::REQUIRED_GATES
+                .iter()
+                .all(|required| names.contains(required))
+            && self.gates.iter().all(|gate| {
+                gate.passed
+                    && is_sha256_digest(&gate.evidence_digest)
+                    && (gate.name != "g5_independent_replication" || gate.independent)
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromotionCanaryLeaseV1 {
+    pub schema: String,
+    pub canary_id: Uuid,
+    pub proposal_id: Uuid,
+    pub project_id: Uuid,
+    pub candidate_digest: String,
+    pub risk: PromotionRiskV1,
+    pub max_traffic_basis_points: u16,
+    pub max_error_regression_basis_points: u16,
+    pub max_latency_regression_basis_points: u16,
+    pub max_cost_regression_basis_points: u16,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub nonce: String,
+    pub fencing_epoch: u64,
+    pub signature: String,
+}
+
+impl PromotionCanaryLeaseV1 {
+    pub const SCHEMA: &'static str = "rampage.promotion-canary-lease.v1";
+
+    pub fn is_active_at(&self, now: DateTime<Utc>, fencing_epoch: u64) -> bool {
+        self.schema == Self::SCHEMA
+            && self.issued_at <= now
+            && now < self.expires_at
+            && self.fencing_epoch == fencing_epoch
+            && is_sha256_digest(&self.candidate_digest)
+            && (1..=1_000).contains(&self.max_traffic_basis_points)
+            && self.max_error_regression_basis_points <= 500
+            && self.max_latency_regression_basis_points <= 1_000
+            && self.max_cost_regression_basis_points <= 1_000
+            && !self.nonce.is_empty()
+            && self.nonce.len() <= 128
+            && self.nonce.is_ascii()
+            && !self.signature.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkloadDomain {
+    AiInference,
+    AiEvaluation,
+    Gaming,
+    CreativeProduction,
+    SoftwareBuild,
+    ScientificComputing,
+    DataProcessing,
+    Storage,
+    EdgeUtility,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPattern {
+    WholeWorkload,
+    IndependentShard,
+    Replica,
+    StreamingService,
+    ApplicationNativeDistributed,
+    TensorParallel,
+    PipelineParallel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkloadIsolation {
+    AllowlistedInProcess,
+    DedicatedProcess,
+    Container,
+    WasmSandbox,
+    ExternalService,
+    VendorWorker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkloadCapabilityStatus {
+    Shipped,
+    Qualified,
+    Candidate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkloadCapabilityV1 {
+    pub schema: String,
+    pub adapter: String,
+    pub domain: WorkloadDomain,
+    pub operations: BTreeSet<String>,
+    pub execution_patterns: BTreeSet<ExecutionPattern>,
+    pub resource_classes: BTreeSet<ResourceClass>,
+    pub isolation: WorkloadIsolation,
+    pub runtime_digest: String,
+    pub checkpointable: bool,
+    pub preemptible: bool,
+    pub network_allowlist_required: bool,
+    pub status: WorkloadCapabilityStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualification_digest: Option<String>,
+}
+
+impl WorkloadCapabilityV1 {
+    pub const SCHEMA: &'static str = "rampage.workload-capability.v1";
+
+    pub fn is_valid(&self) -> bool {
+        self.schema == Self::SCHEMA
+            && !self.adapter.is_empty()
+            && self.adapter.len() <= 128
+            && self.adapter.is_ascii()
+            && !self.operations.is_empty()
+            && self.operations.len() <= 32
+            && self.operations.iter().all(|operation| {
+                !operation.is_empty() && operation.len() <= 64 && operation.is_ascii()
+            })
+            && !self.execution_patterns.is_empty()
+            && !self.resource_classes.is_empty()
+            && !self.runtime_digest.is_empty()
+            && self.runtime_digest.len() <= 200
+            && self.runtime_digest.is_ascii()
+            && match self.status {
+                WorkloadCapabilityStatus::Qualified => self
+                    .qualification_digest
+                    .as_deref()
+                    .is_some_and(is_sha256_digest),
+                WorkloadCapabilityStatus::Shipped | WorkloadCapabilityStatus::Candidate => {
+                    self.qualification_digest.is_none()
+                }
+            }
+    }
+
+    pub fn authorizes(&self, adapter: &str, operation: &str) -> bool {
+        self.is_valid()
+            && self.adapter == adapter
+            && self.operations.contains(operation)
+            && self.status != WorkloadCapabilityStatus::Candidate
+    }
+}
+
 /// The owner-selected objective for additional fabric compute.
 ///
 /// These objectives are deliberately distinct: fitting a larger model, reducing interactive
@@ -295,6 +521,8 @@ pub struct ResourceOfferV1 {
     pub resources: Vec<ResourceQuantityV1>,
     pub availability: AvailabilityV1,
     pub adapters: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workload_capabilities: Vec<WorkloadCapabilityV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_runtimes: Vec<ModelRuntimeOfferV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1129,5 +1357,72 @@ mod tests {
         assert!(!request.is_valid_for(Uuid::now_v7(), "controller-endpoint"));
         request.max_output_tokens = 513;
         assert!(!request.is_valid_for(node_id, "controller-endpoint"));
+    }
+
+    #[test]
+    fn workload_capability_authority_is_operation_exact_and_candidate_safe() {
+        let mut capability = WorkloadCapabilityV1 {
+            schema: WorkloadCapabilityV1::SCHEMA.into(),
+            adapter: "rampage.render.v1".into(),
+            domain: WorkloadDomain::CreativeProduction,
+            operations: BTreeSet::from(["render_frame".into()]),
+            execution_patterns: BTreeSet::from([ExecutionPattern::IndependentShard]),
+            resource_classes: BTreeSet::from([
+                ResourceClass::CpuCompute,
+                ResourceClass::GpuCompute,
+            ]),
+            isolation: WorkloadIsolation::DedicatedProcess,
+            runtime_digest: "shipped-renderer:test".into(),
+            checkpointable: true,
+            preemptible: true,
+            network_allowlist_required: false,
+            status: WorkloadCapabilityStatus::Shipped,
+            qualification_digest: None,
+        };
+        assert!(capability.authorizes("rampage.render.v1", "render_frame"));
+        assert!(!capability.authorizes("rampage.render.v1", "encode_video"));
+        capability.status = WorkloadCapabilityStatus::Candidate;
+        assert!(!capability.authorizes("rampage.render.v1", "render_frame"));
+    }
+
+    fn promotion_candidate(now: DateTime<Utc>) -> PromotionCandidateV1 {
+        PromotionCandidateV1 {
+            schema: PromotionCandidateV1::SCHEMA.into(),
+            proposal_id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            base_revision: "abc123".into(),
+            candidate_digest: format!("sha256:{}", "a".repeat(64)),
+            changed_paths: vec!["routing/cache.toml".into()],
+            risk: PromotionRiskV1::R0Configuration,
+            gates: PromotionCandidateV1::REQUIRED_GATES
+                .iter()
+                .enumerate()
+                .map(|(index, name)| PromotionEvidenceGateV1 {
+                    name: (*name).into(),
+                    passed: true,
+                    evidence_digest: format!("sha256:{index:064x}"),
+                    independent: *name == "g5_independent_replication",
+                })
+                .collect(),
+            requested_at: now,
+            expires_at: now + chrono::Duration::minutes(10),
+        }
+    }
+
+    #[test]
+    fn promotion_candidate_requires_every_independent_content_addressed_gate() {
+        let now = Utc::now();
+        let mut candidate = promotion_candidate(now);
+        assert!(candidate.is_valid_at(now));
+        candidate.gates[5].independent = false;
+        assert!(!candidate.is_valid_at(now));
+        candidate.gates[5].independent = true;
+        candidate.gates.push(candidate.gates[0].clone());
+        assert!(!candidate.is_valid_at(now));
+        candidate.gates.pop();
+        candidate.changed_paths = vec!["../policy.rs".into()];
+        assert!(!candidate.is_valid_at(now));
+        candidate.changed_paths = vec!["C:\\policy.rs".into()];
+        assert!(!candidate.is_valid_at(now));
     }
 }

@@ -1,10 +1,18 @@
 param(
     [string]$Model = 'llama3.2:latest',
-    [string]$OllamaUrl = 'http://127.0.0.1:11434'
+    [string]$OllamaUrl = 'http://127.0.0.1:11434',
+    [switch]$SkipBuild
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+if (-not $SkipBuild) {
+    & cargo build --manifest-path (Join-Path $root 'Cargo.toml') `
+        -p rampage-controller -p rampage-agent
+    if ($LASTEXITCODE -ne 0) {
+        throw "could not build current Rampage controller and agent binaries"
+    }
+}
 $runRoot = Join-Path $root ('output\ollama-e2e-' + [guid]::NewGuid().ToString('N'))
 $controllerData = Join-Path $runRoot 'controller'
 $agentData = Join-Path $runRoot 'agent'
@@ -80,6 +88,69 @@ try {
     if (-not (@($models.data.id) -contains $Model)) {
         throw "OpenAI gateway did not expose the consistent installed model: $($models | ConvertTo-Json -Depth 8 -Compress)"
     }
+    $openRouterModels = Invoke-RestMethod 'http://127.0.0.1:47831/api/v1/models' -Headers $openAiHeaders
+    if (-not (@($openRouterModels.data.id) -contains $Model)) {
+        throw 'OpenRouter-compatible model alias did not expose the installed model'
+    }
+    $capabilities = Invoke-RestMethod 'http://127.0.0.1:47831/v1/capabilities' -Headers $openAiHeaders
+    if ($capabilities.schema -ne 'rampage.gateway-capabilities.v1' -or
+        -not (@($capabilities.protocols.id) -contains 'anthropic.messages')) {
+        throw 'gateway capability discovery is missing the Anthropic protocol'
+    }
+    $workloads = Invoke-RestMethod 'http://127.0.0.1:47831/v1/workload-capabilities' -Headers $headers
+    $ollamaCapability = @($workloads.nodes.capabilities) | Where-Object {
+        $_.adapter -eq 'rampage.ollama.v1' -and @($_.operations) -contains 'chat'
+    } | Select-Object -First 1
+    if ($workloads.schema -ne 'rampage.workload-capability-inventory.v1' -or
+        -not $ollamaCapability -or $workloads.candidate_authority -ne $false) {
+        throw 'signed workload capability discovery did not expose the exact Ollama chat operation'
+    }
+    $selfScan = Invoke-RestMethod 'http://127.0.0.1:47831/v1/diagnostics/self-scan' -Headers $headers
+    if ($selfScan.schema -ne 'rampage.fabric-diagnostic-report.v1' -or
+        $selfScan.autonomy.per_change_approval_required -ne $false -or
+        $selfScan.evidence_digest -notmatch '^sha256:[0-9a-f]{64}$') {
+        throw 'autonomously thresholded self-scan did not return stable evidence'
+    }
+    $gateNames = @(
+        'g0_schema_policy_static',
+        'g1_deterministic_replay',
+        'g2_quality_reliability_cost',
+        'g3_sealed_holdout',
+        'g4_adversarial_security',
+        'g5_independent_replication',
+        'g6_shadow',
+        'g7_canary_rollback'
+    )
+    $proposalId = [guid]::NewGuid().ToString()
+    $promotionCandidate = @{
+        schema = 'rampage.promotion-candidate.v1'
+        proposal_id = $proposalId
+        project_id = [guid]::NewGuid().ToString()
+        base_revision = 'e2e-fixture'
+        candidate_digest = 'sha256:' + ('b' * 64)
+        changed_paths = @('routing/e2e.toml')
+        risk = 'r0_configuration'
+        gates = @($gateNames | ForEach-Object {
+            @{
+                name = $_
+                passed = $true
+                evidence_digest = 'sha256:' + ('c' * 64)
+                independent = $_ -eq 'g5_independent_replication'
+            }
+        })
+        requested_at = [DateTimeOffset]::UtcNow.ToString('o')
+        expires_at = [DateTimeOffset]::UtcNow.AddMinutes(5).ToString('o')
+    } | ConvertTo-Json -Depth 10
+    $canary = Invoke-RestMethod 'http://127.0.0.1:47831/v1/improvements/canary' `
+        -Method Post -ContentType 'application/json' -Headers $headers -Body $promotionCandidate
+    $canaryRepeat = Invoke-RestMethod 'http://127.0.0.1:47831/v1/improvements/canary' `
+        -Method Post -ContentType 'application/json' -Headers $headers -Body $promotionCandidate
+    if ($canary.schema -ne 'rampage.promotion-canary-lease.v1' -or
+        [string]::IsNullOrWhiteSpace($canary.signature) -or
+        $canary.canary_id -ne $canaryRepeat.canary_id -or
+        $canary.max_traffic_basis_points -gt 1000) {
+        throw 'Rust Governor did not return a bounded idempotent signed canary lease'
+    }
     $request = @{
         model = $Model
         messages = @(@{ role = 'user'; content = 'Reply with exactly RAMPAGE_OK.' })
@@ -104,6 +175,46 @@ try {
         $stream.Content -notmatch 'chat.completion.chunk') {
         throw "OpenAI-compatible streaming response was malformed: $($stream.Content)"
     }
+    $openRouterCompletion = Invoke-RestMethod 'http://127.0.0.1:47831/api/v1/chat/completions' `
+        -Method Post -ContentType 'application/json' -Headers $openAiHeaders -Body $request
+    if ($openRouterCompletion.choices[0].message.content -ne 'RAMPAGE_OK') {
+        throw 'OpenRouter-compatible path did not return the expected completion'
+    }
+    $anthropicHeaders = @{
+        'x-api-key' = $env:RAMPAGE_TOKEN
+        'anthropic-version' = '2023-06-01'
+    }
+    $anthropicRequest = @{
+        model = $Model
+        max_tokens = 16
+        system = 'Answer exactly as requested.'
+        messages = @(@{ role = 'user'; content = 'Reply with exactly RAMPAGE_OK.' })
+        stream = $false
+    } | ConvertTo-Json -Depth 10
+    $anthropic = Invoke-RestMethod 'http://127.0.0.1:47831/v1/messages' `
+        -Method Post -ContentType 'application/json' -Headers $anthropicHeaders -Body $anthropicRequest
+    if ($anthropic.type -ne 'message' -or $anthropic.role -ne 'assistant' -or
+        $anthropic.content[0].type -ne 'text' -or $anthropic.content[0].text -ne 'RAMPAGE_OK' -or
+        $anthropic.usage.output_tokens -lt 1 -or $anthropic.usage.output_tokens -gt 16) {
+        throw "Anthropic-compatible response was malformed: $($anthropic | ConvertTo-Json -Depth 8 -Compress)"
+    }
+    $anthropicStreamRequest = @{
+        model = $Model
+        max_tokens = 16
+        messages = @(@{
+            role = 'user'
+            content = @(@{ type = 'text'; text = 'Reply with exactly STREAM_OK.' })
+        })
+        stream = $true
+    } | ConvertTo-Json -Depth 10
+    $anthropicStream = Invoke-WebRequest 'http://127.0.0.1:47831/v1/messages' `
+        -Method Post -ContentType 'application/json' -Headers $anthropicHeaders -Body $anthropicStreamRequest
+    if ($anthropicStream.StatusCode -ne 200 -or
+        $anthropicStream.Content -notmatch 'event: message_start' -or
+        $anthropicStream.Content -notmatch 'event: content_block_delta' -or
+        $anthropicStream.Content -notmatch 'event: message_stop') {
+        throw "Anthropic-compatible streaming response was malformed: $($anthropicStream.Content)"
+    }
     $events = @(Invoke-RestMethod 'http://127.0.0.1:47831/v1/events?after=0&limit=1000' -Headers $headers)
     if (-not ($events.event_type -contains 'model.session.lease.issued') -or
         -not ($events.event_type -contains 'model.session.receipted')) {
@@ -118,6 +229,12 @@ try {
         node = $offer.node_id
         non_streaming = $true
         streaming = $true
+        anthropic_messages = $true
+        openrouter_paths = $true
+        capability_discovery = $true
+        workload_capability_contract = $true
+        autonomously_thresholded_self_scan = $true
+        signed_autonomous_canary = $true
         signed_receipt_evidence = $true
         tokenless_request_denied = $true
         response = $completion.choices[0].message.content

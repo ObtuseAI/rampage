@@ -53,6 +53,74 @@ def test_topology_uses_the_token_protected_offer_route() -> None:
     assert client.topology() == []
 
 
+def test_capability_inventory_and_self_scan_are_token_protected() -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-rampage-token"] == "local-token"
+        requests.append(request.url.path)
+        if request.url.path.endswith("workload-capabilities"):
+            return httpx.Response(
+                200,
+                json={
+                    "schema": "rampage.workload-capability-inventory.v1",
+                    "candidate_authority": False,
+                    "nodes": [],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "schema": "rampage.fabric-diagnostic-report.v1",
+                "autonomy": {"per_change_approval_required": False},
+            },
+        )
+
+    client = RampageClient(token="local-token")
+    client._client.close()
+    client._client = httpx.Client(
+        base_url="http://127.0.0.1:47831",
+        headers={"x-rampage-token": "local-token"},
+        transport=httpx.MockTransport(handler),
+    )
+    assert not client.workload_capabilities()["candidate_authority"]
+    assert not client.self_scan()["autonomy"]["per_change_approval_required"]
+    assert requests == [
+        "/v1/workload-capabilities",
+        "/v1/diagnostics/self-scan",
+    ]
+
+
+def test_promotion_canary_forwards_the_complete_candidate_to_the_governor() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-rampage-token"] == "local-token"
+        assert request.url.path == "/v1/improvements/canary"
+        assert b'"candidate_digest":"sha256:' in request.content
+        return httpx.Response(
+            201,
+            json={
+                "schema": "rampage.promotion-canary-lease.v1",
+                "canary_id": "canary-1",
+                "signature": "signed",
+            },
+        )
+
+    client = RampageClient(token="local-token")
+    client._client.close()
+    client._client = httpx.Client(
+        base_url="http://127.0.0.1:47831",
+        headers={"x-rampage-token": "local-token"},
+        transport=httpx.MockTransport(handler),
+    )
+    lease = client.authorize_promotion_canary(
+        {
+            "schema": "rampage.promotion-candidate.v1",
+            "candidate_digest": f"sha256:{'a' * 64}",
+        }
+    )
+    assert lease["signature"] == "signed"
+
+
 def test_model_session_planning_is_exposed_as_preview_only() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["x-rampage-token"] == "local-token"
@@ -106,6 +174,43 @@ def test_openai_gateway_config_and_models_use_bearer_auth() -> None:
         "api_key": "local-token",
     }
     assert client.models()["data"][0]["id"] == "gemma3:4b"
+
+
+def test_anthropic_and_openrouter_configs_share_the_bounded_gateway() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/messages"
+        assert request.headers["authorization"] == "Bearer local-token"
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hello"}],
+                "model": "gemma3:4b",
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    client = RampageClient(token="local-token")
+    client._client.close()
+    client._client = httpx.Client(
+        base_url="http://127.0.0.1:47831",
+        headers={"x-rampage-token": "local-token"},
+        transport=httpx.MockTransport(handler),
+    )
+    assert client.anthropic_config()["base_url"] == "http://127.0.0.1:47831"
+    assert client.openrouter_config()["base_url"] == "http://127.0.0.1:47831/api/v1"
+    response = client.anthropic_message(
+        {
+            "model": "gemma3:4b",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+    )
+    assert response["content"][0]["text"] == "hello"
 
 
 def test_shard_set_plan_and_status_use_bounded_routes() -> None:

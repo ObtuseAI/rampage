@@ -42,9 +42,9 @@ test("exposes installed desktop lifecycle control", () => {
   expect(screen.getByRole("button", { name: "Start Rampage with Windows" })).toBeInTheDocument();
 });
 
-test("shows when the OpenAI-compatible whole-model gateway is ready", () => {
+test("shows when the universal whole-model gateway is ready", () => {
   useRampage.setState({ gatewayModels: ["gemma3:4b"] });
   render(<App />);
-  expect(screen.getByText(/1 consistent installed model · OpenAI API ready/i)).toBeInTheDocument();
+  expect(screen.getByText(/1 consistent installed model · OpenAI · Anthropic · OpenRouter ready/i)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Copy API setup" })).toBeEnabled();
 });

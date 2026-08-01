@@ -350,6 +350,7 @@ mod tests {
                 owner_idle: true,
             },
             adapters: BTreeSet::from(["rampage.echo.v1".into()]),
+            workload_capabilities: Vec::new(),
             model_runtimes: Vec::new(),
             link_benchmark: None,
             mesh_endpoint: None,
