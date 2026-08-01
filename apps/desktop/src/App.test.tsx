@@ -10,7 +10,7 @@ afterEach(cleanup);
 beforeEach(() => {
   localStorage.setItem("rampage.onboarded", "true");
   localStorage.setItem("rampage.compute-strategy", "maximum_model_size");
-  useRampage.setState({ onboarding: false, mode: "arena", commandOpen: false, computeStrategy: "maximum_model_size", modelPlan: null, modelPlanPending: false, runAtLogin: false });
+  useRampage.setState({ onboarding: false, mode: "arena", commandOpen: false, computeStrategy: "maximum_model_size", modelPlan: null, modelPlanPending: false, gatewayModels: [], runAtLogin: false });
   globalThis.fetch = vi.fn().mockRejectedValue(new Error("offline"));
 });
 
@@ -40,4 +40,11 @@ test("separates maximum model size from measured speed boost", () => {
 test("exposes installed desktop lifecycle control", () => {
   render(<App />);
   expect(screen.getByRole("button", { name: "Start Rampage with Windows" })).toBeInTheDocument();
+});
+
+test("shows when the OpenAI-compatible whole-model gateway is ready", () => {
+  useRampage.setState({ gatewayModels: ["gemma3:4b"] });
+  render(<App />);
+  expect(screen.getByText(/1 consistent installed model · OpenAI API ready/i)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Copy API setup" })).toBeEnabled();
 });

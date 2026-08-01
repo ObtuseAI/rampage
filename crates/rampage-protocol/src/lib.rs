@@ -12,6 +12,9 @@ pub const LINK_BENCHMARK_TRANSFER_BYTES: u64 = 256 * 1024;
 pub const MAX_SHARDS_PER_SET: usize = 256;
 pub const MAX_MODEL_SESSION_NODES: u16 = 64;
 pub const MAX_MODEL_SESSION_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
+pub const MAX_MODEL_PROMPT_BYTES: u64 = 1024 * 1024;
+pub const MAX_MODEL_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_MODEL_OUTPUT_TOKENS: u32 = 32 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -108,6 +111,9 @@ pub enum ModelMemoryKind {
     DedicatedGpu,
     Unified,
     Host,
+    /// One machine's local RAM and dedicated VRAM, used by a runtime that can offload layers
+    /// between them. This never means memory from different machines is one address space.
+    Hybrid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -134,6 +140,8 @@ pub struct ModelRuntimeOfferV1 {
     pub available_model_bytes: u64,
     pub supported_parallelism: BTreeSet<ModelParallelism>,
     pub status: ModelRuntimeStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub installed_models: Vec<InstalledModelV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub certification_digest: Option<String>,
 }
@@ -157,6 +165,29 @@ impl ModelRuntimeOfferV1 {
                 || self
                     .supported_parallelism
                     .contains(&ModelParallelism::Tensor))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledModelV1 {
+    pub schema: String,
+    pub model_id: String,
+    pub artifact_digest: String,
+    pub artifact_size_bytes: u64,
+}
+
+impl InstalledModelV1 {
+    pub const SCHEMA: &'static str = "rampage.installed-model.v1";
+
+    pub fn is_valid(&self) -> bool {
+        self.schema == Self::SCHEMA
+            && !self.model_id.trim().is_empty()
+            && self.model_id.len() <= 200
+            && self.model_id.is_ascii()
+            && is_sha256_digest(&self.artifact_digest)
+            && self.artifact_size_bytes > 0
+            && self.artifact_size_bytes <= MAX_MODEL_SESSION_BYTES
     }
 }
 
@@ -323,6 +354,170 @@ impl ModelSessionRequestV1 {
         }
         Ok(())
     }
+}
+
+/// One-shot authority for an exact installed model on one authenticated worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSessionLeaseV1 {
+    pub schema: String,
+    pub lease_id: Uuid,
+    pub session_id: Uuid,
+    pub node_id: Uuid,
+    pub controller_endpoint_id: String,
+    pub model_id: String,
+    pub model_digest: String,
+    pub backend: ModelBackend,
+    pub runtime_digest: String,
+    pub parallelism: ModelParallelism,
+    pub max_prompt_bytes: u64,
+    pub max_output_tokens: u32,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub nonce: String,
+    pub fencing_epoch: u64,
+    pub signature: String,
+}
+
+impl ModelSessionLeaseV1 {
+    pub const SCHEMA: &'static str = "rampage.model-session-lease.v1";
+
+    pub fn is_active_at(&self, now: DateTime<Utc>, current_epoch: u64) -> bool {
+        self.schema == Self::SCHEMA
+            && self.issued_at <= now
+            && now < self.expires_at
+            && self.fencing_epoch == current_epoch
+            && self.backend == ModelBackend::LocalOllama
+            && self.parallelism == ModelParallelism::WholeModel
+            && !self.controller_endpoint_id.is_empty()
+            && self.controller_endpoint_id.is_ascii()
+            && !self.model_id.trim().is_empty()
+            && is_sha256_digest(&self.model_digest)
+            && !self.runtime_digest.trim().is_empty()
+            && !self.nonce.is_empty()
+            && self.nonce.len() <= 128
+            && self.nonce.is_ascii()
+            && self.max_prompt_bytes > 0
+            && self.max_prompt_bytes <= MAX_MODEL_PROMPT_BYTES
+            && self.max_output_tokens > 0
+            && self.max_output_tokens <= MAX_MODEL_OUTPUT_TOKENS
+            && !self.signature.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelChatMessageV1 {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelInvocationRequestV1 {
+    pub schema: String,
+    pub request_id: Uuid,
+    pub lease: ModelSessionLeaseV1,
+    pub messages: Vec<ModelChatMessageV1>,
+    pub max_output_tokens: u32,
+    pub stream: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+}
+
+impl ModelInvocationRequestV1 {
+    pub const SCHEMA: &'static str = "rampage.model-invocation-request.v1";
+
+    pub fn prompt_bytes(&self) -> u64 {
+        self.messages.iter().fold(0_u64, |total, message| {
+            total
+                .saturating_add(message.role.len() as u64)
+                .saturating_add(message.content.len() as u64)
+        })
+    }
+
+    pub fn is_valid_for(&self, node_id: Uuid, controller_endpoint_id: &str) -> bool {
+        self.schema == Self::SCHEMA
+            && self.lease.node_id == node_id
+            && self.lease.controller_endpoint_id == controller_endpoint_id
+            && !self.messages.is_empty()
+            && self.messages.len() <= 256
+            && self.messages.iter().all(|message| {
+                matches!(message.role.as_str(), "system" | "user" | "assistant")
+                    && !message.content.is_empty()
+            })
+            && self.prompt_bytes() <= self.lease.max_prompt_bytes
+            && self.max_output_tokens > 0
+            && self.max_output_tokens <= self.lease.max_output_tokens
+            && self
+                .temperature
+                .is_none_or(|value| value.is_finite() && (0.0..=2.0).contains(&value))
+            && self
+                .top_p
+                .is_none_or(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelInvocationFrameKind {
+    Delta,
+    Complete,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelUsageV1 {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelExecutionReceiptV1 {
+    pub schema: String,
+    pub receipt_id: Uuid,
+    pub lease_id: Uuid,
+    pub session_id: Uuid,
+    pub request_id: Uuid,
+    pub node_id: Uuid,
+    pub state: JobState,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
+    pub output_digest: String,
+    pub output_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ModelUsageV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub signature: String,
+}
+
+impl ModelExecutionReceiptV1 {
+    pub const SCHEMA: &'static str = "rampage.model-execution-receipt.v1";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelInvocationFrameV1 {
+    pub schema: String,
+    pub request_id: Uuid,
+    pub sequence: u64,
+    pub kind: ModelInvocationFrameKind,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<ModelExecutionReceiptV1>,
+}
+
+impl ModelInvocationFrameV1 {
+    pub const SCHEMA: &'static str = "rampage.model-invocation-frame.v1";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -885,10 +1080,54 @@ mod tests {
                 ModelParallelism::Tensor,
             ]),
             status: ModelRuntimeStatus::Qualified,
+            installed_models: vec![],
             certification_digest: Some(format!("sha256:{}", "b".repeat(64))),
         };
         assert!(runtime.is_qualified_for_distributed());
         runtime.status = ModelRuntimeStatus::Candidate;
         assert!(!runtime.is_qualified_for_distributed());
+    }
+
+    #[test]
+    fn model_invocation_is_bounded_and_scoped_to_one_worker() {
+        let now = Utc::now();
+        let node_id = Uuid::now_v7();
+        let lease = ModelSessionLeaseV1 {
+            schema: ModelSessionLeaseV1::SCHEMA.into(),
+            lease_id: Uuid::now_v7(),
+            session_id: Uuid::now_v7(),
+            node_id,
+            controller_endpoint_id: "controller-endpoint".into(),
+            model_id: "gemma3:4b".into(),
+            model_digest: format!("sha256:{}", "a".repeat(64)),
+            backend: ModelBackend::LocalOllama,
+            runtime_digest: "shipped-local:1.0".into(),
+            parallelism: ModelParallelism::WholeModel,
+            max_prompt_bytes: 1024,
+            max_output_tokens: 512,
+            issued_at: now,
+            expires_at: now + Duration::minutes(1),
+            nonce: "one-shot".into(),
+            fencing_epoch: 7,
+            signature: "signed".into(),
+        };
+        assert!(lease.is_active_at(now, 7));
+        let mut request = ModelInvocationRequestV1 {
+            schema: ModelInvocationRequestV1::SCHEMA.into(),
+            request_id: Uuid::now_v7(),
+            lease,
+            messages: vec![ModelChatMessageV1 {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            max_output_tokens: 128,
+            stream: true,
+            temperature: Some(0.5),
+            top_p: Some(0.9),
+        };
+        assert!(request.is_valid_for(node_id, "controller-endpoint"));
+        assert!(!request.is_valid_for(Uuid::now_v7(), "controller-endpoint"));
+        request.max_output_tokens = 513;
+        assert!(!request.is_valid_for(node_id, "controller-endpoint"));
     }
 }

@@ -7,12 +7,13 @@
 
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, TransportAddr,
-    endpoint::{RecvStream, SendStream, presets},
+    endpoint::{Connection, RecvStream, SendStream, presets},
 };
 use rampage_protocol::{
     ArtifactRefV1, ArtifactTransferOperation, ArtifactTransferRequestV1,
     ArtifactTransferResponseV1, MAX_ARTIFACT_TRANSFER_BYTES, MeshControlRequestV1,
-    MeshControlResponseV1, MeshEndpointRecordV1, StorageLeaseV1,
+    MeshControlResponseV1, MeshEndpointRecordV1, ModelInvocationFrameV1, ModelInvocationRequestV1,
+    StorageLeaseV1,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -21,6 +22,7 @@ use thiserror::Error;
 
 pub const CONTROL_ALPN: &[u8] = b"rampage.mesh.control.v1";
 pub const ARTIFACT_ALPN: &[u8] = b"rampage.mesh.artifact.v1";
+pub const MODEL_ALPN: &[u8] = b"rampage.mesh.model.v1";
 const MAX_ARTIFACT_HEADER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +75,10 @@ pub enum MeshError {
     ArtifactSizeMismatch,
     #[error("artifact peer rejected the transfer: {0}")]
     ArtifactRejected(String),
+    #[error("model invocation frame is invalid or too large")]
+    InvalidModelFrame,
+    #[error("model worker rejected the invocation: {0}")]
+    ModelRejected(String),
 }
 
 impl MeshConfig {
@@ -129,7 +135,11 @@ pub async fn bind_endpoint(
         .clear_address_lookup()
         .relay_mode(config.relay_mode()?)
         .secret_key(SecretKey::from_bytes(&secret_bytes))
-        .alpns(vec![CONTROL_ALPN.to_vec(), ARTIFACT_ALPN.to_vec()])
+        .alpns(vec![
+            CONTROL_ALPN.to_vec(),
+            ARTIFACT_ALPN.to_vec(),
+            MODEL_ALPN.to_vec(),
+        ])
         .bind()
         .await
         .map_err(|error| anyhow::anyhow!("mesh bind failed: {error}"))?;
@@ -250,6 +260,65 @@ async fn read_header<T: for<'de> Deserialize<'de>>(receive: &mut RecvStream) -> 
     let mut encoded = vec![0_u8; length];
     receive.read_exact(&mut encoded).await?;
     Ok(serde_json::from_slice(&encoded)?)
+}
+
+pub async fn read_model_request(
+    receive: &mut RecvStream,
+) -> anyhow::Result<ModelInvocationRequestV1> {
+    let request: ModelInvocationRequestV1 = read_header(receive).await?;
+    anyhow::ensure!(
+        request.schema == ModelInvocationRequestV1::SCHEMA,
+        MeshError::InvalidModelFrame
+    );
+    Ok(request)
+}
+
+pub async fn write_model_frame(
+    send: &mut SendStream,
+    frame: &ModelInvocationFrameV1,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        frame.schema == ModelInvocationFrameV1::SCHEMA,
+        MeshError::InvalidModelFrame
+    );
+    write_header(send, frame).await
+}
+
+pub struct ModelResponseStream {
+    _connection: Connection,
+    receive: RecvStream,
+    request_id: uuid::Uuid,
+}
+
+impl ModelResponseStream {
+    pub async fn next_frame(&mut self) -> anyhow::Result<ModelInvocationFrameV1> {
+        let frame: ModelInvocationFrameV1 = read_header(&mut self.receive).await?;
+        anyhow::ensure!(
+            frame.schema == ModelInvocationFrameV1::SCHEMA && frame.request_id == self.request_id,
+            MeshError::InvalidModelFrame
+        );
+        Ok(frame)
+    }
+}
+
+pub async fn invoke_model(
+    endpoint: &Endpoint,
+    destination: EndpointAddr,
+    request: &ModelInvocationRequestV1,
+) -> anyhow::Result<ModelResponseStream> {
+    anyhow::ensure!(
+        request.schema == ModelInvocationRequestV1::SCHEMA,
+        MeshError::InvalidModelFrame
+    );
+    let connection = endpoint.connect(destination, MODEL_ALPN).await?;
+    let (mut send, receive) = connection.open_bi().await?;
+    write_header(&mut send, request).await?;
+    send.finish()?;
+    Ok(ModelResponseStream {
+        _connection: connection,
+        receive,
+        request_id: request.request_id,
+    })
 }
 
 pub async fn read_artifact_request(
@@ -403,6 +472,11 @@ pub async fn bind_node(secret_bytes: [u8; 32], config: &MeshConfig) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
+    use rampage_protocol::{
+        JobState, ModelBackend, ModelChatMessageV1, ModelExecutionReceiptV1,
+        ModelInvocationFrameKind, ModelParallelism, ModelSessionLeaseV1,
+    };
 
     #[test]
     fn never_falls_back_to_a_public_default_relay() {
@@ -437,5 +511,118 @@ mod tests {
             .await
             .unwrap();
         endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn model_protocol_streams_bounded_frames_over_authenticated_quic() {
+        let controller = bind_endpoint([31_u8; 32], &MeshConfig::default())
+            .await
+            .unwrap();
+        let worker = bind_endpoint([32_u8; 32], &MeshConfig::default())
+            .await
+            .unwrap();
+        let request_id = uuid::Uuid::now_v7();
+        let now = Utc::now();
+        let lease = ModelSessionLeaseV1 {
+            schema: ModelSessionLeaseV1::SCHEMA.into(),
+            lease_id: uuid::Uuid::now_v7(),
+            session_id: uuid::Uuid::now_v7(),
+            node_id: uuid::Uuid::now_v7(),
+            controller_endpoint_id: controller.id().to_string(),
+            model_id: "test".into(),
+            model_digest: format!("sha256:{}", "a".repeat(64)),
+            backend: ModelBackend::LocalOllama,
+            runtime_digest: "shipped-local:test".into(),
+            parallelism: ModelParallelism::WholeModel,
+            max_prompt_bytes: 1024,
+            max_output_tokens: 16,
+            issued_at: now,
+            expires_at: now + Duration::minutes(1),
+            nonce: "nonce".into(),
+            fencing_epoch: 1,
+            signature: "signed".into(),
+        };
+        let request = ModelInvocationRequestV1 {
+            schema: ModelInvocationRequestV1::SCHEMA.into(),
+            request_id,
+            lease: lease.clone(),
+            messages: vec![ModelChatMessageV1 {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            max_output_tokens: 16,
+            stream: true,
+            temperature: None,
+            top_p: None,
+        };
+        let worker_server = worker.clone();
+        let server = tokio::spawn(async move {
+            let connection = worker_server.accept().await.unwrap().await.unwrap();
+            assert_eq!(connection.alpn(), MODEL_ALPN);
+            let (mut send, mut receive) = connection.accept_bi().await.unwrap();
+            let received = read_model_request(&mut receive).await.unwrap();
+            assert_eq!(received.request_id, request_id);
+            write_model_frame(
+                &mut send,
+                &ModelInvocationFrameV1 {
+                    schema: ModelInvocationFrameV1::SCHEMA.into(),
+                    request_id,
+                    sequence: 0,
+                    kind: ModelInvocationFrameKind::Delta,
+                    content: "world".into(),
+                    finish_reason: None,
+                    error: None,
+                    receipt: None,
+                },
+            )
+            .await
+            .unwrap();
+            write_model_frame(
+                &mut send,
+                &ModelInvocationFrameV1 {
+                    schema: ModelInvocationFrameV1::SCHEMA.into(),
+                    request_id,
+                    sequence: 1,
+                    kind: ModelInvocationFrameKind::Complete,
+                    content: String::new(),
+                    finish_reason: Some("stop".into()),
+                    error: None,
+                    receipt: Some(ModelExecutionReceiptV1 {
+                        schema: ModelExecutionReceiptV1::SCHEMA.into(),
+                        receipt_id: uuid::Uuid::now_v7(),
+                        lease_id: lease.lease_id,
+                        session_id: lease.session_id,
+                        request_id,
+                        node_id: lease.node_id,
+                        state: JobState::Succeeded,
+                        started_at: now,
+                        finished_at: now,
+                        output_digest: format!("sha256:{}", "b".repeat(64)),
+                        output_bytes: 5,
+                        usage: None,
+                        error: None,
+                        signature: "signed".into(),
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+            send.finish().unwrap();
+            let _ = send.stopped().await;
+        });
+        let mut response = invoke_model(&controller, worker.addr(), &request)
+            .await
+            .unwrap();
+        assert_eq!(
+            response.next_frame().await.unwrap().kind,
+            ModelInvocationFrameKind::Delta
+        );
+        assert_eq!(
+            response.next_frame().await.unwrap().kind,
+            ModelInvocationFrameKind::Complete
+        );
+        server.await.unwrap();
+        controller.close().await;
+        worker.close().await;
     }
 }

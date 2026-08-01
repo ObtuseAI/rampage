@@ -109,8 +109,10 @@ work that cannot be partitioned.
 
 For model planning, a signed resource offer may include `ModelRuntimeOfferV1`. The controller groups
 only exact compatibility keys, caps runtime claims by observed RAM/VRAM, and returns a potential,
-qualified, or capacity-blocked plan. A future launcher must pass the separate backend gates before
-turning any preview into a signed model-session lease.
+qualified, or capacity-blocked preview. The separate whole-model Ollama gateway may select one
+eligible installed-model digest and ask the Governor for `ModelSessionLeaseV1`; it cannot turn a
+distributed preview into authority. Pipeline and tensor launch must still pass the separate backend
+gates.
 
 ## Recursive improvement
 
@@ -122,6 +124,9 @@ Unknown, ambiguous, or missing evidence fails closed.
 ## Backend selection
 
 Execution engines are replaceable adapters below the trust boundary. Whole-job native adapters and
-loopback Ollama are enabled today. Distributed model engines remain subject to the
+remote whole-model execution through a worker's loopback Ollama are enabled today. The owner-facing
+API stays loopback-only and bearer protected; the controller-to-worker hop uses an authenticated
+model QUIC protocol, an exact signed lease, and a signed terminal transcript receipt. Distributed
+model engines remain subject to the
 [backend gates](BACKEND_GATES.md); in particular, llama.cpp RPC is hard-disabled because its current
 upstream security state does not meet Rampage's admission standard.

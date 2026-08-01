@@ -89,7 +89,10 @@ export function ComputeStrategyPanel() {
         <div className="model-targets">
           <label>
             Model
-            <input value={state.targetModelId} onChange={(event) => state.setTargetModelId(event.target.value)} />
+            <input list="rampage-installed-models" value={state.targetModelId} onChange={(event) => state.setTargetModelId(event.target.value)} />
+            <datalist id="rampage-installed-models">
+              {state.gatewayModels.map((model) => <option key={model} value={model} />)}
+            </datalist>
           </label>
           <label>
             Weights GiB
@@ -113,7 +116,11 @@ export function ComputeStrategyPanel() {
       {(plan?.blockers[0] || plan?.warnings[0]) && (
         <div className="strategy-gate"><strong>{plan.blockers.length ? "FENCED" : "NOTE"}</strong><span>{plan.blockers[0] ?? plan.warnings[0]}</span></div>
       )}
-      <footer>Planning is read-only. Starting a distributed model still requires exact runtime, topology, lease, and failure evidence.</footer>
+      <div className={`gateway-ready ${state.gatewayModels.length ? "online" : ""}`}>
+        <span><strong>REMOTE OLLAMA</strong>{state.gatewayModels.length ? `${state.gatewayModels.length} consistent installed model${state.gatewayModels.length === 1 ? "" : "s"} · OpenAI API ready` : "No eligible whole-model worker"}</span>
+        <button onClick={() => void state.copyGatewayConfig()} disabled={!state.gatewayModels.length}>Copy API setup</button>
+      </div>
+      <footer>Whole-model Ollama execution is live through signed one-shot leases. Cross-host tensor and pipeline launch remain evidence-gated.</footer>
     </section>
   );
 }

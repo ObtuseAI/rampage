@@ -139,6 +139,8 @@ fn runtime_capacity(offer: &ResourceOfferV1, runtime: &ModelRuntimeOfferV1) -> u
         ModelMemoryKind::Unified | ModelMemoryKind::Host => {
             resource_available(offer, ResourceClass::RamWorkingSet)
         }
+        ModelMemoryKind::Hybrid => resource_available(offer, ResourceClass::GpuMemory)
+            .saturating_add(resource_available(offer, ResourceClass::RamWorkingSet)),
     };
     runtime.available_model_bytes.min(observed)
 }
@@ -1297,6 +1299,7 @@ mod tests {
                     ModelParallelism::Replica,
                 ]),
                 status: ModelRuntimeStatus::Qualified,
+                installed_models: vec![],
                 certification_digest: Some(format!("sha256:{}", "b".repeat(64))),
             }],
             link_benchmark: remote.then(|| LinkBenchmarkV1 {

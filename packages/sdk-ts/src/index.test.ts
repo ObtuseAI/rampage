@@ -80,6 +80,24 @@ describe("RampageClient", () => {
     vi.unstubAllGlobals();
   });
 
+  it("exposes the OpenAI-compatible gateway with bearer auth", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      object: "list",
+      data: [{ id: "gemma3:4b", object: "model", created: 1, owned_by: "rampage-fabric" }],
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new RampageClient(undefined, "local-token");
+    expect(client.openAiConfig()).toEqual({
+      baseURL: "http://127.0.0.1:47831/v1",
+      apiKey: "local-token",
+    });
+    expect((await client.models()).data[0]?.id).toBe("gemma3:4b");
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:47831/v1/models");
+    expect(new Headers(init.headers).get("authorization")).toBe("Bearer local-token");
+    vi.unstubAllGlobals();
+  });
+
   it("uses the bounded shard-set planning and status routes", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({

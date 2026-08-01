@@ -82,6 +82,32 @@ def test_model_session_planning_is_exposed_as_preview_only() -> None:
     assert result["execution_authority"] == "none_preview_only"
 
 
+def test_openai_gateway_config_and_models_use_bearer_auth() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/models"
+        assert request.headers["authorization"] == "Bearer local-token"
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [{"id": "gemma3:4b", "object": "model"}],
+            },
+        )
+
+    client = RampageClient(token="local-token")
+    client._client.close()
+    client._client = httpx.Client(
+        base_url="http://127.0.0.1:47831",
+        headers={"x-rampage-token": "local-token"},
+        transport=httpx.MockTransport(handler),
+    )
+    assert client.openai_config() == {
+        "base_url": "http://127.0.0.1:47831/v1",
+        "api_key": "local-token",
+    }
+    assert client.models()["data"][0]["id"] == "gemma3:4b"
+
+
 def test_shard_set_plan_and_status_use_bounded_routes() -> None:
     requests: list[str] = []
 

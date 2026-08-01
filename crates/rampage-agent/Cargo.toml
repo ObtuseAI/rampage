@@ -31,4 +31,5 @@ uuid.workspace = true
 windows = { workspace = true, features = ["Win32_System_Power"] }
 
 [dev-dependencies]
+axum.workspace = true
 tempfile.workspace = true

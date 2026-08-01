@@ -40,6 +40,11 @@ jobs:
         run: cargo test --workspace
       - name: Deny Clippy warnings
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build model gateway sidecars
+        run: cargo build -p rampage-controller -p rampage-agent
+      - name: Qualify OpenAI-compatible model gateway
+        shell: pwsh
+        run: .\scripts\model-gateway-e2e.ps1
 
   typescript:
     name: Desktop and TypeScript SDK

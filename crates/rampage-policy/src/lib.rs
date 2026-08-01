@@ -4,8 +4,11 @@ use chrono::{Duration, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rampage_protocol::{
     ArtifactTransferOperation, CapabilityLeaseV1, DeviceKind, EnrollmentRequestV1,
-    ExecutionReceiptV1, JobSpecV1, MAX_ARTIFACT_TRANSFER_BYTES, MeshEndpointRecordV1,
-    NodeIdentityV1, ResourceClass, ResourceOfferV1, StorageClass, StorageLeaseV1,
+    ExecutionReceiptV1, InstalledModelV1, JobSpecV1, MAX_ARTIFACT_TRANSFER_BYTES,
+    MAX_MODEL_OUTPUT_TOKENS, MAX_MODEL_PROMPT_BYTES, MeshEndpointRecordV1, ModelBackend,
+    ModelExecutionReceiptV1, ModelParallelism, ModelRuntimeOfferV1, ModelRuntimeStatus,
+    ModelSessionLeaseV1, NodeIdentityV1, ResourceClass, ResourceOfferV1, StorageClass,
+    StorageLeaseV1,
 };
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -60,6 +63,12 @@ impl Default for GovernorConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelSessionLimits {
+    pub max_prompt_bytes: u64,
+    pub max_output_tokens: u32,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum Denial {
     #[error("owner kill latch is active")]
@@ -100,6 +109,10 @@ pub enum Denial {
     InvalidArtifact,
     #[error("node did not offer enough storage in the requested class")]
     StorageCapacityDenied,
+    #[error("model session does not target an exact shipped local runtime and installed model")]
+    ModelRuntimeDenied,
+    #[error("model session limits are invalid")]
+    InvalidModelSession,
 }
 
 pub struct Governor {
@@ -302,6 +315,91 @@ impl Governor {
         self.authorize_storage_at_epoch(offer, digest, size_bytes, storage_class, operation, 0)
     }
 
+    pub fn authorize_model_session_at_epoch(
+        &self,
+        offer: &ResourceOfferV1,
+        runtime: &ModelRuntimeOfferV1,
+        model: &InstalledModelV1,
+        controller_endpoint_id: &str,
+        limits: ModelSessionLimits,
+        fencing_epoch: u64,
+    ) -> Result<ModelSessionLeaseV1, Denial> {
+        let now = Utc::now();
+        if self.config.killed {
+            return Err(Denial::KillLatch);
+        }
+        if offer.expires_at <= now {
+            return Err(Denial::OfferExpired);
+        }
+        if limits.max_prompt_bytes == 0
+            || limits.max_prompt_bytes > MAX_MODEL_PROMPT_BYTES
+            || limits.max_output_tokens == 0
+            || limits.max_output_tokens > MAX_MODEL_OUTPUT_TOKENS
+        {
+            return Err(Denial::InvalidModelSession);
+        }
+        let exact_runtime = offer.model_runtimes.iter().any(|candidate| {
+            candidate.schema == ModelRuntimeOfferV1::SCHEMA
+                && candidate.adapter == runtime.adapter
+                && candidate.backend == runtime.backend
+                && candidate.runtime_digest == runtime.runtime_digest
+                && candidate.compatibility_key == runtime.compatibility_key
+                && candidate.status == runtime.status
+                && candidate
+                    .installed_models
+                    .iter()
+                    .any(|candidate| candidate == model)
+        });
+        let guarded_model_bytes = model
+            .artifact_size_bytes
+            .saturating_add(model.artifact_size_bytes / 5);
+        if controller_endpoint_id.is_empty()
+            || !controller_endpoint_id.is_ascii()
+            || offer.mesh_endpoint.is_none()
+            || !offer.adapters.contains("rampage.ollama.v1")
+            || runtime.adapter != "rampage.ollama.v1"
+            || runtime.backend != ModelBackend::LocalOllama
+            || runtime.status != ModelRuntimeStatus::ShippedLocal
+            || !runtime
+                .supported_parallelism
+                .contains(&ModelParallelism::WholeModel)
+            || !model.is_valid()
+            || runtime.available_model_bytes < guarded_model_bytes
+            || !exact_runtime
+            || !offer.availability.foreground_allowed
+            || offer.availability.thermal_headroom_percent < 15
+            || (!offer.availability.on_ac_power
+                && offer.availability.battery_percent.unwrap_or(100) < 50)
+        {
+            return Err(Denial::ModelRuntimeDenied);
+        }
+        let mut lease = ModelSessionLeaseV1 {
+            schema: ModelSessionLeaseV1::SCHEMA.into(),
+            lease_id: Uuid::now_v7(),
+            session_id: Uuid::now_v7(),
+            node_id: offer.node_id,
+            controller_endpoint_id: controller_endpoint_id.into(),
+            model_id: model.model_id.clone(),
+            model_digest: model.artifact_digest.clone(),
+            backend: runtime.backend,
+            runtime_digest: runtime.runtime_digest.clone(),
+            parallelism: ModelParallelism::WholeModel,
+            max_prompt_bytes: limits.max_prompt_bytes,
+            max_output_tokens: limits.max_output_tokens,
+            issued_at: now,
+            expires_at: now + Duration::seconds(self.config.lease_ttl_seconds.max(1)),
+            nonce: Uuid::new_v4().simple().to_string(),
+            fencing_epoch,
+            signature: String::new(),
+        };
+        lease.signature = hex::encode(
+            self.signing_key
+                .sign(&model_session_lease_message(&lease))
+                .to_bytes(),
+        );
+        Ok(lease)
+    }
+
     pub fn authorize_storage_at_epoch(
         &self,
         offer: &ResourceOfferV1,
@@ -443,6 +541,23 @@ pub fn verify_storage_lease_with_key(
     verify_contract_signature(public_key, &lease.signature, &storage_lease_message(lease))
 }
 
+pub fn verify_model_session_lease_with_key(
+    public_key: &str,
+    lease: &ModelSessionLeaseV1,
+) -> Result<(), Denial> {
+    verify_contract_signature(
+        public_key,
+        &lease.signature,
+        &model_session_lease_message(lease),
+    )
+}
+
+fn model_session_lease_message(lease: &ModelSessionLeaseV1) -> Vec<u8> {
+    let mut unsigned = lease.clone();
+    unsigned.signature.clear();
+    contract_message(&unsigned)
+}
+
 fn storage_lease_message(lease: &StorageLeaseV1) -> Vec<u8> {
     let mut unsigned = lease.clone();
     unsigned.signature.clear();
@@ -479,6 +594,25 @@ pub fn sign_receipt(signing_key: &SigningKey, receipt: &mut ExecutionReceiptV1) 
 pub fn verify_receipt(
     identity: &NodeIdentityV1,
     receipt: &ExecutionReceiptV1,
+) -> Result<(), Denial> {
+    if identity.node_id != receipt.node_id {
+        return Err(Denial::NodeMismatch);
+    }
+    verify_contract_signature(&identity.public_key, &receipt.signature, &{
+        let mut unsigned = receipt.clone();
+        unsigned.signature.clear();
+        contract_message(&unsigned)
+    })
+}
+
+pub fn sign_model_receipt(signing_key: &SigningKey, receipt: &mut ModelExecutionReceiptV1) {
+    receipt.signature.clear();
+    receipt.signature = hex::encode(signing_key.sign(&contract_message(receipt)).to_bytes());
+}
+
+pub fn verify_model_receipt(
+    identity: &NodeIdentityV1,
+    receipt: &ModelExecutionReceiptV1,
 ) -> Result<(), Denial> {
     if identity.node_id != receipt.node_id {
         return Err(Denial::NodeMismatch);
@@ -544,7 +678,8 @@ mod tests {
     use super::*;
     use chrono::Duration;
     use rampage_protocol::{
-        AvailabilityV1, ResourceClass, ResourceQuantityV1, ResourceRequestV1, WorkloadTrust,
+        AvailabilityV1, ModelMemoryKind, ResourceClass, ResourceQuantityV1, ResourceRequestV1,
+        WorkloadTrust,
     };
     use std::collections::BTreeMap;
 
@@ -653,6 +788,72 @@ mod tests {
                 &storage_lease
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn model_session_authority_is_exact_signed_and_tamper_evident() {
+        let governor = Governor::ephemeral(GovernorConfig::default());
+        let (_, mut offer) = fixtures("desktop", true);
+        offer.adapters = BTreeSet::from(["rampage.ollama.v1".into()]);
+        offer.resources.push(ResourceQuantityV1 {
+            class: ResourceClass::RamWorkingSet,
+            capacity: 4 * 1024 * 1024 * 1024,
+            available: 4 * 1024 * 1024 * 1024,
+            unit: "byte".into(),
+            labels: BTreeMap::new(),
+        });
+        offer.mesh_endpoint = Some(MeshEndpointRecordV1 {
+            schema: MeshEndpointRecordV1::SCHEMA.into(),
+            endpoint_id: "worker".into(),
+            direct_addresses: vec!["127.0.0.1:1".into()],
+            relay_urls: vec![],
+            issued_at: Utc::now(),
+            expires_at: offer.expires_at,
+            signature: "signed".into(),
+        });
+        let model = InstalledModelV1 {
+            schema: InstalledModelV1::SCHEMA.into(),
+            model_id: "gemma3:4b".into(),
+            artifact_digest: format!("sha256:{}", "d".repeat(64)),
+            artifact_size_bytes: 1024 * 1024 * 1024,
+        };
+        let runtime = ModelRuntimeOfferV1 {
+            schema: ModelRuntimeOfferV1::SCHEMA.into(),
+            adapter: "rampage.ollama.v1".into(),
+            backend: ModelBackend::LocalOllama,
+            runtime_version: "test".into(),
+            runtime_digest: "shipped-local:test".into(),
+            compatibility_key: "ollama-test".into(),
+            memory_kind: ModelMemoryKind::Host,
+            available_model_bytes: 2 * 1024 * 1024 * 1024,
+            supported_parallelism: BTreeSet::from([ModelParallelism::WholeModel]),
+            status: ModelRuntimeStatus::ShippedLocal,
+            installed_models: vec![model.clone()],
+            certification_digest: None,
+        };
+        offer.model_runtimes = vec![runtime.clone()];
+        let lease = governor
+            .authorize_model_session_at_epoch(
+                &offer,
+                &runtime,
+                &model,
+                "controller",
+                ModelSessionLimits {
+                    max_prompt_bytes: 4096,
+                    max_output_tokens: 512,
+                },
+                9,
+            )
+            .unwrap();
+        let governor_key = hex::encode(governor.verifying_key().to_bytes());
+        assert!(lease.is_active_at(Utc::now(), 9));
+        assert!(verify_model_session_lease_with_key(&governor_key, &lease).is_ok());
+        let mut tampered = lease;
+        tampered.model_id = "other".into();
+        assert_eq!(
+            verify_model_session_lease_with_key(&governor_key, &tampered),
+            Err(Denial::InvalidSignature)
         );
     }
 

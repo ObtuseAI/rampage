@@ -32,6 +32,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'debug sidecar build failed' }
     & .\scripts\e2e.ps1
     & .\scripts\mesh-e2e.ps1
+    & .\scripts\model-gateway-e2e.ps1
     if (-not $SkipOllama) { & .\scripts\ollama-e2e.ps1 }
 } finally {
     Pop-Location

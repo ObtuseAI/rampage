@@ -1,9 +1,12 @@
 use anyhow::Context;
 use axum::{
     Json, Router,
-    body::Body,
-    extract::{DefaultBodyLimit, Path, Query, State},
-    http::{HeaderName, Method, Request, StatusCode, header::CONTENT_TYPE},
+    body::{Body, Bytes},
+    extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
+    http::{
+        HeaderName, HeaderValue, Method, Request, StatusCode,
+        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE},
+    },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -16,19 +19,26 @@ use rampage_controller::{
 use rampage_ledger::{Ledger, LedgerEvent};
 use rampage_mesh::{MeshConfig, MeshMode, MeshNode};
 use rampage_policy::{
-    Governor, GovernorConfig, verify_enrollment, verify_mesh_endpoint_with_key, verify_offer,
+    Governor, GovernorConfig, ModelSessionLimits, verify_enrollment, verify_mesh_endpoint_with_key,
+    verify_model_receipt, verify_offer,
 };
 use rampage_protocol::{
     ArtifactRefV1, ArtifactTransferOperation, CapabilityLeaseV1, EnrollmentInviteV1,
-    EnrollmentRequestV1, ExecutionReceiptV1, JobSpecV1, JobState, LINK_BENCHMARK_TRANSFER_BYTES,
-    MAX_ARTIFACT_TRANSFER_BYTES, MeshControlRequestV1, MeshControlResponseV1, MeshEndpointRecordV1,
-    ModelSessionRequestV1, NodeIdentityV1, ResourceOfferV1, ShardSetV1, StorageClass, WorkClaimV1,
+    EnrollmentRequestV1, ExecutionReceiptV1, InstalledModelV1, JobSpecV1, JobState,
+    LINK_BENCHMARK_TRANSFER_BYTES, MAX_ARTIFACT_TRANSFER_BYTES, MAX_MODEL_OUTPUT_BYTES,
+    MAX_MODEL_OUTPUT_TOKENS, MAX_MODEL_PROMPT_BYTES, MeshControlRequestV1, MeshControlResponseV1,
+    MeshEndpointRecordV1, ModelBackend, ModelChatMessageV1, ModelExecutionReceiptV1,
+    ModelInvocationFrameKind, ModelInvocationRequestV1, ModelMemoryKind, ModelParallelism,
+    ModelRuntimeOfferV1, ModelRuntimeStatus, ModelSessionLeaseV1, ModelSessionRequestV1,
+    ModelUsageV1, NodeIdentityV1, ResourceClass, ResourceOfferV1, ShardSetV1, StorageClass,
+    WorkClaimV1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap},
+    convert::Infallible,
     net::SocketAddr,
     path::PathBuf,
     sync::{
@@ -36,6 +46,9 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
+use subtle::ConstantTimeEq;
+use tokio::sync::{mpsc, watch};
+use tokio_stream::wrappers::ReceiverStream;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     trace::TraceLayer,
@@ -66,6 +79,7 @@ struct AppState {
     local_api_token: Arc<String>,
     admission_gate: Arc<tokio::sync::Mutex<()>>,
     fencing_epoch: Arc<AtomicU64>,
+    model_cancellations: Arc<tokio::sync::Mutex<HashMap<Uuid, watch::Sender<bool>>>>,
 }
 
 #[derive(Clone)]
@@ -233,6 +247,7 @@ async fn main() -> anyhow::Result<()> {
         local_api_token: local_api_token.clone(),
         admission_gate: Arc::new(tokio::sync::Mutex::new(())),
         fencing_epoch: Arc::new(AtomicU64::new(fencing_epoch)),
+        model_cancellations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     };
     let mesh_state = state.clone();
     let protected = Router::new()
@@ -264,12 +279,24 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/projects/discover", post(discover_project))
         .route("/v1/events", get(events))
         .route_layer(middleware::from_fn_with_state(
-            local_api_token,
+            local_api_token.clone(),
             require_local_token,
+        ));
+    let openai = Router::new()
+        .route("/v1/models", get(openai_models))
+        .route("/v1/chat/completions", post(openai_chat_completions))
+        .route(
+            "/v1/model-sessions/{session_id}/cancel",
+            post(cancel_model_session),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            local_api_token.clone(),
+            require_bearer_token,
         ));
     let app = Router::new()
         .route("/health", get(health))
         .merge(protected)
+        .merge(openai)
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()
@@ -280,7 +307,12 @@ async fn main() -> anyhow::Result<()> {
                     "http://tauri.localhost".parse().expect("static origin"),
                 ]))
                 .allow_methods([Method::GET, Method::POST])
-                .allow_headers([CONTENT_TYPE, HeaderName::from_static("x-rampage-token")]),
+                .allow_headers([
+                    CONTENT_TYPE,
+                    AUTHORIZATION,
+                    HeaderName::from_static("x-rampage-token"),
+                ])
+                .expose_headers([HeaderName::from_static("x-rampage-session-id")]),
         )
         .with_state(state);
     info!(%address, "Rampage controller listening");
@@ -454,7 +486,7 @@ async fn require_local_token(
         .unwrap_or_default();
     let expected_digest = Sha256::digest(expected.as_bytes());
     let supplied_digest = Sha256::digest(supplied.as_bytes());
-    if expected_digest != supplied_digest {
+    if !bool::from(expected_digest.ct_eq(&supplied_digest)) {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "valid local Rampage token required"})),
@@ -462,6 +494,848 @@ async fn require_local_token(
             .into_response();
     }
     next.run(request).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenAiChatCompletionRequest {
+    model: String,
+    messages: Vec<OpenAiChatMessage>,
+    #[serde(default)]
+    stream: bool,
+    max_tokens: Option<u32>,
+    max_completion_tokens: Option<u32>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenAiChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Clone)]
+struct ModelCandidate {
+    offer: ResourceOfferV1,
+    runtime: ModelRuntimeOfferV1,
+    model: InstalledModelV1,
+}
+
+struct ActiveModelInvocation {
+    request_id: Uuid,
+    lease: ModelSessionLeaseV1,
+    stream: rampage_mesh::ModelResponseStream,
+    cancel: watch::Receiver<bool>,
+}
+
+struct ModelGatewayCompletion {
+    content: String,
+    finish_reason: String,
+    usage: Option<ModelUsageV1>,
+}
+
+#[derive(Debug)]
+struct ModelGatewayFailure {
+    status: StatusCode,
+    kind: &'static str,
+    code: &'static str,
+    message: String,
+}
+
+async fn require_bearer_token(
+    State(expected): State<Arc<String>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let supplied = request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+        .map(|(_, token)| token)
+        .unwrap_or_default();
+    let expected_digest = Sha256::digest(expected.as_bytes());
+    let supplied_digest = Sha256::digest(supplied.as_bytes());
+    if !bool::from(expected_digest.ct_eq(&supplied_digest)) {
+        return openai_error(
+            StatusCode::UNAUTHORIZED,
+            "valid Rampage bearer token required",
+            "authentication_error",
+            None,
+            "invalid_api_key",
+        );
+    }
+    next.run(request).await
+}
+
+async fn openai_models(State(state): State<AppState>) -> Response {
+    let catalog = match live_model_catalog(&state) {
+        Ok(catalog) => catalog,
+        Err(error) => return gateway_failure_response(error),
+    };
+    let mut data = catalog
+        .into_iter()
+        .filter_map(|(model_id, candidates)| {
+            let created = candidates
+                .iter()
+                .map(|candidate| candidate.offer.observed_at.timestamp())
+                .max()?;
+            Some(json!({
+                "id": model_id,
+                "object": "model",
+                "created": created,
+                "owned_by": "rampage-fabric"
+            }))
+        })
+        .collect::<Vec<_>>();
+    data.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+    Json(json!({"object": "list", "data": data})).into_response()
+}
+
+async fn openai_chat_completions(
+    State(state): State<AppState>,
+    payload: Result<Json<OpenAiChatCompletionRequest>, JsonRejection>,
+) -> Response {
+    let request = match payload {
+        Ok(Json(request)) => request,
+        Err(error) => {
+            return openai_error(
+                StatusCode::BAD_REQUEST,
+                &bounded_gateway_error(&error.to_string()),
+                "invalid_request_error",
+                None,
+                "invalid_json",
+            );
+        }
+    };
+    let max_output_tokens = match validate_openai_request(&request) {
+        Ok(limit) => limit,
+        Err(error) => return gateway_failure_response(error),
+    };
+    let wants_stream = request.stream;
+    let model_id = request.model.clone();
+    let invocation = match start_model_invocation(&state, request, max_output_tokens).await {
+        Ok(invocation) => invocation,
+        Err(error) => return gateway_failure_response(error),
+    };
+    let session_id = invocation.lease.session_id;
+    let request_id = invocation.request_id;
+    let created = invocation.lease.issued_at.timestamp();
+
+    if wants_stream {
+        let (sender, receiver) = mpsc::channel::<Result<Bytes, Infallible>>(32);
+        let task_sender = sender.clone();
+        let task_state = state.clone();
+        tokio::spawn(async move {
+            let _ = task_sender
+                .send(Ok(openai_sse(json!({
+                    "id": format!("chatcmpl-{}", request_id.simple()),
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_id,
+                    "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]
+                }))))
+                .await;
+            let result =
+                consume_model_invocation(&task_state, invocation, Some(&task_sender)).await;
+            task_state
+                .model_cancellations
+                .lock()
+                .await
+                .remove(&session_id);
+            match result {
+                Ok(completion) => {
+                    let _ = task_sender
+                        .send(Ok(openai_sse(json!({
+                            "id": format!("chatcmpl-{}", request_id.simple()),
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model_id,
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": completion.finish_reason}]
+                        }))))
+                        .await;
+                }
+                Err(error) => {
+                    let _ = task_sender
+                        .send(Ok(openai_sse(json!({"error": {
+                            "message": error.message,
+                            "type": error.kind,
+                            "param": null,
+                            "code": error.code
+                        }}))))
+                        .await;
+                }
+            }
+            let _ = task_sender
+                .send(Ok(Bytes::from_static(b"data: [DONE]\n\n")))
+                .await;
+        });
+        drop(sender);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"))
+            .header(CACHE_CONTROL, HeaderValue::from_static("no-cache"))
+            .header("x-rampage-session-id", session_id.to_string())
+            .body(Body::from_stream(ReceiverStream::new(receiver)))
+            .expect("static streaming response is valid");
+    }
+
+    let result = consume_model_invocation(&state, invocation, None).await;
+    state.model_cancellations.lock().await.remove(&session_id);
+    match result {
+        Ok(completion) => {
+            let usage = completion.usage.map(|usage| {
+                json!({
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.prompt_tokens.saturating_add(usage.completion_tokens)
+                })
+            });
+            let mut response = json!({
+                "id": format!("chatcmpl-{}", request_id.simple()),
+                "object": "chat.completion",
+                "created": created,
+                "model": model_id,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": completion.content},
+                    "finish_reason": completion.finish_reason
+                }]
+            });
+            if let Some(usage) = usage {
+                response["usage"] = usage;
+            }
+            let mut response = Json(response).into_response();
+            response.headers_mut().insert(
+                HeaderName::from_static("x-rampage-session-id"),
+                HeaderValue::from_str(&session_id.to_string())
+                    .expect("UUID is a valid header value"),
+            );
+            response
+        }
+        Err(error) => gateway_failure_response(error),
+    }
+}
+
+async fn cancel_model_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+) -> Response {
+    let cancellations = state.model_cancellations.lock().await;
+    let Some(cancellation) = cancellations.get(&session_id) else {
+        return openai_error(
+            StatusCode::NOT_FOUND,
+            "model session is not active",
+            "invalid_request_error",
+            Some("session_id"),
+            "session_not_found",
+        );
+    };
+    let _ = cancellation.send(true);
+    let _ = state.ledger.append(
+        "model.session.cancel.requested",
+        &session_id.to_string(),
+        &json!({"source": "local-openai-api"}),
+    );
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({"session_id": session_id, "cancelled": true})),
+    )
+        .into_response()
+}
+
+fn validate_openai_request(
+    request: &OpenAiChatCompletionRequest,
+) -> Result<u32, ModelGatewayFailure> {
+    if request.model.trim().is_empty() || request.model.len() > 200 || !request.model.is_ascii() {
+        return Err(invalid_model_request(
+            "model must be a non-empty ASCII identifier",
+            "model",
+        ));
+    }
+    if request.messages.is_empty() || request.messages.len() > 256 {
+        return Err(invalid_model_request(
+            "messages must contain between 1 and 256 entries",
+            "messages",
+        ));
+    }
+    if request.messages.iter().any(|message| {
+        !matches!(message.role.as_str(), "system" | "user" | "assistant")
+            || message.content.is_empty()
+    }) {
+        return Err(invalid_model_request(
+            "only non-empty system, user, and assistant text messages are supported",
+            "messages",
+        ));
+    }
+    let prompt_bytes = request.messages.iter().fold(0_u64, |total, message| {
+        total
+            .saturating_add(message.role.len() as u64)
+            .saturating_add(message.content.len() as u64)
+    });
+    if prompt_bytes > MAX_MODEL_PROMPT_BYTES {
+        return Err(ModelGatewayFailure {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            kind: "invalid_request_error",
+            code: "prompt_too_large",
+            message: "message text exceeds Rampage's one MiB prompt limit".into(),
+        });
+    }
+    if request.max_tokens.is_some()
+        && request.max_completion_tokens.is_some()
+        && request.max_tokens != request.max_completion_tokens
+    {
+        return Err(invalid_model_request(
+            "max_tokens and max_completion_tokens conflict",
+            "max_completion_tokens",
+        ));
+    }
+    let max_output_tokens = request
+        .max_completion_tokens
+        .or(request.max_tokens)
+        .unwrap_or(512);
+    if max_output_tokens == 0 || max_output_tokens > MAX_MODEL_OUTPUT_TOKENS {
+        return Err(invalid_model_request(
+            "requested output token limit is outside the supported range",
+            "max_completion_tokens",
+        ));
+    }
+    if request
+        .temperature
+        .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
+        || request
+            .top_p
+            .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+    {
+        return Err(invalid_model_request(
+            "temperature or top_p is outside the supported range",
+            "temperature",
+        ));
+    }
+    Ok(max_output_tokens)
+}
+
+async fn start_model_invocation(
+    state: &AppState,
+    request: OpenAiChatCompletionRequest,
+    max_output_tokens: u32,
+) -> Result<ActiveModelInvocation, ModelGatewayFailure> {
+    let _admission_guard = state.admission_gate.lock().await;
+    if state.kill_latch_path.is_file() {
+        return Err(ModelGatewayFailure {
+            status: StatusCode::LOCKED,
+            kind: "server_error",
+            code: "owner_stop_active",
+            message: "owner STOP is active".into(),
+        });
+    }
+    let catalog = live_model_catalog(state)?;
+    let candidates = catalog
+        .get(&request.model)
+        .ok_or_else(|| ModelGatewayFailure {
+            status: StatusCode::NOT_FOUND,
+            kind: "invalid_request_error",
+            code: "model_not_found",
+            message: "model is not consistently installed on an eligible contributor".into(),
+        })?;
+    let candidate = candidates
+        .iter()
+        .max_by_key(|candidate| candidate.runtime.available_model_bytes)
+        .cloned()
+        .expect("catalog entries are non-empty");
+    let prompt_bytes = request.messages.iter().fold(0_u64, |total, message| {
+        total
+            .saturating_add(message.role.len() as u64)
+            .saturating_add(message.content.len() as u64)
+    });
+    let lease = state
+        .governor
+        .authorize_model_session_at_epoch(
+            &candidate.offer,
+            &candidate.runtime,
+            &candidate.model,
+            &state.mesh.endpoint_id(),
+            ModelSessionLimits {
+                max_prompt_bytes: prompt_bytes.max(1),
+                max_output_tokens,
+            },
+            state.fencing_epoch.load(Ordering::Acquire),
+        )
+        .map_err(|error| ModelGatewayFailure {
+            status: StatusCode::FORBIDDEN,
+            kind: "server_error",
+            code: "model_authority_denied",
+            message: error.to_string(),
+        })?;
+    let endpoint_record = candidate
+        .offer
+        .mesh_endpoint
+        .as_ref()
+        .expect("catalog requires a mesh endpoint");
+    let endpoint = rampage_mesh::endpoint_addr_from_record(endpoint_record).map_err(|error| {
+        ModelGatewayFailure {
+            status: StatusCode::BAD_GATEWAY,
+            kind: "server_error",
+            code: "worker_endpoint_invalid",
+            message: error.to_string(),
+        }
+    })?;
+    let request_id = Uuid::now_v7();
+    let invocation = ModelInvocationRequestV1 {
+        schema: ModelInvocationRequestV1::SCHEMA.into(),
+        request_id,
+        lease: lease.clone(),
+        messages: request
+            .messages
+            .into_iter()
+            .map(|message| ModelChatMessageV1 {
+                role: message.role,
+                content: message.content,
+            })
+            .collect(),
+        max_output_tokens,
+        stream: request.stream,
+        temperature: request.temperature,
+        top_p: request.top_p,
+    };
+    if !invocation.is_valid_for(candidate.offer.node_id, &state.mesh.endpoint_id()) {
+        return Err(ModelGatewayFailure {
+            status: StatusCode::BAD_REQUEST,
+            kind: "invalid_request_error",
+            code: "invalid_model_request",
+            message: "request does not fit its bounded model-session authority".into(),
+        });
+    }
+    state
+        .ledger
+        .append(
+            "model.session.lease.issued",
+            &lease.session_id.to_string(),
+            &json!({
+                "lease": &lease,
+                "request_id": request_id,
+                "model_digest": candidate.model.artifact_digest,
+                "node_id": candidate.offer.node_id
+            }),
+        )
+        .map_err(|error| ModelGatewayFailure {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            kind: "server_error",
+            code: "evidence_write_failed",
+            message: error.to_string(),
+        })?;
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        rampage_mesh::invoke_model(&state.mesh.endpoint(), endpoint, &invocation),
+    )
+    .await
+    .map_err(|_| ModelGatewayFailure {
+        status: StatusCode::GATEWAY_TIMEOUT,
+        kind: "server_error",
+        code: "worker_connect_timeout",
+        message: "timed out connecting to the selected model worker".into(),
+    })?
+    .map_err(|error| ModelGatewayFailure {
+        status: StatusCode::BAD_GATEWAY,
+        kind: "server_error",
+        code: "worker_unavailable",
+        message: bounded_gateway_error(&error.to_string()),
+    })?;
+    let (cancellation, cancel) = watch::channel(false);
+    state
+        .model_cancellations
+        .lock()
+        .await
+        .insert(lease.session_id, cancellation);
+    Ok(ActiveModelInvocation {
+        request_id,
+        lease,
+        stream,
+        cancel,
+    })
+}
+
+async fn consume_model_invocation(
+    state: &AppState,
+    mut invocation: ActiveModelInvocation,
+    stream_sender: Option<&mpsc::Sender<Result<Bytes, Infallible>>>,
+) -> Result<ModelGatewayCompletion, ModelGatewayFailure> {
+    let mut expected_sequence = 0_u64;
+    let mut output = String::new();
+    loop {
+        let remaining = (invocation.lease.expires_at - chrono::Utc::now())
+            .to_std()
+            .map_err(|_| model_timeout())?;
+        let frame = tokio::select! {
+            changed = invocation.cancel.changed() => {
+                let _ = changed;
+                return Err(ModelGatewayFailure {
+                    status: StatusCode::REQUEST_TIMEOUT,
+                    kind: "server_error",
+                    code: "model_session_cancelled",
+                    message: "model session was cancelled".into(),
+                });
+            }
+            result = tokio::time::timeout(remaining, invocation.stream.next_frame()) => {
+                result.map_err(|_| model_timeout())?.map_err(|error| ModelGatewayFailure {
+                    status: StatusCode::BAD_GATEWAY,
+                    kind: "server_error",
+                    code: "invalid_worker_stream",
+                    message: bounded_gateway_error(&error.to_string()),
+                })?
+            }
+        };
+        if frame.sequence != expected_sequence {
+            return Err(invalid_worker_stream(
+                "model frame sequence is not contiguous",
+            ));
+        }
+        match frame.kind {
+            ModelInvocationFrameKind::Delta => {
+                if frame.receipt.is_some() || frame.error.is_some() || frame.finish_reason.is_some()
+                {
+                    return Err(invalid_worker_stream(
+                        "model delta contains terminal fields",
+                    ));
+                }
+                output.push_str(&frame.content);
+                if output.len() > MAX_MODEL_OUTPUT_BYTES as usize {
+                    return Err(invalid_worker_stream(
+                        "model output exceeds the transcript limit",
+                    ));
+                }
+                if let Some(sender) = stream_sender {
+                    sender
+                        .send(Ok(openai_sse(json!({
+                            "id": format!("chatcmpl-{}", invocation.request_id.simple()),
+                            "object": "chat.completion.chunk",
+                            "created": invocation.lease.issued_at.timestamp(),
+                            "model": invocation.lease.model_id,
+                            "choices": [{"index": 0, "delta": {"content": frame.content}, "finish_reason": null}]
+                        }))))
+                        .await
+                        .map_err(|_| ModelGatewayFailure {
+                            status: StatusCode::REQUEST_TIMEOUT,
+                            kind: "server_error",
+                            code: "client_disconnected",
+                            message: "streaming client disconnected".into(),
+                        })?;
+                }
+                expected_sequence = expected_sequence.saturating_add(1);
+            }
+            ModelInvocationFrameKind::Complete | ModelInvocationFrameKind::Error => {
+                if !frame.content.is_empty() {
+                    return Err(invalid_worker_stream(
+                        "terminal model frame contains output text",
+                    ));
+                }
+                let Some(receipt) = frame.receipt else {
+                    if frame.kind == ModelInvocationFrameKind::Error
+                        && expected_sequence == 0
+                        && output.is_empty()
+                    {
+                        return Err(ModelGatewayFailure {
+                            status: StatusCode::BAD_GATEWAY,
+                            kind: "server_error",
+                            code: "worker_rejected_session",
+                            message: frame
+                                .error
+                                .unwrap_or_else(|| "model worker rejected the session".into()),
+                        });
+                    }
+                    return Err(invalid_worker_stream(
+                        "terminal model frame omitted its signed receipt",
+                    ));
+                };
+                verify_terminal_model_receipt(state, &invocation, &receipt, &output)?;
+                if (frame.kind == ModelInvocationFrameKind::Complete
+                    && receipt.state != JobState::Succeeded)
+                    || (frame.kind == ModelInvocationFrameKind::Error
+                        && receipt.state == JobState::Succeeded)
+                {
+                    return Err(invalid_worker_stream(
+                        "terminal frame and signed receipt disagree on execution state",
+                    ));
+                }
+                if frame
+                    .finish_reason
+                    .as_ref()
+                    .is_some_and(|reason| reason.len() > 64 || !reason.is_ascii())
+                    || (receipt.state == JobState::Succeeded && receipt.error.is_some())
+                {
+                    return Err(invalid_worker_stream(
+                        "terminal model metadata is malformed",
+                    ));
+                }
+                state
+                    .ledger
+                    .append(
+                        "model.session.receipted",
+                        &invocation.lease.session_id.to_string(),
+                        &receipt,
+                    )
+                    .map_err(|error| ModelGatewayFailure {
+                        status: StatusCode::INTERNAL_SERVER_ERROR,
+                        kind: "server_error",
+                        code: "evidence_write_failed",
+                        message: error.to_string(),
+                    })?;
+                if frame.kind == ModelInvocationFrameKind::Error {
+                    return Err(ModelGatewayFailure {
+                        status: StatusCode::BAD_GATEWAY,
+                        kind: "server_error",
+                        code: "model_execution_failed",
+                        message: frame
+                            .error
+                            .or(receipt.error)
+                            .unwrap_or_else(|| "model execution failed".into()),
+                    });
+                }
+                return Ok(ModelGatewayCompletion {
+                    content: output,
+                    finish_reason: frame.finish_reason.unwrap_or_else(|| "stop".into()),
+                    usage: receipt.usage,
+                });
+            }
+        }
+    }
+}
+
+fn verify_terminal_model_receipt(
+    state: &AppState,
+    invocation: &ActiveModelInvocation,
+    receipt: &ModelExecutionReceiptV1,
+    output: &str,
+) -> Result<(), ModelGatewayFailure> {
+    let identity = state
+        .nodes
+        .read()
+        .map_err(|_| ModelGatewayFailure {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            kind: "server_error",
+            code: "controller_state_unavailable",
+            message: "controller state lock poisoned".into(),
+        })?
+        .get(&receipt.node_id)
+        .cloned()
+        .ok_or_else(|| invalid_worker_stream("model receipt signer is not enrolled"))?;
+    verify_model_receipt(&identity, receipt)
+        .map_err(|_| invalid_worker_stream("model receipt signature is invalid"))?;
+    let digest = format!("sha256:{}", hex::encode(Sha256::digest(output.as_bytes())));
+    if receipt.schema != ModelExecutionReceiptV1::SCHEMA
+        || receipt.lease_id != invocation.lease.lease_id
+        || receipt.session_id != invocation.lease.session_id
+        || receipt.request_id != invocation.request_id
+        || receipt.node_id != invocation.lease.node_id
+        || !matches!(
+            receipt.state,
+            JobState::Succeeded | JobState::Failed | JobState::Cancelled
+        )
+        || receipt.finished_at < receipt.started_at
+        || receipt.output_digest != digest
+        || receipt.output_bytes != output.len() as u64
+    {
+        return Err(invalid_worker_stream(
+            "model receipt does not match the invocation transcript",
+        ));
+    }
+    Ok(())
+}
+
+fn live_model_catalog(
+    state: &AppState,
+) -> Result<HashMap<String, Vec<ModelCandidate>>, ModelGatewayFailure> {
+    let now = chrono::Utc::now();
+    let offers = state.offers.read().map_err(|_| ModelGatewayFailure {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        kind: "server_error",
+        code: "controller_state_unavailable",
+        message: "controller state lock poisoned".into(),
+    })?;
+    let mut catalog: HashMap<String, Vec<ModelCandidate>> = HashMap::new();
+    for offer in offers.values().filter(|offer| {
+        offer.expires_at > now
+            && offer.mesh_endpoint.is_some()
+            && offer.availability.foreground_allowed
+            && offer.availability.thermal_headroom_percent >= 15
+            && (offer.availability.on_ac_power
+                || offer.availability.battery_percent.unwrap_or(100) >= 50)
+    }) {
+        for runtime in &offer.model_runtimes {
+            if runtime.schema != ModelRuntimeOfferV1::SCHEMA
+                || runtime.backend != ModelBackend::LocalOllama
+                || runtime.status != ModelRuntimeStatus::ShippedLocal
+                || runtime.adapter != "rampage.ollama.v1"
+                || !offer.adapters.contains(&runtime.adapter)
+                || !runtime
+                    .supported_parallelism
+                    .contains(&ModelParallelism::WholeModel)
+            {
+                continue;
+            }
+            for model in &runtime.installed_models {
+                let guarded_bytes = model
+                    .artifact_size_bytes
+                    .saturating_add(model.artifact_size_bytes / 5);
+                if !model.is_valid() || runtime_capacity_from_offer(offer, runtime) < guarded_bytes
+                {
+                    continue;
+                }
+                catalog
+                    .entry(model.model_id.clone())
+                    .or_default()
+                    .push(ModelCandidate {
+                        offer: offer.clone(),
+                        runtime: runtime.clone(),
+                        model: model.clone(),
+                    });
+            }
+        }
+    }
+    catalog.retain(|_, candidates| {
+        candidates
+            .iter()
+            .map(|candidate| candidate.model.artifact_digest.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            == 1
+    });
+    Ok(catalog)
+}
+
+fn validate_model_runtime_contracts(offer: &ResourceOfferV1) -> Result<(), String> {
+    if offer.model_runtimes.len() > 16 {
+        return Err("offer exceeds the 16 model-runtime profile limit".into());
+    }
+    let mut runtimes = BTreeSet::new();
+    for runtime in &offer.model_runtimes {
+        if runtime.schema != ModelRuntimeOfferV1::SCHEMA
+            || runtime.adapter.trim().is_empty()
+            || runtime.runtime_version.trim().is_empty()
+            || runtime.runtime_digest.trim().is_empty()
+            || runtime.compatibility_key.trim().is_empty()
+            || runtime.available_model_bytes == 0
+            || runtime.available_model_bytes > runtime_capacity_from_offer(offer, runtime)
+            || !offer.adapters.contains(&runtime.adapter)
+            || runtime.installed_models.len() > 128
+            || !runtimes.insert((runtime.backend, runtime.compatibility_key.as_str()))
+        {
+            return Err("offer contains a malformed or contradictory model-runtime profile".into());
+        }
+        let mut model_ids = BTreeSet::new();
+        if runtime
+            .installed_models
+            .iter()
+            .any(|model| !model.is_valid() || !model_ids.insert(model.model_id.as_str()))
+        {
+            return Err("offer contains a malformed or duplicate installed model".into());
+        }
+        match runtime.status {
+            ModelRuntimeStatus::ShippedLocal
+                if runtime.backend == ModelBackend::LocalOllama
+                    && runtime.adapter == "rampage.ollama.v1"
+                    && runtime.runtime_digest.starts_with("shipped-local:")
+                    && runtime
+                        .supported_parallelism
+                        .contains(&ModelParallelism::WholeModel)
+                    && runtime.certification_digest.is_none() => {}
+            ModelRuntimeStatus::Qualified
+                if runtime.installed_models.is_empty()
+                    && runtime.is_qualified_for_distributed() => {}
+            ModelRuntimeStatus::Candidate if runtime.installed_models.is_empty() => {}
+            _ => {
+                return Err(
+                    "model runtime status, backend, topology, or installed-model authority is inconsistent"
+                        .into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn runtime_capacity_from_offer(offer: &ResourceOfferV1, runtime: &ModelRuntimeOfferV1) -> u64 {
+    let available = |class| {
+        offer
+            .resources
+            .iter()
+            .find(|resource| resource.class == class && resource.unit == "byte")
+            .map_or(0, |resource| resource.available)
+    };
+    let observed = match runtime.memory_kind {
+        ModelMemoryKind::DedicatedGpu => available(ResourceClass::GpuMemory),
+        ModelMemoryKind::Unified | ModelMemoryKind::Host => available(ResourceClass::RamWorkingSet),
+        ModelMemoryKind::Hybrid => available(ResourceClass::GpuMemory)
+            .saturating_add(available(ResourceClass::RamWorkingSet)),
+    };
+    runtime.available_model_bytes.min(observed)
+}
+
+fn openai_sse(value: Value) -> Bytes {
+    Bytes::from(format!("data: {}\n\n", value))
+}
+
+fn openai_error(
+    status: StatusCode,
+    message: &str,
+    kind: &'static str,
+    param: Option<&str>,
+    code: &'static str,
+) -> Response {
+    (
+        status,
+        Json(json!({"error": {
+            "message": message,
+            "type": kind,
+            "param": param,
+            "code": code
+        }})),
+    )
+        .into_response()
+}
+
+fn gateway_failure_response(error: ModelGatewayFailure) -> Response {
+    openai_error(
+        error.status,
+        &bounded_gateway_error(&error.message),
+        error.kind,
+        None,
+        error.code,
+    )
+}
+
+fn invalid_model_request(message: &str, _param: &'static str) -> ModelGatewayFailure {
+    ModelGatewayFailure {
+        status: StatusCode::BAD_REQUEST,
+        kind: "invalid_request_error",
+        code: "invalid_model_request",
+        message: message.into(),
+    }
+}
+
+fn invalid_worker_stream(message: &str) -> ModelGatewayFailure {
+    ModelGatewayFailure {
+        status: StatusCode::BAD_GATEWAY,
+        kind: "server_error",
+        code: "invalid_worker_stream",
+        message: message.into(),
+    }
+}
+
+fn model_timeout() -> ModelGatewayFailure {
+    ModelGatewayFailure {
+        status: StatusCode::GATEWAY_TIMEOUT,
+        kind: "server_error",
+        code: "model_session_timeout",
+        message: "model session lease expired before completion".into(),
+    }
+}
+
+fn bounded_gateway_error(error: &str) -> String {
+    error.chars().take(512).collect()
 }
 
 async fn local_stop(
@@ -484,6 +1358,9 @@ async fn local_stop(
         .advance_fencing_epoch("controller")
         .map_err(internal_error)?;
     state.fencing_epoch.store(fencing_epoch, Ordering::Release);
+    for cancellation in state.model_cancellations.lock().await.values() {
+        let _ = cancellation.send(true);
+    }
     state
         .ledger
         .append(
@@ -563,6 +1440,8 @@ async fn register_offer(
             Json(json!({"error": error.to_string()})),
         )
     })?;
+    validate_model_runtime_contracts(&offer)
+        .map_err(|error| (StatusCode::BAD_REQUEST, Json(json!({"error": error}))))?;
     if let Some(benchmark) = &offer.link_benchmark
         && !benchmark.is_valid_for(
             &state.mesh.endpoint_id(),
@@ -2381,4 +3260,102 @@ fn mesh_error_response(
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use std::collections::BTreeMap;
+
+    fn valid_model_offer() -> ResourceOfferV1 {
+        let now = chrono::Utc::now();
+        let model = InstalledModelV1 {
+            schema: InstalledModelV1::SCHEMA.into(),
+            model_id: "gemma3:4b".into(),
+            artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            artifact_size_bytes: 1024 * 1024 * 1024,
+        };
+        ResourceOfferV1 {
+            schema: "rampage.resource-offer.v1".into(),
+            offer_id: Uuid::now_v7(),
+            node_id: Uuid::now_v7(),
+            observed_at: now,
+            expires_at: now + Duration::minutes(1),
+            resources: vec![rampage_protocol::ResourceQuantityV1 {
+                class: ResourceClass::RamWorkingSet,
+                capacity: 4 * 1024 * 1024 * 1024,
+                available: 4 * 1024 * 1024 * 1024,
+                unit: "byte".into(),
+                labels: BTreeMap::new(),
+            }],
+            availability: rampage_protocol::AvailabilityV1 {
+                on_ac_power: true,
+                battery_percent: None,
+                thermal_headroom_percent: 80,
+                foreground_allowed: true,
+                owner_idle: true,
+            },
+            adapters: BTreeSet::from(["rampage.ollama.v1".into()]),
+            model_runtimes: vec![ModelRuntimeOfferV1 {
+                schema: ModelRuntimeOfferV1::SCHEMA.into(),
+                adapter: "rampage.ollama.v1".into(),
+                backend: ModelBackend::LocalOllama,
+                runtime_version: "test".into(),
+                runtime_digest: "shipped-local:test".into(),
+                compatibility_key: "ollama-test".into(),
+                memory_kind: ModelMemoryKind::Host,
+                available_model_bytes: 4 * 1024 * 1024 * 1024,
+                supported_parallelism: BTreeSet::from([ModelParallelism::WholeModel]),
+                status: ModelRuntimeStatus::ShippedLocal,
+                installed_models: vec![model],
+                certification_digest: None,
+            }],
+            link_benchmark: None,
+            mesh_endpoint: None,
+            signature: "signed".into(),
+        }
+    }
+
+    #[test]
+    fn model_offer_cannot_exceed_signed_memory_resources() {
+        let mut offer = valid_model_offer();
+        assert_eq!(validate_model_runtime_contracts(&offer), Ok(()));
+        offer.model_runtimes[0].available_model_bytes += 1;
+        assert!(validate_model_runtime_contracts(&offer).is_err());
+    }
+
+    #[test]
+    fn unqualified_runtime_cannot_advertise_executable_models() {
+        let mut offer = valid_model_offer();
+        offer.model_runtimes[0].status = ModelRuntimeStatus::Candidate;
+        assert!(validate_model_runtime_contracts(&offer).is_err());
+    }
+
+    #[test]
+    fn openai_subset_rejects_tools_instead_of_ignoring_them() {
+        let request = serde_json::json!({
+            "model": "gemma3:4b",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": []
+        });
+        assert!(serde_json::from_value::<OpenAiChatCompletionRequest>(request).is_err());
+    }
+
+    #[test]
+    fn openai_subset_bounds_generation_controls() {
+        let request = OpenAiChatCompletionRequest {
+            model: "gemma3:4b".into(),
+            messages: vec![OpenAiChatMessage {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            stream: false,
+            max_tokens: Some(128),
+            max_completion_tokens: Some(128),
+            temperature: Some(0.5),
+            top_p: Some(0.9),
+        };
+        assert_eq!(validate_openai_request(&request).unwrap(), 128);
+    }
 }

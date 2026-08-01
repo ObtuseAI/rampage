@@ -7,14 +7,15 @@ Status: **PASS as an unsigned Windows x64 release candidate**
 
 | Gate | Evidence | Result |
 | --- | --- | --- |
-| Rust | `cargo fmt --check`; 44 workspace tests; full-workspace/all-target Clippy with warnings denied | PASS |
-| Desktop and TypeScript SDK | 4 desktop accessibility/lifecycle tests; production Vite/TypeScript build; 5 SDK tests and build | PASS |
-| Python intelligence and SDK | Ruff clean; strict Mypy clean across 9 files; 13 intelligence tests; 5 SDK tests | PASS |
+| Rust | `cargo fmt --check`; 60 workspace tests; full-workspace/all-target Clippy with warnings denied | PASS |
+| Desktop and TypeScript SDK | 5 desktop accessibility/lifecycle tests; production Vite/TypeScript build; 6 SDK tests and build | PASS |
+| Python intelligence and SDK | Ruff clean; strict Mypy clean across 9 files; 13 intelligence tests; 6 SDK tests | PASS |
 | Local control plane | Separate binaries: recovery, placement, exact-resource signed lease, signed receipt, stop/resume, tokenless request denied | PASS |
 | Independent shard pool | Three evaluation shards planned across bounded offers, admitted atomically, returned signed results `2`, `5`, and `8`, met the explicit threshold, and recovered after controller restart | PASS |
 | Direct mesh | Separate controller/worker: signed endpoint, QUIC identity enrollment, offer, lease, and receipt | PASS |
 | Distributed artifacts | Signed storage leases; binary round trip; encrypted-at-rest worker replica; automatic input staging; retrievable receipt output | PASS |
 | Real model work | `llama3.2:latest` through local Ollama returned exactly `RAMPAGE_OK` in a signed receipt | PASS |
+| OpenAI-compatible model gateway | Deterministic process campaign: bearer auth, model inventory, non-streaming and SSE chat, authenticated QUIC worker hop, exact installed digest, model-session lease, and signed receipt ledger event | PASS |
 | Packaged intelligence | 51,136,730-byte frozen service started with `proposal_only` / `deterministic_only` | PASS |
 | Owner desktop | Native release desktop autonomously started controller, intelligence, local node, and offer; close kept the fabric in the system tray | PASS |
 | Worker desktop | Native release desktop joined from a signed invite, published a signed artifact endpoint, replicated and returned a byte-exact binary artifact over authenticated QUIC, and stayed active after window close | PASS |
@@ -27,9 +28,10 @@ Status: **PASS as an unsigned Windows x64 release candidate**
 
 Ignored process evidence includes:
 
-- `output/e2e-7cc264c9870d4c7e8ac4e0fbdd627a7a`
-- `output/mesh-e2e-287d444011914801be56b14cea626fb9`
+- `output/e2e-3d14bff11d274efcbf4c44196336b6db`
+- `output/mesh-e2e-7b27243eafac461da50df996a691a091`
 - `output/ollama-e2e-76c90ee05ed14c11b94c1be375185f8a`
+- `output/ollama-e2e-92e44f00bfdc4fc097222f11d4070ad5`
 - `output/desktop-smoke-c5169778433a48349dec6f0a6e6eae76`
 - `output/worker-desktop-smoke-05cda97a2be3468d8c31f0ef7079c1f3`
 
@@ -40,9 +42,10 @@ automatically staged `sha256:15f4e2f35460d5e831a54433590bd8eaabafe726e3dcbb1f57b
 and retrieved worker output
 `sha256:e8b2e5ae9ef3cdb3d14d089ca2a562940418979b56242563412908461bb3e050`.
 
-The retained Ollama receipt predates this final packaging run. A fresh rerun was attempted but the
-local `llama3.2:latest` warm-up timed out while the machine was under memory pressure; no synthetic
-replacement was recorded. The release changes do not broaden the Ollama adapter's authority.
+The retained physical `llama3.2:latest` receipt predates the final packaging run. The new gateway
+campaign is deterministic and uses a clearly labeled fake loopback Ollama to prove transport,
+authorization, streaming, transcript, and evidence behavior without pretending it benchmarks model
+quality or physical inference performance.
 
 ## Release artifacts
 
@@ -77,8 +80,9 @@ not described as a warning-free all-target audit.
 - Sharing model: one owner or trusted circle; no public marketplace.
 - Network: authenticated direct QUIC; private relay configuration is supported, and public
   dependency relays are never silently selected.
-- Distributed execution: whole-job placement and independent shards. Cross-host tensor sharding is
-  disabled until a topology/engine adapter passes dedicated evidence gates.
+- Distributed execution: whole-job placement, independent shards, and remote whole-model Ollama on
+  one contributor. Cross-host tensor/pipeline sharding is disabled until a topology/engine adapter
+  passes dedicated evidence gates.
 - Edge: contract and Governor policy exist; native phone/tablet/console binaries are not in 0.2.
 - Storage: signed, bounded direct-QUIC artifact transfer is shipped for cache/scratch replicas,
   automatic job-input staging, and receipt outputs. V1 transfers are capped at 64 MiB. Protected

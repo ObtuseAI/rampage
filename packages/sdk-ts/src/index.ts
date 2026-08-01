@@ -87,11 +87,47 @@ export interface ModelRuntimeOffer {
   runtime_version: string;
   runtime_digest: string;
   compatibility_key: string;
-  memory_kind: "dedicated_gpu" | "unified" | "host";
+  memory_kind: "dedicated_gpu" | "unified" | "host" | "hybrid";
   available_model_bytes: number;
   supported_parallelism: Array<"whole_model" | "pipeline" | "tensor" | "replica" | "speculative">;
   status: "shipped_local" | "candidate" | "qualified";
+  installed_models?: InstalledModel[];
   certification_digest?: string;
+}
+
+export interface InstalledModel {
+  schema: "rampage.installed-model.v1";
+  model_id: string;
+  artifact_digest: string;
+  artifact_size_bytes: number;
+}
+
+export interface OpenAiModelList {
+  object: "list";
+  data: Array<{ id: string; object: "model"; created: number; owned_by: "rampage-fabric" }>;
+}
+
+export interface OpenAiChatCompletionRequest {
+  model: string;
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+  stream?: false;
+  max_tokens?: number;
+  max_completion_tokens?: number;
+  temperature?: number;
+  top_p?: number;
+}
+
+export interface OpenAiChatCompletion {
+  id: string;
+  object: "chat.completion";
+  created: number;
+  model: string;
+  choices: Array<{
+    index: number;
+    message: { role: "assistant"; content: string };
+    finish_reason: string;
+  }>;
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 }
 
 export interface ModelSessionRequest {
@@ -222,6 +258,26 @@ export class RampageClient {
     return this.request("/v1/model-sessions/plan", this.json(request));
   }
 
+  openAiConfig(): { baseURL: string; apiKey: string } {
+    if (!this.token) throw new Error("Rampage gateway requires the local controller token");
+    return { baseURL: `${this.baseUrl}/v1`, apiKey: this.token };
+  }
+
+  models(): Promise<OpenAiModelList> {
+    return this.gatewayRequest("/v1/models");
+  }
+
+  chatCompletion(request: OpenAiChatCompletionRequest): Promise<OpenAiChatCompletion> {
+    return this.gatewayRequest("/v1/chat/completions", this.json(request));
+  }
+
+  cancelModelSession(sessionId: string): Promise<{ session_id: string; cancelled: true }> {
+    return this.gatewayRequest(
+      `/v1/model-sessions/${encodeURIComponent(sessionId)}/cancel`,
+      { method: "POST", body: "{}" },
+    );
+  }
+
   planShardSet(set: ShardSet): Promise<ShardSetPlan> {
     return this.request("/v1/shard-sets/plan", this.json(set));
   }
@@ -328,6 +384,17 @@ export class RampageClient {
     const response = await fetch(`${this.baseUrl}${path}`, { ...init, headers });
     if (!response.ok) {
       throw new Error(`Rampage ${response.status}: ${await response.text()}`);
+    }
+    return (await response.json()) as T;
+  }
+
+  private async gatewayRequest<T>(path: string, init?: RequestInit): Promise<T> {
+    if (!this.token) throw new Error("Rampage gateway requires the local controller token");
+    const headers = new Headers(init?.headers);
+    headers.set("authorization", `Bearer ${this.token}`);
+    const response = await fetch(`${this.baseUrl}${path}`, { ...init, headers });
+    if (!response.ok) {
+      throw new Error(`Rampage gateway ${response.status}: ${await response.text()}`);
     }
     return (await response.json()) as T;
   }
