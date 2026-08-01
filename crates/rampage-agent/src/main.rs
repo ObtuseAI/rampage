@@ -109,9 +109,19 @@ fn main() -> anyhow::Result<()> {
         "rampage.eval-shard.v1".into(),
         "rampage.artifact-hash.v1".into(),
     ]);
-    if discovery::ollama_available() {
+    let has_ollama = discovery::ollama_available();
+    if has_ollama {
         adapters.insert("rampage.ollama.v1".into());
     }
+    let model_runtimes = match discovery::discover_model_runtimes(&discovered.resources, has_ollama)
+    {
+        Ok(profiles) => profiles,
+        Err(error) => {
+            eprintln!("model runtime profiles rejected; continuing fail-closed: {error}");
+            Vec::new()
+        }
+    };
+    adapters.extend(model_runtimes.iter().map(|profile| profile.adapter.clone()));
     let offer = ResourceOfferV1 {
         schema: "rampage.resource-offer.v1".into(),
         offer_id: Uuid::now_v7(),
@@ -135,6 +145,7 @@ fn main() -> anyhow::Result<()> {
             owner_idle: discovered.owner_idle,
         },
         adapters,
+        model_runtimes,
         link_benchmark: None,
         mesh_endpoint: transport.signed_worker_endpoint(
             &signing_key,

@@ -38,6 +38,10 @@ class RampageClient:
         payload: list[dict[str, Any]] = response.json()
         return payload
 
+    def plan_model_session(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Preview a model placement; this endpoint never issues execution authority."""
+        return self._post("/v1/model-sessions/plan", request)
+
     def plan_shard_set(self, shard_set: dict[str, Any]) -> dict[str, Any]:
         return self._post("/v1/shard-sets/plan", shard_set)
 

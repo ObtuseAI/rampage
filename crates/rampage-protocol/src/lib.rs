@@ -10,6 +10,8 @@ pub const PROTOCOL_VERSION: &str = "rampage.protocol.v1";
 pub const MAX_ARTIFACT_TRANSFER_BYTES: u64 = 64 * 1024 * 1024;
 pub const LINK_BENCHMARK_TRANSFER_BYTES: u64 = 256 * 1024;
 pub const MAX_SHARDS_PER_SET: usize = 256;
+pub const MAX_MODEL_SESSION_NODES: u16 = 64;
+pub const MAX_MODEL_SESSION_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +68,96 @@ pub enum CapabilityState {
     DeterministicOnly,
     ReadOnly,
     Blocked,
+}
+
+/// The owner-selected objective for additional fabric compute.
+///
+/// These objectives are deliberately distinct: fitting a larger model, reducing interactive
+/// latency, and serving more concurrent requests require different placements and may conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputeStrategy {
+    MaximumModelSize,
+    SpeedBoost,
+    MaximumThroughput,
+    Efficiency,
+    AutonomousBalanced,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelBackend {
+    LocalOllama,
+    ExoMlx,
+    VllmRay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelParallelism {
+    WholeModel,
+    Pipeline,
+    Tensor,
+    Replica,
+    Speculative,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelMemoryKind {
+    DedicatedGpu,
+    Unified,
+    Host,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRuntimeStatus {
+    /// A local-only adapter shipped and governed by Rampage.
+    ShippedLocal,
+    /// The runtime was detected, but has no backend/topology qualification evidence.
+    Candidate,
+    /// The exact runtime and topology campaign are identified by a certification digest.
+    Qualified,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRuntimeOfferV1 {
+    pub schema: String,
+    pub adapter: String,
+    pub backend: ModelBackend,
+    pub runtime_version: String,
+    pub runtime_digest: String,
+    pub compatibility_key: String,
+    pub memory_kind: ModelMemoryKind,
+    pub available_model_bytes: u64,
+    pub supported_parallelism: BTreeSet<ModelParallelism>,
+    pub status: ModelRuntimeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certification_digest: Option<String>,
+}
+
+impl ModelRuntimeOfferV1 {
+    pub const SCHEMA: &'static str = "rampage.model-runtime-offer.v1";
+
+    pub fn is_qualified_for_distributed(&self) -> bool {
+        self.schema == Self::SCHEMA
+            && self.status == ModelRuntimeStatus::Qualified
+            && self
+                .certification_digest
+                .as_deref()
+                .is_some_and(is_sha256_digest)
+            && is_sha256_digest(&self.runtime_digest)
+            && !self.compatibility_key.trim().is_empty()
+            && self.available_model_bytes > 0
+            && (self
+                .supported_parallelism
+                .contains(&ModelParallelism::Pipeline)
+                || self
+                    .supported_parallelism
+                    .contains(&ModelParallelism::Tensor))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,11 +264,65 @@ pub struct ResourceOfferV1 {
     pub resources: Vec<ResourceQuantityV1>,
     pub availability: AvailabilityV1,
     pub adapters: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_runtimes: Vec<ModelRuntimeOfferV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_benchmark: Option<LinkBenchmarkV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_endpoint: Option<MeshEndpointRecordV1>,
     pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSessionRequestV1 {
+    pub schema: String,
+    pub session_id: Uuid,
+    pub model_id: String,
+    pub estimated_weight_bytes: u64,
+    pub kv_cache_bytes: u64,
+    pub context_tokens: u32,
+    pub strategy: ComputeStrategy,
+    pub max_nodes: u16,
+    pub deadline: DateTime<Utc>,
+    pub idempotency_key: String,
+}
+
+impl ModelSessionRequestV1 {
+    pub const SCHEMA: &'static str = "rampage.model-session-request.v1";
+
+    pub fn required_bytes(&self) -> u64 {
+        self.estimated_weight_bytes
+            .saturating_add(self.kv_cache_bytes)
+    }
+
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ContractError> {
+        if self.schema != Self::SCHEMA {
+            return Err(ContractError::WrongSchema {
+                expected: Self::SCHEMA,
+                actual: self.schema.clone(),
+            });
+        }
+        if self.deadline <= now {
+            return Err(ContractError::DeadlineExpired);
+        }
+        if self.idempotency_key.trim().is_empty() {
+            return Err(ContractError::EmptyIdempotencyKey);
+        }
+        if self.model_id.trim().is_empty() {
+            return Err(ContractError::EmptyModelId);
+        }
+        if self.estimated_weight_bytes == 0 || self.required_bytes() > MAX_MODEL_SESSION_BYTES {
+            return Err(ContractError::InvalidModelSize);
+        }
+        if self.context_tokens == 0 {
+            return Err(ContractError::InvalidContextTokens);
+        }
+        if self.max_nodes == 0 || self.max_nodes > MAX_MODEL_SESSION_NODES {
+            return Err(ContractError::InvalidModelNodeCount);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -450,6 +596,20 @@ pub enum ContractError {
     ShardOwnershipMismatch,
     #[error("every shard must be restart tolerant and expire no later than its shard set")]
     UnsafeShardLifecycle,
+    #[error("model identifier is empty")]
+    EmptyModelId,
+    #[error("model session size is zero or exceeds the protocol limit")]
+    InvalidModelSize,
+    #[error("model context token count must be positive")]
+    InvalidContextTokens,
+    #[error("model session node count must be between 1 and {MAX_MODEL_SESSION_NODES}")]
+    InvalidModelNodeCount,
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 impl JobSpecV1 {
@@ -683,5 +843,52 @@ mod tests {
             set.validate_at(now),
             Err(ContractError::DuplicateShardIdentity)
         );
+    }
+
+    #[test]
+    fn model_session_keeps_strategy_and_capacity_bounded() {
+        let now = Utc::now();
+        let mut request = ModelSessionRequestV1 {
+            schema: ModelSessionRequestV1::SCHEMA.into(),
+            session_id: Uuid::now_v7(),
+            model_id: "local/large-model".into(),
+            estimated_weight_bytes: 40 * 1024 * 1024 * 1024,
+            kv_cache_bytes: 4 * 1024 * 1024 * 1024,
+            context_tokens: 32_768,
+            strategy: ComputeStrategy::MaximumModelSize,
+            max_nodes: 8,
+            deadline: now + Duration::minutes(10),
+            idempotency_key: "model-session-1".into(),
+        };
+        assert_eq!(request.validate_at(now), Ok(()));
+        assert_eq!(request.required_bytes(), 44 * 1024 * 1024 * 1024);
+        request.max_nodes = MAX_MODEL_SESSION_NODES + 1;
+        assert_eq!(
+            request.validate_at(now),
+            Err(ContractError::InvalidModelNodeCount)
+        );
+    }
+
+    #[test]
+    fn distributed_runtime_requires_exact_runtime_and_campaign_digests() {
+        let mut runtime = ModelRuntimeOfferV1 {
+            schema: ModelRuntimeOfferV1::SCHEMA.into(),
+            adapter: "rampage.exo-mlx.v1".into(),
+            backend: ModelBackend::ExoMlx,
+            runtime_version: "pinned".into(),
+            runtime_digest: format!("sha256:{}", "a".repeat(64)),
+            compatibility_key: "mlx-arm64-v1".into(),
+            memory_kind: ModelMemoryKind::Unified,
+            available_model_bytes: 64 * 1024 * 1024 * 1024,
+            supported_parallelism: BTreeSet::from([
+                ModelParallelism::Pipeline,
+                ModelParallelism::Tensor,
+            ]),
+            status: ModelRuntimeStatus::Qualified,
+            certification_digest: Some(format!("sha256:{}", "b".repeat(64))),
+        };
+        assert!(runtime.is_qualified_for_distributed());
+        runtime.status = ModelRuntimeStatus::Candidate;
+        assert!(!runtime.is_qualified_for_distributed());
     }
 }

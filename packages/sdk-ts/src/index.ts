@@ -70,6 +70,68 @@ export interface ResourceOffer {
   expires_at: string;
   link_benchmark?: LinkBenchmark;
   mesh_endpoint?: EnrollmentInvite["controller_mesh"];
+  model_runtimes?: ModelRuntimeOffer[];
+}
+
+export type ComputeStrategy =
+  | "maximum_model_size"
+  | "speed_boost"
+  | "maximum_throughput"
+  | "efficiency"
+  | "autonomous_balanced";
+
+export interface ModelRuntimeOffer {
+  schema: "rampage.model-runtime-offer.v1";
+  adapter: string;
+  backend: "local_ollama" | "exo_mlx" | "vllm_ray";
+  runtime_version: string;
+  runtime_digest: string;
+  compatibility_key: string;
+  memory_kind: "dedicated_gpu" | "unified" | "host";
+  available_model_bytes: number;
+  supported_parallelism: Array<"whole_model" | "pipeline" | "tensor" | "replica" | "speculative">;
+  status: "shipped_local" | "candidate" | "qualified";
+  certification_digest?: string;
+}
+
+export interface ModelSessionRequest {
+  schema: "rampage.model-session-request.v1";
+  session_id: string;
+  model_id: string;
+  estimated_weight_bytes: number;
+  kv_cache_bytes: number;
+  context_tokens: number;
+  strategy: ComputeStrategy;
+  max_nodes: number;
+  deadline: string;
+  idempotency_key: string;
+}
+
+export interface ModelSessionPlan {
+  schema: "rampage.model-session-plan.v1";
+  session_id: string;
+  strategy: ComputeStrategy;
+  state: "ready" | "qualification_required" | "capacity_blocked";
+  backend?: "local_ollama" | "exo_mlx" | "vllm_ray";
+  parallelism?: "whole_model" | "pipeline" | "tensor" | "replica" | "speculative";
+  distributed: boolean;
+  required_bytes: number;
+  observed_fabric_bytes: number;
+  maximum_supported_bytes: number;
+  predicted_speedup_milli: number;
+  placements: Array<{
+    node_id: string;
+    rank: number;
+    assigned_bytes: number;
+    available_model_bytes: number;
+    role: string;
+    topology_confidence: string;
+  }>;
+  blockers: string[];
+  warnings: string[];
+  proposed_local_endpoint: string | null;
+  execution_authority: "none_preview_only";
+  reason: string;
 }
 
 export interface ShardSet {
@@ -154,6 +216,10 @@ export class RampageClient {
 
   topology(): Promise<ResourceOffer[]> {
     return this.request("/v1/offers");
+  }
+
+  planModelSession(request: ModelSessionRequest): Promise<ModelSessionPlan> {
+    return this.request("/v1/model-sessions/plan", this.json(request));
   }
 
   planShardSet(set: ShardSet): Promise<ShardSetPlan> {

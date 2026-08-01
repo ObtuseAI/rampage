@@ -4,7 +4,7 @@ use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use rampage_protocol::{
     ArtifactRefV1, CapabilityLeaseV1, EnrollmentInviteV1, ExecutionReceiptV1, JobSpecV1,
-    ResourceOfferV1, StorageClass,
+    ModelSessionRequestV1, ResourceOfferV1, StorageClass,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -59,6 +59,13 @@ impl RampageClient {
 
     pub async fn topology(&self) -> anyhow::Result<Vec<ResourceOfferV1>> {
         self.get("/v1/offers").await
+    }
+
+    pub async fn plan_model_session(
+        &self,
+        request: &ModelSessionRequestV1,
+    ) -> anyhow::Result<Value> {
+        self.post("/v1/model-sessions/plan", request).await
     }
 
     pub async fn submit(&self, job: &JobSpecV1) -> anyhow::Result<CapabilityLeaseV1> {

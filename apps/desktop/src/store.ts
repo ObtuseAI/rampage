@@ -1,10 +1,23 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { CapabilityState, ControllerHealth, FabricNode, LedgerEvent, ResourceOffer } from "./types";
+import type { CapabilityState, ComputeStrategy, ControllerHealth, FabricNode, LedgerEvent, ModelSessionPlan, ResourceOffer } from "./types";
 
 const controller = import.meta.env.VITE_RAMPAGE_CONTROLLER ?? "http://127.0.0.1:47831";
 const intelligence = import.meta.env.VITE_RAMPAGE_INTELLIGENCE ?? "http://127.0.0.1:47832";
 let localControllerToken: string | null = null;
+
+const computeStrategies: ComputeStrategy[] = [
+  "maximum_model_size",
+  "speed_boost",
+  "maximum_throughput",
+  "efficiency",
+  "autonomous_balanced",
+];
+
+function storedComputeStrategy(): ComputeStrategy {
+  const stored = localStorage.getItem("rampage.compute-strategy") as ComputeStrategy | null;
+  return stored && computeStrategies.includes(stored) ? stored : "maximum_model_size";
+}
 
 function controllerHeaders(json = false): HeadersInit {
   const headers: Record<string, string> = {};
@@ -20,12 +33,13 @@ interface IntelligenceHealth {
 }
 
 const demoNodes: FabricNode[] = [
-  { id: "home", name: "Command Rig", kind: "desktop", state: "ready", cpu: 31, memory: 46, gpu: 18, storage: 22, storageAvailableGb: 120, artifactEndpoint: false, latencyMs: 0, topologyConfidence: "controller_local", x: 0, y: 0, z: 0 },
-  { id: "deck", name: "Steam Deck", kind: "steam_deck", state: "working", cpu: 64, memory: 53, gpu: 72, storage: 35, storageAvailableGb: 18, artifactEndpoint: true, latencyMs: 18.4, downlinkMbps: 386, uplinkMbps: 201, topologyConfidence: "measured", x: -3.2, y: -0.4, z: 1.8 },
-  { id: "laptop", name: "Studio Laptop", kind: "laptop", state: "ready", cpu: 22, memory: 38, gpu: 12, storage: 14, storageAvailableGb: 42, artifactEndpoint: true, latencyMs: 7.1, downlinkMbps: 932, uplinkMbps: 908, topologyConfidence: "measured", x: 3.4, y: 0.3, z: 1.5 },
+  { id: "home", name: "Command Rig", kind: "desktop", state: "ready", cpu: 31, memory: 46, gpu: 18, storage: 22, storageAvailableGb: 120, modelMemoryAvailableGb: 10, modelRuntimeCount: 1, artifactEndpoint: false, latencyMs: 0, topologyConfidence: "controller_local", x: 0, y: 0, z: 0 },
+  { id: "deck", name: "Steam Deck", kind: "steam_deck", state: "working", cpu: 64, memory: 53, gpu: 72, storage: 35, storageAvailableGb: 18, modelMemoryAvailableGb: 8, modelRuntimeCount: 0, artifactEndpoint: true, latencyMs: 18.4, downlinkMbps: 386, uplinkMbps: 201, topologyConfidence: "measured", x: -3.2, y: -0.4, z: 1.8 },
+  { id: "laptop", name: "Studio Laptop", kind: "laptop", state: "ready", cpu: 22, memory: 38, gpu: 12, storage: 14, storageAvailableGb: 42, modelMemoryAvailableGb: 11, modelRuntimeCount: 0, artifactEndpoint: true, latencyMs: 7.1, downlinkMbps: 932, uplinkMbps: 908, topologyConfidence: "measured", x: 3.4, y: 0.3, z: 1.5 },
   { id: "phone", name: "Phone", kind: "phone", state: "sleeping", cpu: 0, memory: 0, gpu: 0, storage: 0, storageAvailableGb: 0, artifactEndpoint: false, topologyConfidence: "unmeasured", x: 2.5, y: -0.8, z: -2.5 },
   { id: "nas", name: "Archive", kind: "storage", state: "ready", cpu: 9, memory: 16, gpu: 0, storage: 48, storageAvailableGb: 540, artifactEndpoint: true, latencyMs: 2.2, downlinkMbps: 941, uplinkMbps: 936, topologyConfidence: "measured", x: -2.6, y: 0.6, z: -2.7 },
 ];
+const initialNodes = import.meta.env.DEV ? demoNodes : [];
 
 interface RampageState {
   mode: "arena" | "grid";
@@ -44,10 +58,23 @@ interface RampageState {
   inviteBundle: string | null;
   fabricRole: "owner" | "worker";
   lastAction: string | null;
+  runAtLogin: boolean;
+  killLatch: boolean;
+  computeStrategy: ComputeStrategy;
+  targetModelId: string;
+  targetModelGiB: number;
+  kvCacheGiB: number;
+  modelPlan: ModelSessionPlan | null;
+  modelPlanPending: boolean;
   setMode: (mode: "arena" | "grid") => void;
   setSelectedNode: (id: string) => void;
   setCommandOpen: (open: boolean) => void;
   setReducedMotion: (value: boolean) => void;
+  setComputeStrategy: (strategy: ComputeStrategy) => void;
+  setTargetModelId: (model: string) => void;
+  setTargetModelGiB: (gib: number) => void;
+  setKvCacheGiB: (gib: number) => void;
+  planModelSession: () => Promise<void>;
   finishOnboarding: () => void;
   refresh: () => Promise<void>;
   createInvite: () => Promise<void>;
@@ -56,6 +83,8 @@ interface RampageState {
   runPoolProof: () => Promise<void>;
   storeFile: (file: File, nodeId: string) => Promise<void>;
   localStop: () => void;
+  localResume: () => Promise<void>;
+  toggleAutostart: () => Promise<void>;
 }
 
 function offersToNodes(offers: ResourceOffer[]): FabricNode[] {
@@ -63,6 +92,8 @@ function offersToNodes(offers: ResourceOffer[]): FabricNode[] {
     const cpu = offer.resources.find((resource) => resource.class === "cpu_compute");
     const memory = offer.resources.find((resource) => resource.class === "ram_working_set");
     const gpu = offer.resources.find((resource) => resource.class === "gpu_compute");
+    const gpuMemory = offer.resources.find((resource) => resource.class === "gpu_memory");
+    const runtimeMemory = Math.max(0, ...(offer.model_runtimes ?? []).map((runtime) => runtime.available_model_bytes));
     const storageResources = offer.resources.filter((resource) => resource.class.startsWith("storage_") || resource.class === "protected_store");
     const storageCapacity = storageResources.reduce((total, resource) => total + resource.capacity, 0);
     const storageAvailable = storageResources.reduce((total, resource) => total + resource.available, 0);
@@ -81,6 +112,8 @@ function offersToNodes(offers: ResourceOffer[]): FabricNode[] {
       gpu: pct(gpu),
       storage: storageCapacity > 0 ? Math.round(100 - (storageAvailable / storageCapacity) * 100) : 0,
       storageAvailableGb: Math.round((storageAvailable / (1024 ** 3)) * 10) / 10,
+      modelMemoryAvailableGb: Math.round((runtimeMemory || gpuMemory?.available || memory?.available || 0) / (1024 ** 3) * 10) / 10,
+      modelRuntimeCount: offer.model_runtimes?.length ?? 0,
       artifactEndpoint: Boolean(offer.mesh_endpoint?.signature),
       latencyMs: offer.mesh_endpoint ? Math.round((offer.link_benchmark?.rtt_micros_p50 ?? 0) / 100) / 10 : 0,
       downlinkMbps: offer.link_benchmark ? Math.round(offer.link_benchmark.downlink_bps / 100_000) / 10 : undefined,
@@ -100,9 +133,9 @@ export const useRampage = create<RampageState>((set, get) => ({
   onboarding: localStorage.getItem("rampage.onboarded") !== "true",
   connected: false,
   capability: "deterministic_only",
-  nodes: demoNodes,
+  nodes: initialNodes,
   events: [],
-  selectedNode: "home",
+  selectedNode: initialNodes[0]?.id ?? "",
   commandOpen: false,
   reducedMotion: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false,
   lastSync: null,
@@ -112,10 +145,77 @@ export const useRampage = create<RampageState>((set, get) => ({
   inviteBundle: null,
   fabricRole: "owner",
   lastAction: null,
+  runAtLogin: false,
+  killLatch: false,
+  computeStrategy: storedComputeStrategy(),
+  targetModelId: localStorage.getItem("rampage.target-model") ?? "local/target-model",
+  targetModelGiB: Number(localStorage.getItem("rampage.target-model-gib") ?? 40),
+  kvCacheGiB: Number(localStorage.getItem("rampage.kv-cache-gib") ?? 4),
+  modelPlan: null,
+  modelPlanPending: false,
   setMode: (mode) => set({ mode }),
   setSelectedNode: (selectedNode) => set({ selectedNode }),
   setCommandOpen: (commandOpen) => set({ commandOpen }),
   setReducedMotion: (reducedMotion) => set({ reducedMotion }),
+  setComputeStrategy: (computeStrategy) => {
+    localStorage.setItem("rampage.compute-strategy", computeStrategy);
+    set({ computeStrategy });
+    void get().planModelSession();
+  },
+  setTargetModelId: (targetModelId) => {
+    localStorage.setItem("rampage.target-model", targetModelId);
+    set({ targetModelId });
+  },
+  setTargetModelGiB: (targetModelGiB) => {
+    const bounded = Math.max(1, Math.min(16_000, Number.isFinite(targetModelGiB) ? targetModelGiB : 1));
+    localStorage.setItem("rampage.target-model-gib", String(bounded));
+    set({ targetModelGiB: bounded });
+  },
+  setKvCacheGiB: (kvCacheGiB) => {
+    const bounded = Math.max(0, Math.min(1_000, Number.isFinite(kvCacheGiB) ? kvCacheGiB : 0));
+    localStorage.setItem("rampage.kv-cache-gib", String(bounded));
+    set({ kvCacheGiB: bounded });
+  },
+  planModelSession: async () => {
+    if (get().fabricRole !== "owner") return;
+    set({ modelPlanPending: true });
+    try {
+      localControllerToken ??= await invoke<string>("controller_token").catch(() => null);
+      const current = get();
+      const gib = 1024 ** 3;
+      const sessionId = crypto.randomUUID();
+      const response = await fetch(`${controller}/v1/model-sessions/plan`, {
+        method: "POST",
+        headers: controllerHeaders(true),
+        body: JSON.stringify({
+          schema: "rampage.model-session-request.v1",
+          session_id: sessionId,
+          model_id: current.targetModelId.trim() || "local/target-model",
+          estimated_weight_bytes: Math.round(current.targetModelGiB * gib),
+          kv_cache_bytes: Math.round(current.kvCacheGiB * gib),
+          context_tokens: 32_768,
+          strategy: current.computeStrategy,
+          max_nodes: 16,
+          deadline: new Date(Date.now() + 10 * 60_000).toISOString(),
+          idempotency_key: sessionId,
+        }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const modelPlan = (await response.json()) as ModelSessionPlan;
+      set({
+        modelPlan,
+        modelPlanPending: false,
+        lastAction: modelPlan.state === "ready"
+          ? `Model plan ready: ${modelPlan.placements.length} rank${modelPlan.placements.length === 1 ? "" : "s"}, ${modelPlan.parallelism?.replaceAll("_", " ")}.`
+          : modelPlan.reason,
+      });
+    } catch (error) {
+      set({
+        modelPlanPending: false,
+        lastAction: error instanceof Error ? `Model planning failed: ${error.message}` : "Model planning failed.",
+      });
+    }
+  },
   finishOnboarding: () => {
     localStorage.setItem("rampage.onboarded", "true");
     set({ onboarding: false });
@@ -123,9 +223,12 @@ export const useRampage = create<RampageState>((set, get) => ({
   refresh: async () => {
     try {
       const fabricRole = await invoke<"owner" | "worker">("fabric_mode").catch(() => "owner" as const);
+      const runAtLogin = await invoke<boolean>("autostart_enabled").catch(() => get().runAtLogin);
       if (fabricRole === "worker") {
         set({
           fabricRole,
+          runAtLogin,
+          killLatch: false,
           connected: true,
           capability: "local_reduced",
           nodes: [{
@@ -166,6 +269,7 @@ export const useRampage = create<RampageState>((set, get) => ({
       set({
         connected: true,
         fabricRole,
+        runAtLogin,
         capability: health.kill_latch
           ? "read_only"
           : intelligenceHealth?.authority === "proposal_only"
@@ -173,8 +277,14 @@ export const useRampage = create<RampageState>((set, get) => ({
             : "deterministic_only",
         meshMode: health.mesh_mode,
         meshEndpointId: health.mesh_endpoint_id,
-        nodes: offers.length ? offersToNodes(offers) : get().nodes,
+        nodes: offersToNodes(offers),
+        selectedNode: offers.length
+          ? (offers.some((offer) => offer.node_id === get().selectedNode)
+              ? get().selectedNode
+              : offers[0].node_id)
+          : "",
         events,
+        killLatch: health.kill_latch,
         lastAction: (() => {
           const latest = events.at(-1);
           if (latest?.event_type === "artifact.replicated") return `Encrypted replica ${latest.subject_id.slice(0, 18)}… committed.`;
@@ -183,8 +293,16 @@ export const useRampage = create<RampageState>((set, get) => ({
         })(),
         lastSync: new Date(),
       });
-    } catch {
-      set({ connected: false, capability: "deterministic_only", lastSync: new Date() });
+      void get().planModelSession();
+    } catch (error) {
+      set({
+        connected: false,
+        capability: "deterministic_only",
+        nodes: import.meta.env.DEV ? get().nodes : [],
+        selectedNode: import.meta.env.DEV ? get().selectedNode : "",
+        lastAction: error instanceof Error ? `Fabric unavailable: ${error.message}` : "Fabric unavailable.",
+        lastSync: new Date(),
+      });
     }
   },
   createInvite: async () => {
@@ -193,7 +311,7 @@ export const useRampage = create<RampageState>((set, get) => ({
       method: "POST",
       headers: controllerHeaders(),
     });
-    if (!response.ok) throw new Error("invite creation failed");
+    if (!response.ok) throw new Error(`Invite creation failed: ${await response.text()}`);
     const invite = (await response.json()) as { enrollment_code: string };
     set({
       inviteCode: invite.enrollment_code,
@@ -339,6 +457,7 @@ export const useRampage = create<RampageState>((set, get) => ({
   localStop: () => {
     set((state) => ({
       capability: "read_only",
+      killLatch: true,
       nodes: state.nodes.map((node) => ({ ...node, state: "offline" })),
     }));
     void invoke("local_stop").catch(async () => {
@@ -348,5 +467,30 @@ export const useRampage = create<RampageState>((set, get) => ({
         // Browser preview has no Tauri IPC. The visible local state still fails closed.
       }
     });
+  },
+  localResume: async () => {
+    localControllerToken ??= await invoke<string>("controller_token").catch(() => null);
+    const response = await fetch(`${controller}/v1/resume`, {
+      method: "POST",
+      headers: controllerHeaders(true),
+      body: JSON.stringify({ confirmation: "OWNER_RESUME" }),
+    });
+    if (!response.ok) throw new Error(`Resume failed: ${await response.text()}`);
+    set({ killLatch: false, lastAction: "Owner-confirmed fabric resume accepted." });
+    await get().refresh();
+  },
+  toggleAutostart: async () => {
+    const requested = !get().runAtLogin;
+    try {
+      const runAtLogin = await invoke<boolean>("set_autostart", { enabled: requested });
+      set({
+        runAtLogin,
+        lastAction: runAtLogin
+          ? "Rampage will start quietly in the system tray after Windows sign-in."
+          : "Rampage will no longer start automatically.",
+      });
+    } catch {
+      set({ lastAction: "Auto-start is available in the installed Rampage desktop app." });
+    }
   },
 }));

@@ -69,6 +69,8 @@ pub enum StorageError {
     NotFound(String),
     #[error("artifact digest mismatch")]
     DigestMismatch,
+    #[error("invalid artifact digest")]
+    InvalidDigest,
     #[error("protected storage requires at least two declared replicas")]
     ProtectedRequiresReplication,
     #[error("storage lock is poisoned")]
@@ -116,7 +118,7 @@ impl CasStore {
             return Err(StorageError::ProtectedRequiresReplication);
         }
         let digest = format!("sha256:{}", hex::encode(Sha256::digest(plaintext)));
-        let object_dir = self.object_dir(&digest);
+        let object_dir = self.object_dir(&digest)?;
         if object_dir.join("manifest.json").is_file() {
             return Ok(ArtifactRefV1 {
                 schema: "rampage.artifact-ref.v1".into(),
@@ -196,7 +198,7 @@ impl CasStore {
     }
 
     pub fn get(&self, digest: &str) -> Result<Vec<u8>, StorageError> {
-        let object_dir = self.object_dir(digest);
+        let object_dir = self.object_dir(digest)?;
         let manifest_path = object_dir.join("manifest.json");
         if !manifest_path.is_file() {
             return Err(StorageError::NotFound(digest.into()));
@@ -226,6 +228,7 @@ impl CasStore {
     }
 
     pub fn head(&self, digest: &str) -> Result<ArtifactRefV1, StorageError> {
+        self.object_dir(digest)?;
         let connection = self.index.lock().map_err(|_| StorageError::Poisoned)?;
         let record = connection
             .query_row(
@@ -253,10 +256,17 @@ impl CasStore {
         record.ok_or_else(|| StorageError::NotFound(digest.into()))
     }
 
-    fn object_dir(&self, digest: &str) -> PathBuf {
-        let hash = digest.strip_prefix("sha256:").unwrap_or(digest);
-        let prefix = hash.get(0..2).unwrap_or("00");
-        self.root.join("objects").join(prefix).join(hash)
+    fn object_dir(&self, digest: &str) -> Result<PathBuf, StorageError> {
+        let hash = digest
+            .strip_prefix("sha256:")
+            .filter(|hash| {
+                hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .ok_or(StorageError::InvalidDigest)?;
+        Ok(self.root.join("objects").join(&hash[..2]).join(hash))
     }
 }
 
@@ -286,7 +296,13 @@ mod tests {
         let artifact = store.put(&payload, PutOptions::default()).unwrap();
         assert!(artifact.encrypted);
         assert_eq!(store.get(&artifact.digest).unwrap(), payload);
-        let raw = fs::read(store.object_dir(&artifact.digest).join("00000000.chunk")).unwrap();
+        let raw = fs::read(
+            store
+                .object_dir(&artifact.digest)
+                .unwrap()
+                .join("00000000.chunk"),
+        )
+        .unwrap();
         assert_ne!(&raw[..32], &payload[..32]);
     }
 
@@ -342,5 +358,19 @@ mod tests {
             store.head(&artifact.digest).unwrap().storage_class,
             StorageClass::Scratch
         );
+    }
+
+    #[test]
+    fn rejects_digest_paths_before_filesystem_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = CasStore::open(temp.path(), [4_u8; 32]).unwrap();
+        assert!(matches!(
+            store.get("sha256:../../controller.token"),
+            Err(StorageError::InvalidDigest)
+        ));
+        assert!(matches!(
+            store.head("not-a-digest"),
+            Err(StorageError::InvalidDigest)
+        ));
     }
 }

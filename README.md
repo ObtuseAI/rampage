@@ -48,7 +48,7 @@ agent holding the keys to its own guardrails.
 
 ## Built—not imagined
 
-Rampage 0.1 is a working Windows x64 release candidate with evidence for the paths it claims.
+Rampage 0.2 is a working Windows x64 release candidate with evidence for the paths it claims.
 
 | Proof surface | Validated result |
 | --- | --- |
@@ -57,8 +57,9 @@ Rampage 0.1 is a working Windows x64 release candidate with evidence for the pat
 | Private mesh | Authenticated direct QUIC enrollment, control traffic, and artifact transport without a Tailscale dependency |
 | Storage fabric | Encrypted chunked CAS, signed storage leases, automatic input staging, replication, retrieval, and receipt outputs |
 | Real AI workload | A remote worker called its loopback Ollama runtime and returned the verified result in a signed receipt |
-| Packaged product | Owner and worker desktop lifecycles, four sidecars, clean shutdown, installer, and automatic desktop launcher |
-| Verification | 35 Rust tests plus desktop, TypeScript SDK, Python intelligence, Python SDK, mesh, packaging, and lifecycle gates |
+| Compute Strategy | Read-only Maximum Model, Speed Boost, Throughput, Efficiency, and Autonomous placement previews with exact capacity and qualification blockers |
+| Packaged product | Native Tauri shell, role-aware system tray, close-to-tray, start-at-login, four sidecars, clean explicit shutdown, installer, and automatic desktop launcher |
+| Verification | 44 Rust tests plus desktop, TypeScript SDK, Python intelligence, Python SDK, mesh, packaging, and lifecycle gates |
 
 The complete qualification record—including artifact hashes and the unsigned-release boundary—is in
 [the release evidence](docs/RELEASE_EVIDENCE.md).
@@ -112,6 +113,33 @@ Phones and tablets are not pretend GPU servers. Their best future contribution i
 foreground, restart-tolerant work: data preparation, scoring, validation, sensor processing, relay,
 cache, and small-model inference. Console support remains constrained by platform-holder policy.
 
+## Model Fabric: biggest model and fastest chat are different lanes
+
+The desktop now defaults to **Maximum Model** and exposes five explicit ways to use added compute:
+
+| Toggle | What Rampage optimizes |
+| --- | --- |
+| Maximum Model | Largest compatible aggregate model-memory placement |
+| Speed Boost | Fastest evidence-supported single chat; slow distributed links are rejected |
+| Throughput | Independent replicas for many concurrent users or agents |
+| Efficiency | Smallest qualified placement that fits |
+| Autonomous | Proposal-only strategy adaptation behind Governor gates |
+
+The planner reports visible versus compatible memory, requested weights plus KV cache, selected
+ranks, parallelism, predicted speedup, and the exact missing qualification. It is intentionally
+read-only today: the cross-host launcher and local OpenAI-compatible gateway remain gated until a
+backend proves runtime, topology, isolation, failure recovery, and measured benefit.
+
+```powershell
+rampage model-plan local/70b-quantized --weights-gib 40 --kv-cache-gib 4 --strategy maximum-model-size
+rampage model-plan local/fast-chat --weights-gib 20 --kv-cache-gib 2 --strategy speed-boost
+```
+
+See [Model Fabric](docs/MODEL_FABRIC.md) for the contracts, planner rules, topology thresholds, and
+the executable-backend boundary.
+
+![Rampage desktop Compute Strategy selector showing Maximum Model, Speed Boost, Throughput, Efficiency, and Autonomous lanes above the accessible machine grid](docs/assets/rampage-model-fabric-grid.png)
+
 ## Recursively improving—without recursively expanding authority
 
 The intelligence plane runs a durable improvement loop:
@@ -139,6 +167,10 @@ return. Trading, capital, credentials, live databases, promotion, and policy aut
 3. Choose **Create my fabric** on the main machine.
 4. Choose **Add machine**, then paste the complete signed invitation into Rampage on the other PC.
 5. Leave contribution limits on automatic or tune them. Press **STOP** whenever you want the node back.
+
+Closing the window keeps the governed fabric alive in the Windows system tray. Left-click the tray
+icon to restore it, or right-click for role status, Start with Windows, emergency stop, and an
+explicit Quit that releases the desktop-owned sidecars. Auto-start launches quietly into the tray.
 
 The current binaries are unsigned release candidates. Verify the published SHA-256 checksums and
 expect Windows reputation warnings until ObtuseAI publishes an Authenticode-signed build.
@@ -211,13 +243,14 @@ logs are excluded from source control.
 [Edge policy](docs/EDGE_DEVICES.md) ·
 [Operations](docs/OPERATIONS.md) ·
 [Backend admission gates](docs/BACKEND_GATES.md) ·
+[Model Fabric](docs/MODEL_FABRIC.md) ·
 [Platform matrix](docs/PLATFORM_MATRIX.md) ·
 [Security policy](SECURITY.md) ·
 [Release evidence](docs/RELEASE_EVIDENCE.md)
 
 ## Publication and license boundary
 
-Rampage 0.1 is designed for devices controlled by one owner or a deliberately trusted circle. It is
+Rampage 0.2 is designed for devices controlled by one owner or a deliberately trusted circle. It is
 not a public compute marketplace and does not permit anonymous stranger-to-stranger resource sharing.
 
 The repository is publicly inspectable but proprietary—not open source. See [LICENSE](LICENSE).

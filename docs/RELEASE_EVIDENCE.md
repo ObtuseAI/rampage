@@ -1,55 +1,60 @@
-# Rampage 0.1 release evidence
+# Rampage 0.2 release evidence
 
-Validated: **2026-07-31 22:41 America/Chicago**  
+Validated: **2026-08-01 04:37 America/Chicago**
 Status: **PASS as an unsigned Windows x64 release candidate**
 
 ## Gates
 
 | Gate | Evidence | Result |
 | --- | --- | --- |
-| Rust | `cargo fmt --check`; 35 workspace tests; full-workspace/all-target Clippy with warnings denied | PASS |
-| Desktop and TypeScript SDK | 2 desktop accessibility tests; production Vite/TypeScript build; 4 SDK tests and build | PASS |
-| Python intelligence and SDK | Ruff clean; strict Mypy clean across 9 files; 13 intelligence tests; 4 SDK tests | PASS |
+| Rust | `cargo fmt --check`; 44 workspace tests; full-workspace/all-target Clippy with warnings denied | PASS |
+| Desktop and TypeScript SDK | 4 desktop accessibility/lifecycle tests; production Vite/TypeScript build; 5 SDK tests and build | PASS |
+| Python intelligence and SDK | Ruff clean; strict Mypy clean across 9 files; 13 intelligence tests; 5 SDK tests | PASS |
 | Local control plane | Separate binaries: recovery, placement, exact-resource signed lease, signed receipt, stop/resume, tokenless request denied | PASS |
 | Independent shard pool | Three evaluation shards planned across bounded offers, admitted atomically, returned signed results `2`, `5`, and `8`, met the explicit threshold, and recovered after controller restart | PASS |
 | Direct mesh | Separate controller/worker: signed endpoint, QUIC identity enrollment, offer, lease, and receipt | PASS |
 | Distributed artifacts | Signed storage leases; binary round trip; encrypted-at-rest worker replica; automatic input staging; retrievable receipt output | PASS |
 | Real model work | `llama3.2:latest` through local Ollama returned exactly `RAMPAGE_OK` in a signed receipt | PASS |
-| Packaged intelligence | 51,136,881-byte frozen service started with `proposal_only` / `deterministic_only` | PASS |
-| Owner desktop | Release desktop autonomously started controller, intelligence, local node, and offer | PASS |
-| Worker desktop | Release desktop joined from a signed invite, published a signed artifact endpoint, replicated and returned a byte-exact binary artifact over authenticated QUIC | PASS |
-| Lifecycle | Owner and worker desktop tests found zero Rampage sidecars after window close | PASS |
-| NSIS installer | Silent install produced desktop plus four sidecars and `Desktop\\Rampage.lnk`; shortcut target matched the installed desktop executable; installed app passed smoke; uninstall removed the shortcut and exited 0 | PASS |
+| Packaged intelligence | 51,136,730-byte frozen service started with `proposal_only` / `deterministic_only` | PASS |
+| Owner desktop | Native release desktop autonomously started controller, intelligence, local node, and offer; close kept the fabric in the system tray | PASS |
+| Worker desktop | Native release desktop joined from a signed invite, published a signed artifact endpoint, replicated and returned a byte-exact binary artifact over authenticated QUIC, and stayed active after window close | PASS |
+| Lifecycle | Close-to-tray held the owner and worker processes open; explicit exit then left zero Rampage sidecars | PASS |
+| NSIS installer | Silent install produced desktop plus four sidecars, `Desktop\\Rampage.lnk`, and the session-local `Rampage Shell.lnk`; native tray lifecycle passed; uninstall removed both shortcuts and exited 0 | PASS |
 | MSI package | Administrative extraction exit 0 and contained the five expected executables; generated WiX feature includes `ApplicationShortcutDesktop` with uninstall cleanup | PASS |
 | JavaScript dependencies | `pnpm audit --prod --audit-level high` | PASS — no known vulnerabilities |
 | Python dependencies | `pip-audit` | PASS — no known vulnerabilities; unpublished local package skipped |
-| Rust dependencies | RustSec scan of 680 locked crates | PASS WITH WARNINGS — no vulnerability failure; maintenance warnings below |
+| Rust dependencies | RustSec scan of 714 locked crates | PASS WITH WARNINGS — no vulnerability failure; maintenance warnings below |
 
 Ignored process evidence includes:
 
-- `output/e2e-202ecc07756f4de3970d073539324707`
-- `output/mesh-e2e-c0d8f9390dfc4656a3f2c52ddab84386`
-- `output/ollama-e2e-b414cbc6958e4791b7e56938b38b70ae`
-- `output/intelligence-smoke-3c4bdc2576fa428a9f4b2eab03cb78f4`
-- `output/desktop-smoke-48de1eb292e84385bebf28fc30a4c91a`
-- `output/worker-desktop-smoke-36ea6dc5372a4327a1e86e5a6c886866`
-- `output/msi-extract-c22d7a05d0e047afba6e7f7db3d12bbc`
+- `output/e2e-7cc264c9870d4c7e8ac4e0fbdd627a7a`
+- `output/mesh-e2e-287d444011914801be56b14cea626fb9`
+- `output/ollama-e2e-76c90ee05ed14c11b94c1be375185f8a`
+- `output/desktop-smoke-c5169778433a48349dec6f0a6e6eae76`
+- `output/worker-desktop-smoke-05cda97a2be3468d8c31f0ef7079c1f3`
 
 The direct-mesh artifact proof used controller endpoint
-`d32eaf346f6e1053e79427895e47dccc085c808ff96911dce3e9486cc4957cd0`. It moved and
-verified `sha256:1f8feb07aa7f4f82375f37b75ca909edde3f0219dabf9472043321a1a87d3047`,
-automatically staged `sha256:aed25e9f0302a09337a09abb3f83c604525c0ada7f834546b9f102d4887876e7`,
+`c18135f2589556e8ab2ba358e7627b42e56901e345473323a00802380a3ad0c0`. It moved and
+verified `sha256:1e15f9df71575fac97641db86d136fb2c0fa6985cddecd24d28d806dbbbf157a`,
+automatically staged `sha256:15f4e2f35460d5e831a54433590bd8eaabafe726e3dcbb1f57ba0275aa2b3140`,
 and retrieved worker output
-`sha256:525ccb3f9d33151a22815878756a11f89958511b5dfec0ecf690c3145a6e05a0`.
+`sha256:e8b2e5ae9ef3cdb3d14d089ca2a562940418979b56242563412908461bb3e050`.
+
+The retained Ollama receipt predates this final packaging run. A fresh rerun was attempted but the
+local `llama3.2:latest` warm-up timed out while the machine was under memory pressure; no synthetic
+replacement was recorded. The release changes do not broaden the Ollama adapter's authority.
 
 ## Release artifacts
 
 | Artifact | Bytes | SHA-256 | Authenticode |
 | --- | ---: | --- | --- |
-| `target/release/bundle/msi/Rampage_0.1.0_x64_en-US.msi` | 73,461,760 | `e207ab863e8f6187905f074561167e9071cca690d406ce1910d0b125aab5ae76` | Not signed |
-| `target/release/bundle/nsis/Rampage_0.1.0_x64-setup.exe` | 66,425,137 | `221076d7470fe1cc43887023e893c5264b0f760cb997d542922e9b700bbb45e5` | Not signed |
-| `target/release/rampage-desktop.exe` | 15,017,984 | `7bfac4e417aea0f688b019236d3e37d47093096b178acc97a463894c19906094` | Not signed |
-| `dist/rampage-intelligence.exe` | 51,137,326 | `1d5425c8448ab0b1124686e799da44faccb25549c57e49b767a70d02ce837640` | Not signed |
+| `target/release/bundle/msi/Rampage_0.2.0_x64_en-US.msi` | 73,719,808 | `8ee25aae6e354bd235e66557acd860b915c00331ea01feef0275342e5029a778` | Not signed |
+| `target/release/bundle/nsis/Rampage_0.2.0_x64-setup.exe` | 66,596,324 | `c87a6d69641965d8ce1d3843755772ca3064a767b866d1e46a89ef5454496bf3` | Not signed |
+| `target/release/rampage-desktop.exe` | 15,551,488 | `cff610f662466bd671bbf90159de0aa707921d32413e69cb1df541dc37b2f962` | Not signed |
+| `apps/desktop/src-tauri/binaries/rampage-intelligence-x86_64-pc-windows-msvc.exe` | 51,136,730 | `9c42859d413330b66c034570a30d588fc2e8fc4720a084f357ca961b7f859818` | Not signed |
+
+The two installer digests are also published in
+[`SHA256SUMS-0.2.0.txt`](SHA256SUMS-0.2.0.txt) and attached to the GitHub release.
 
 The missing Authenticode signature is a public-distribution blocker. The binaries are functional
 and locally validated, but publication should wait for an ObtuseAI code-signing certificate so
@@ -74,7 +79,7 @@ not described as a warning-free all-target audit.
   dependency relays are never silently selected.
 - Distributed execution: whole-job placement and independent shards. Cross-host tensor sharding is
   disabled until a topology/engine adapter passes dedicated evidence gates.
-- Edge: contract and Governor policy exist; native phone/tablet/console binaries are not in 0.1.
+- Edge: contract and Governor policy exist; native phone/tablet/console binaries are not in 0.2.
 - Storage: signed, bounded direct-QUIC artifact transfer is shipped for cache/scratch replicas,
   automatic job-input staging, and receipt outputs. V1 transfers are capped at 64 MiB. Protected
   storage still requires an explicit remote-replica durability workflow.

@@ -29,8 +29,9 @@ All state transitions -> hash-chained evidence ledger
   abstraction, and public APIs.
 - **Intelligence plane (Python):** intent compilation, planning, research, building, criticism,
   adversarial review, evolution, and synthesis. It can only request typed capabilities.
-- **Experience plane (Tauri/React):** one-click enrollment, spatial Arena, accessible 2D parity,
-  explanations, replay, and owner controls.
+- **Experience plane (native Tauri/React):** one-click enrollment, spatial Arena, accessible 2D
+  parity, role-aware system tray, close-to-tray, start-at-login, explanations, replay, and owner
+  controls. Explicit Quit owns deterministic sidecar cleanup.
 
 ## OnePool is a market of leases, not pooled RAM
 
@@ -39,6 +40,13 @@ Rampage pools *work and explicit resources*: it schedules a workload to a suitab
 bounded resource lease, moves content-addressed inputs, and retrieves verified outputs. GPU memory is
 normally used by moving a whole model/job to the GPU host. Cross-host tensor/model sharding is only
 enabled for an adapter that proves topology and engine compatibility.
+
+The Model Fabric makes that distinction visible through five compute strategies. Maximum Model
+optimizes compatible aggregate model memory; Speed Boost uses distributed tensor placement only
+when conservative link evidence predicts a real improvement; Throughput uses replicas; Efficiency
+uses the smallest whole-model fit; Autonomous Balanced may accept proposal-only recommendations.
+`ModelSessionPlan` is read-only and always declares `none_preview_only` authority. See
+[MODEL_FABRIC.md](MODEL_FABRIC.md).
 
 Resource classes include CPU, GPU, NPU, GPU memory, working-set RAM, cache RAM, cache storage,
 scratch storage, protected storage, fetch/relay network, toolchains, runtimes, codecs, licensed
@@ -84,6 +92,11 @@ survive controller restart through the evidence ledger.
 This is useful aggregation across heterogeneous devices without a distributed shared address
 space. It does not claim cross-host tensor sharding, coherent remote RAM, or automatic speedup for
 work that cannot be partitioned.
+
+For model planning, a signed resource offer may include `ModelRuntimeOfferV1`. The controller groups
+only exact compatibility keys, caps runtime claims by observed RAM/VRAM, and returns a potential,
+qualified, or capacity-blocked plan. A future launcher must pass the separate backend gates before
+turning any preview into a signed model-session lease.
 
 ## Recursive improvement
 

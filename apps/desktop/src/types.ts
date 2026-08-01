@@ -26,6 +26,13 @@ export interface ResourceOffer {
     owner_idle: boolean;
   };
   adapters: string[];
+  model_runtimes?: Array<{
+    adapter: string;
+    backend: "local_ollama" | "exo_mlx" | "vllm_ray";
+    available_model_bytes: number;
+    status: "shipped_local" | "candidate" | "qualified";
+    supported_parallelism: string[];
+  }>;
   link_benchmark?: {
     rtt_micros_p50: number;
     uplink_bps: number;
@@ -40,6 +47,40 @@ export interface ResourceOffer {
     direct_addresses: string[];
     signature: string;
   };
+}
+
+export type ComputeStrategy =
+  | "maximum_model_size"
+  | "speed_boost"
+  | "maximum_throughput"
+  | "efficiency"
+  | "autonomous_balanced";
+
+export interface ModelSessionPlan {
+  schema: "rampage.model-session-plan.v1";
+  session_id: string;
+  strategy: ComputeStrategy;
+  state: "ready" | "qualification_required" | "capacity_blocked";
+  backend?: "local_ollama" | "exo_mlx" | "vllm_ray";
+  parallelism?: "whole_model" | "pipeline" | "tensor" | "replica" | "speculative";
+  distributed: boolean;
+  required_bytes: number;
+  observed_fabric_bytes: number;
+  maximum_supported_bytes: number;
+  predicted_speedup_milli: number;
+  placements: Array<{
+    node_id: string;
+    rank: number;
+    assigned_bytes: number;
+    available_model_bytes: number;
+    role: string;
+    topology_confidence: string;
+  }>;
+  blockers: string[];
+  warnings: string[];
+  proposed_local_endpoint: string | null;
+  execution_authority: "none_preview_only";
+  reason: string;
 }
 
 export interface LedgerEvent {
@@ -69,6 +110,8 @@ export interface FabricNode {
   gpu: number;
   storage: number;
   storageAvailableGb: number;
+  modelMemoryAvailableGb?: number;
+  modelRuntimeCount?: number;
   artifactEndpoint: boolean;
   latencyMs?: number;
   downlinkMbps?: number;

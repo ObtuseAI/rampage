@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rampage.local/contracts/rampage.model-session-request.v1.schema.json",
+  "title": "Rampage Model Session Request V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "session_id",
+    "model_id",
+    "estimated_weight_bytes",
+    "kv_cache_bytes",
+    "context_tokens",
+    "strategy",
+    "max_nodes",
+    "deadline",
+    "idempotency_key"
+  ],
+  "properties": {
+    "schema": { "const": "rampage.model-session-request.v1" },
+    "session_id": { "type": "string", "format": "uuid" },
+    "model_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "estimated_weight_bytes": { "type": "integer", "minimum": 1, "maximum": 17592186044416 },
+    "kv_cache_bytes": { "type": "integer", "minimum": 0, "maximum": 17592186044416 },
+    "context_tokens": { "type": "integer", "minimum": 1 },
+    "strategy": {
+      "enum": [
+        "maximum_model_size",
+        "speed_boost",
+        "maximum_throughput",
+        "efficiency",
+        "autonomous_balanced"
+      ]
+    },
+    "max_nodes": { "type": "integer", "minimum": 1, "maximum": 64 },
+    "deadline": { "type": "string", "format": "date-time" },
+    "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 512 }
+  }
+}
