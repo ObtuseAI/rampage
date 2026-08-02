@@ -1,0 +1,87 @@
+name: Windows 10 qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-10-qualification
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: Installer and lifecycle on real Windows 10 x64
+    runs-on: [self-hosted, windows, x64, rampage-windows-10]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.8
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@ab40b01f54fe82bdf65693ea090a1e4942c136e7 # 1.91
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Prove runner identity
+        id: os
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          if ($os.Caption -notmatch 'Windows 10' -or $os.OSArchitecture -notmatch '64-bit') {
+            throw "runner is not Windows 10 x64: $($os.Caption) $($os.OSArchitecture)"
+          }
+          "caption=$($os.Caption)" >> $env:GITHUB_OUTPUT
+          "version=$($os.Version)" >> $env:GITHUB_OUTPUT
+          "build=$($os.BuildNumber)" >> $env:GITHUB_OUTPUT
+
+      - run: pnpm install --frozen-lockfile
+      - run: uv sync --project services/intelligence --extra dev --locked
+
+      - name: Build Windows package
+        shell: pwsh
+        run: ./scripts/Build-Rampage.ps1 -Profile release
+
+      - name: Exercise install, desktop shortcut, tray lifecycle, sidecars, and uninstall
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem target/release/bundle/nsis -File -Filter '*-setup.exe' |
+            Select-Object -First 1
+          if (-not $installer) { throw 'NSIS installer was not produced' }
+          $smoke = ./scripts/Smoke-RampageInstaller.ps1 -Installer $installer.FullName |
+            ConvertFrom-Json
+          if ($smoke.result -ne 'PASS') { throw 'Windows 10 installer lifecycle failed' }
+          $evidence = [ordered]@{
+            schema = 'rampage.windows-10-qualification.v1'
+            source_commit = '${{ github.sha }}'
+            os_caption = '${{ steps.os.outputs.caption }}'
+            os_version = '${{ steps.os.outputs.version }}'
+            os_build = '${{ steps.os.outputs.build }}'
+            installer = $installer.Name
+            desktop_shortcut = $smoke.desktop_shortcut
+            shortcut_removed_on_uninstall = $smoke.shortcut_removed_on_uninstall
+            shell_shortcut_removed_on_uninstall = $smoke.shell_shortcut_removed_on_uninstall
+            controller = $smoke.controller
+            intelligence = $smoke.intelligence
+            nodes = $smoke.nodes
+            offers = $smoke.offers
+            sidecar_leak = $smoke.sidecar_leak
+            result = 'PASS'
+            completed_at = (Get-Date).ToUniversalTime().ToString('o')
+          }
+          New-Item output -ItemType Directory -Force | Out-Null
+          $evidence | ConvertTo-Json -Depth 5 |
+            Set-Content output/windows-10-qualification.json -Encoding utf8NoBOM
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-10-qualification-${{ github.sha }}
+          path: output/windows-10-qualification.json
+          if-no-files-found: error

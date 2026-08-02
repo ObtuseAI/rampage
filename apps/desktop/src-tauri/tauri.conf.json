@@ -38,12 +38,6 @@
       "binaries/rampage-relay",
       "binaries/rampage-intelligence"
     ],
-    "targets": ["msi", "nsis"],
-    "windows": {
-      "nsis": {
-        "installerHooks": "./windows/installer-hooks.nsh"
-      }
-    },
     "category": "DeveloperTool",
     "shortDescription": "Your machines, acting as one governed compute fabric."
   }

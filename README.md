@@ -12,6 +12,7 @@ the authority to run wild.
 
 [![CI](https://github.com/ObtuseAI/rampage/actions/workflows/ci.yml/badge.svg)](https://github.com/ObtuseAI/rampage/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/ObtuseAI/rampage/actions/workflows/codeql.yml/badge.svg)](https://github.com/ObtuseAI/rampage/actions/workflows/codeql.yml)
+[![Native distribution](https://github.com/ObtuseAI/rampage/actions/workflows/distribution.yml/badge.svg)](https://github.com/ObtuseAI/rampage/actions/workflows/distribution.yml)
 [![Windows x64](https://img.shields.io/badge/release-Windows%20x64-0b0f17?logo=windows&logoColor=67f5c5)](docs/PLATFORM_MATRIX.md)
 [![Rust 1.91](https://img.shields.io/badge/Rust-1.91%2B-0b0f17?logo=rust&logoColor=67f5c5)](Cargo.toml)
 [![AI authority](https://img.shields.io/badge/AI%20authority-proposals%20only-0b0f17?logo=probot&logoColor=67f5c5)](docs/ARCHITECTURE.md#recursive-improvement)
@@ -21,7 +22,8 @@ the authority to run wild.
 [Security](SECURITY.md) ·
 [Release evidence](docs/RELEASE_EVIDENCE.md) ·
 [Owner-relay evidence](docs/OWNER_RELAY_EVIDENCE.md) ·
-[Resumable-storage evidence](docs/RESUMABLE_STORAGE_EVIDENCE.md)
+[Resumable-storage evidence](docs/RESUMABLE_STORAGE_EVIDENCE.md) ·
+[Native distribution](docs/DISTRIBUTION.md)
 
 </div>
 
@@ -180,6 +182,31 @@ This separation is deliberate. Rampage can become broadly useful without selling
 shared-memory story, and every new backend must earn admission with deterministic tests and signed
 runtime evidence before the Governor can lease it.
 
+## A native application, not a terminal ritual
+
+Rampage owns the complete desktop lifecycle: sidecars, policy state, local discovery, the system
+tray, start-at-login, emergency STOP, explicit shutdown, and the desktop launcher. The owner should
+be able to install the app, create a fabric, paste one signed invite on each contributing machine,
+and let capability discovery do the rest.
+
+| Platform lane | Native deliverables | Current qualification boundary |
+| --- | --- | --- |
+| Windows x64 | MSI and NSIS installers; automatic desktop shortcut; Start-menu entry; role-aware tray; bundled sidecars | Packaged 0.2 was qualified on Windows 11 x64 but remains unsigned; fresh Windows Server 2022 candidate builds do not substitute for Windows 10 evidence |
+| Linux x64 | Debian package and AppImage with the same Tauri shell and native sidecars | Fresh Ubuntu 24.04 candidate gate; stable repository/AppImage signing remains channel-specific |
+| macOS Apple Silicon | Native app bundle and DMG | Fresh macOS 15/M1 candidate gate; stable publication requires Developer ID signing, Gatekeeper acceptance, notarization, and a stapled ticket |
+| Windows 10 x64 | MSI/NSIS lifecycle, desktop shortcut, tray, sidecars, restart, STOP, and uninstall campaign | Deliberately unqualified until a real self-hosted Windows 10 runner completes the fail-closed workflow |
+| Phones and tablets | Foreground-safe contributor contract | Native enrollment, transport, packaging, and physical-device qualification remain a later gate—not a shipped claim |
+
+Every staged candidate carries SHA-256 checksums plus a source-bound distribution manifest.
+Non-pull-request artifacts can receive GitHub OIDC provenance attestations, but provenance is not a
+substitute for platform identity. Stable Windows and macOS workflows therefore refuse to publish
+when their real signing credentials or native verification steps are missing.
+
+See [Native distribution](docs/DISTRIBUTION.md) and the live
+[platform matrix](docs/PLATFORM_MATRIX.md) for exact build environments, verification commands,
+credential contracts, and the difference between a candidate, a signed stable release, and a
+physically qualified operating system.
+
 ## Recursively improving—without recursively expanding authority
 
 The intelligence plane runs a durable improvement loop:
@@ -328,6 +355,7 @@ sidecar binaries, databases, keys, and logs are excluded from source control.
 [Backend admission gates](docs/BACKEND_GATES.md) ·
 [Model Fabric](docs/MODEL_FABRIC.md) ·
 [Owner relay](docs/OWNER_RELAY.md) ·
+[Native distribution](docs/DISTRIBUTION.md) ·
 [Platform matrix](docs/PLATFORM_MATRIX.md) ·
 [Security policy](SECURITY.md) ·
 [Release evidence](docs/RELEASE_EVIDENCE.md)

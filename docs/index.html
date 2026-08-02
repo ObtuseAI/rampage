@@ -25,6 +25,7 @@
     </a>
     <nav aria-label="Primary navigation">
       <a href="#proof">Proof</a>
+      <a href="#native">Native</a>
       <a href="#model-fabric">Model Fabric</a>
       <a href="#workloads">Workloads</a>
       <a href="#architecture">Design</a>
@@ -87,6 +88,37 @@
         <article><span>03</span><h3>Move sealed artifacts</h3><p>Donated drives become encrypted content-addressed capacity with restart-resumable frames, signed possession challenges, and bounded autonomous repair.</p></article>
         <article><span>04</span><h3>Demand receipts</h3><p>Every accepted job returns a signed result. Every transition lands in a recoverable, hash-chained evidence ledger.</p></article>
       </div>
+    </section>
+
+    <section class="section native-section" id="native">
+      <div class="section-heading split-heading">
+        <div><p class="eyebrow">NATIVE FROM FIRST CLICK</p><h2>Download it.<br>Build your fabric.</h2></div>
+        <p>Rampage is a real desktop application, not a dashboard wrapped around a pile of manual daemons. The shell owns its governed sidecars, local discovery, tray lifecycle, startup behavior, STOP path, and clean shutdown.</p>
+      </div>
+      <div class="platform-grid" aria-label="Rampage native distribution lanes">
+        <article class="platform-card current">
+          <small>WINDOWS X64 · PACKAGED 0.2</small><h3>MSI + NSIS</h3>
+          <p>The installer creates the desktop launcher automatically, registers the Start-menu entry, bundles all four sidecars, and hands ongoing control to the role-aware system tray.</p>
+          <ul><li>Windows 11 lifecycle proof</li><li>Desktop shortcut + close-to-tray</li><li>Unsigned until Authenticode credentials exist</li></ul>
+        </article>
+        <article class="platform-card candidate">
+          <small>LINUX X64 · FRESH RUNNER GATE</small><h3>Debian + AppImage</h3>
+          <p>The same Tauri shell and Rust/Python sidecars are assembled on Ubuntu 24.04, staged with SHA-256 checksums, and bound to the exact source revision in a distribution manifest.</p>
+          <ul><li>No cross-compiled portability claim</li><li>Native GTK/WebKit build environment</li><li>Stable signing remains channel-specific</li></ul>
+        </article>
+        <article class="platform-card candidate">
+          <small>MACOS ARM64 · FRESH M1 GATE</small><h3>App + DMG</h3>
+          <p>Apple Silicon candidates are built natively on macOS 15. Stable publication additionally requires a real Developer ID, notarization, Gatekeeper acceptance, and a stapled ticket.</p>
+          <ul><li>Native sidecars and generated icon set</li><li>Unsigned candidates stay candidates</li><li>Stable credentials fail closed</li></ul>
+        </article>
+      </div>
+      <div class="install-flow" aria-label="Four steps from download to personal compute fabric">
+        <article><b>01</b><strong>Install</strong><span>Launch from the desktop shortcut.</span></article>
+        <article><b>02</b><strong>Create</strong><span>Choose “Create my fabric” on the owner PC.</span></article>
+        <article><b>03</b><strong>Invite</strong><span>Paste one complete short-lived signed invitation.</span></article>
+        <article><b>04</b><strong>Contribute</strong><span>Automatic discovery applies owner limits and explains every denial.</span></article>
+      </div>
+      <p class="pool-note">Windows 10 remains an explicit real-machine gate: the dedicated self-hosted workflow must prove the operating-system caption, installer, desktop launcher, tray lifecycle, sidecars, restart behavior, STOP, and uninstall. A Windows Server build is useful candidate evidence; it is not relabeled as Windows 10 proof.</p>
     </section>
 
     <section class="section architecture" id="architecture">

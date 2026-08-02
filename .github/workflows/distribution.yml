@@ -1,0 +1,236 @@
+name: Native distribution
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/distribution.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'apps/desktop/**'
+      - 'services/intelligence/**'
+      - 'scripts/Assert-RampageVersion.ps1'
+      - 'scripts/Build-Rampage.ps1'
+      - 'scripts/Stage-RampageDistribution.ps1'
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Candidate builds may be unsigned; stable builds require platform trust credentials.
+        required: true
+        default: candidate
+        type: choice
+        options: [candidate, stable]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: distribution-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.name }} native package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-2022
+            platform: windows-x64
+          - name: Linux x64
+            runner: ubuntu-24.04
+            platform: linux-x64
+          - name: macOS Apple Silicon
+            runner: macos-15
+            platform: macos-arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    env:
+      RAMPAGE_STABLE: ${{ (github.event_name == 'push' && !contains(github.ref_name, '-')) || (github.event_name == 'workflow_dispatch' && inputs.channel == 'stable') }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.8
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@ab40b01f54fe82bdf65693ea090a1e4942c136e7 # 1.91
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Bind release tag to every package version
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: ./scripts/Assert-RampageVersion.ps1 -Tag '${{ github.ref_name }}'
+
+      - name: Install Linux desktop dependencies
+        if: matrix.platform == 'linux-x64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - run: pnpm install --frozen-lockfile
+      - run: uv sync --project services/intelligence --extra dev --locked
+
+      - name: Generate platform icon assets
+        if: matrix.platform == 'macos-arm64'
+        run: pnpm --dir apps/desktop tauri icon src-tauri/icons/icon.png
+
+      - name: Build native sidecars
+        shell: pwsh
+        run: ./scripts/Build-Rampage.ps1 -Profile release -NoBundle
+
+      - name: Require Windows stable-release credentials
+        if: matrix.platform == 'windows-x64' && env.RAMPAGE_STABLE == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          foreach ($name in @('WINDOWS_CERTIFICATE', 'WINDOWS_CERTIFICATE_PASSWORD', 'WINDOWS_TIMESTAMP_URL')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "stable Windows release requires $name"
+            }
+          }
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'rampage-signing.pfx'
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          if (-not $certificate.HasPrivateKey) { throw 'imported Windows certificate has no private key' }
+
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
+            Where-Object { $_.FullName -like '*\x64\signtool.exe' } | Sort-Object FullName | Select-Object -Last 1
+          if (-not $signTool) { throw 'signtool.exe is unavailable' }
+          Get-ChildItem apps/desktop/src-tauri/binaries -Filter '*.exe' | ForEach-Object {
+            & $signTool.FullName sign /sha1 $certificate.Thumbprint /fd SHA256 /tr $env:WINDOWS_TIMESTAMP_URL /td SHA256 $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "sidecar signing failed for $($_.Name)" }
+          }
+
+          $signingConfig = @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $certificate.Thumbprint
+                digestAlgorithm = 'sha256'
+                timestampUrl = $env:WINDOWS_TIMESTAMP_URL
+              }
+            }
+          }
+          $configPath = Join-Path $env:RUNNER_TEMP 'tauri-windows-signing.json'
+          $signingConfig | ConvertTo-Json -Depth 5 | Set-Content $configPath -Encoding utf8NoBOM
+          "config=$configPath" >> $env:GITHUB_OUTPUT
+        id: windows-signing
+
+      - name: Require and import macOS stable-release credentials
+        if: matrix.platform == 'macos-arm64' && env.RAMPAGE_STABLE == 'true'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then echo "stable macOS release requires $name" >&2; exit 1; fi
+          done
+          certificate="$RUNNER_TEMP/rampage-signing.p12"
+          keychain="$RUNNER_TEMP/rampage-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          security list-keychain -d user -s "$keychain" login.keychain-db
+
+      - name: Bundle signed and notarized macOS application
+        if: matrix.platform == 'macos-arm64' && env.RAMPAGE_STABLE == 'true'
+        shell: pwsh
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          & pnpm --dir apps/desktop tauri build
+          if ($LASTEXITCODE -ne 0) { throw 'signed macOS desktop bundle failed' }
+
+      - name: Bundle desktop application
+        if: matrix.platform != 'macos-arm64' || env.RAMPAGE_STABLE != 'true'
+        shell: pwsh
+        run: |
+          $arguments = @('--dir', 'apps/desktop', 'tauri', 'build')
+          if ('${{ matrix.platform }}' -eq 'windows-x64' -and $env:RAMPAGE_STABLE -eq 'true') {
+            $arguments += @('--config', '${{ steps.windows-signing.outputs.config }}')
+          }
+          & pnpm @arguments
+          if ($LASTEXITCODE -ne 0) { throw 'native desktop bundle failed' }
+
+      - name: Stage and verify distribution
+        shell: pwsh
+        run: |
+          $arguments = @{ Platform = '${{ matrix.platform }}' }
+          if ($env:RAMPAGE_STABLE -eq 'true' -and '${{ matrix.platform }}' -ne 'linux-x64') {
+            $arguments.RequirePlatformSignature = $true
+          }
+          & ./scripts/Stage-RampageDistribution.ps1 @arguments
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rampage-${{ matrix.platform }}
+          path: output/distribution/${{ matrix.platform }}/*
+          if-no-files-found: error
+
+
+  attest:
+    name: Sign build provenance
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: rampage-*
+          path: attested-assets
+      - uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: attested-assets/**/*
+
+  publish:
+    name: Draft GitHub release
+    if: github.event_name == 'push'
+    needs: [build, attest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: rampage-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish immutable draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=''
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease='--prerelease'; fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft $prerelease \
+            --title "Rampage $GITHUB_REF_NAME" --generate-notes release-assets/*
