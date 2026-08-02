@@ -14,6 +14,12 @@ binary release claim.
 | Game consoles | Not shipped | No | Designed companion worker where platform policy permits | Foreground restart-tolerant microtasks | Contract and Governor policy only; store/platform approval required |
 | Browser/PWA | Not shipped | No | Designed constrained worker | WASM-compatible microtasks, no protected storage | Protocol extension point only |
 
+Fresh Windows x64, Linux x64, and macOS Apple Silicon packages are now defined by the fail-closed
+[native distribution workflow](DISTRIBUTION.md). A successful pull-request run qualifies candidate
+packaging on its named GitHub-hosted runner; it does not convert an unsigned candidate into a stable
+release. Stable Windows and macOS publication additionally requires real platform credentials and
+independent signature/notarization verification.
+
 The installable column describes the published 0.2 artifacts. Later source-qualified capabilities
 do not become packaged or signed merely because they pass a source campaign; each evidence page
 states that boundary explicitly.

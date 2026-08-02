@@ -1,7 +1,8 @@
 param(
     [ValidateSet('debug', 'release')]
     [string]$Profile = 'release',
-    [switch]$NoBundle
+    [switch]$NoBundle,
+    [string]$TauriConfig
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,10 +39,15 @@ $intelligenceProject = Join-Path $root 'services\intelligence'
     --copy-metadata dbos `
     (Join-Path $intelligenceProject 'rampage_intelligence_entry.py')
 if ($LASTEXITCODE -ne 0) { throw 'Intelligence sidecar build failed' }
-Copy-Item -Force (Join-Path $root 'dist\rampage-intelligence.exe') `
-    (Join-Path $destination "rampage-intelligence-$triple.exe")
+$intelligenceExtension = if ($IsWindows) { '.exe' } else { '' }
+Copy-Item -Force (Join-Path $root "dist\rampage-intelligence$intelligenceExtension") `
+    (Join-Path $destination "rampage-intelligence-$triple$intelligenceExtension")
 
 if (-not $NoBundle) {
-    & pnpm --dir (Join-Path $root 'apps\desktop') tauri build
+    $tauriArgs = @('--dir', (Join-Path $root 'apps\desktop'), 'tauri', 'build')
+    if ($TauriConfig) {
+        $tauriArgs += @('--config', $TauriConfig)
+    }
+    & pnpm @tauriArgs
     if ($LASTEXITCODE -ne 0) { throw 'Tauri bundle failed' }
 }

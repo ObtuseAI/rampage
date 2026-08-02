@@ -21,7 +21,8 @@ the authority to run wild.
 [Security](SECURITY.md) ·
 [Release evidence](docs/RELEASE_EVIDENCE.md) ·
 [Owner-relay evidence](docs/OWNER_RELAY_EVIDENCE.md) ·
-[Resumable-storage evidence](docs/RESUMABLE_STORAGE_EVIDENCE.md)
+[Resumable-storage evidence](docs/RESUMABLE_STORAGE_EVIDENCE.md) ·
+[Native distribution](docs/DISTRIBUTION.md)
 
 </div>
 
@@ -328,6 +329,7 @@ sidecar binaries, databases, keys, and logs are excluded from source control.
 [Backend admission gates](docs/BACKEND_GATES.md) ·
 [Model Fabric](docs/MODEL_FABRIC.md) ·
 [Owner relay](docs/OWNER_RELAY.md) ·
+[Native distribution](docs/DISTRIBUTION.md) ·
 [Platform matrix](docs/PLATFORM_MATRIX.md) ·
 [Security policy](SECURITY.md) ·
 [Release evidence](docs/RELEASE_EVIDENCE.md)
