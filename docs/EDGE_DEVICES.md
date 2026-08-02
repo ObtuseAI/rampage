@@ -129,7 +129,8 @@ Both artifacts are structurally checked, packaged with SHA-256 checksums, and up
 candidates. An iOS simulator bundle is not a physical-device or App Store package. Android release
 signing, Apple developer signing, store review, physical-device lifecycle tests, real battery and
 thermal pressure campaigns, and long-duration network interruption tests remain separate release
-gates.
+gates. The [mobile evidence record](MOBILE_EDGE_EVIDENCE.md) binds the successful jobs to their
+source and pull-request merge commits and records the downloaded candidate hashes and package metadata.
 
 Gaming consoles are not part of this client. The Android manifest intentionally omits TV/Leanback
 launcher declarations, and there is no console package or permission claim. Console support requires

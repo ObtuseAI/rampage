@@ -25,7 +25,8 @@ the authority to run wild.
 [Owner-relay evidence](docs/OWNER_RELAY_EVIDENCE.md) ·
 [Resumable-storage evidence](docs/RESUMABLE_STORAGE_EVIDENCE.md) ·
 [Native distribution](docs/DISTRIBUTION.md) ·
-[Mobile edge](docs/EDGE_DEVICES.md)
+[Mobile edge](docs/EDGE_DEVICES.md) ·
+[Mobile evidence](docs/MOBILE_EDGE_EVIDENCE.md)
 
 </div>
 
@@ -147,7 +148,9 @@ pressure, lifecycle loss, network failure, or owner STOP.
 The screenshot is the real React interface in its labeled browser showcase state. Native packages
 replace the demonstration values with direct platform telemetry. The worker runs in-process—no
 mobile daemon, shell, model server, protected replica, public marketplace, or ambient background
-authority. See [Rampage Edge](docs/EDGE_DEVICES.md) for the trust flow and exact platform boundary.
+authority. See [Rampage Edge](docs/EDGE_DEVICES.md) for the trust flow and exact platform boundary,
+and the [mobile evidence record](docs/MOBILE_EDGE_EVIDENCE.md) for source-bound Android ARM64 and
+Apple-silicon iOS simulator build proof, artifact identities, checksums, and release exclusions.
 
 ## Model Fabric: biggest model and fastest chat are different lanes
 
@@ -212,7 +215,7 @@ and let capability discovery do the rest.
 | Linux x64 | Debian package and AppImage with the same Tauri shell and native sidecars | Fresh Ubuntu 24.04 candidate gate; stable repository/AppImage signing remains channel-specific |
 | macOS Apple Silicon | Native app bundle and DMG | Fresh macOS 15/M1 candidate gate; stable publication requires Developer ID signing, Gatekeeper acceptance, notarization, and a stapled ticket |
 | Windows 10 x64 | MSI/NSIS lifecycle, desktop shortcut, tray, sidecars, restart, STOP, and uninstall campaign | Deliberately unqualified until a real self-hosted Windows 10 runner completes the fail-closed workflow |
-| Phones and tablets | Native Tauri app; Kotlin/Swift telemetry; in-process Rust worker; Android ARM64 and iOS simulator candidate gates | Unsigned CI candidates are not store releases; physical-device signing and lifecycle qualification remain separate gates |
+| Phones and tablets | Native Tauri app; Kotlin/Swift telemetry; in-process Rust worker; source-bound Android ARM64 and Apple-silicon iOS simulator candidates with published checksums | Unsigned CI candidates are not store releases; physical-device signing and lifecycle qualification remain separate gates |
 
 Every staged candidate carries SHA-256 checksums plus a source-bound distribution manifest.
 Non-pull-request artifacts can receive GitHub OIDC provenance attestations, but provenance is not a
