@@ -86,10 +86,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: uv sync --project services/intelligence --extra dev --locked
 
-      - name: Generate platform icon assets
-        if: matrix.platform == 'macos-arm64'
-        run: pnpm --dir apps/desktop tauri icon src-tauri/icons/icon.png
-
       - name: Build native sidecars
         shell: pwsh
         run: ./scripts/Build-Rampage.ps1 -Profile release -NoBundle
