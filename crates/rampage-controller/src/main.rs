@@ -24,15 +24,15 @@ use rampage_policy::{
 };
 use rampage_protocol::{
     ArtifactRefV1, ArtifactReplicaReceiptV1, ArtifactTransferOperation, CapabilityLeaseV1,
-    EnrollmentInviteV1, EnrollmentRequestV1, ExecutionReceiptV1, InstalledModelV1, JobSpecV1,
-    JobState, LINK_BENCHMARK_TRANSFER_BYTES, MAX_ARTIFACT_TRANSFER_BYTES, MAX_MODEL_OUTPUT_BYTES,
-    MAX_MODEL_OUTPUT_TOKENS, MAX_MODEL_PROMPT_BYTES, MeshControlRequestV1, MeshControlResponseV1,
-    MeshEndpointRecordV1, ModelBackend, ModelChatMessageV1, ModelExecutionReceiptV1,
-    ModelInvocationFrameKind, ModelInvocationRequestV1, ModelMemoryKind, ModelParallelism,
-    ModelRuntimeOfferV1, ModelRuntimeStatus, ModelSessionLeaseV1, ModelSessionRequestV1,
-    ModelUsageV1, NodeIdentityV1, PromotionCanaryLeaseV1, PromotionCandidateV1,
-    RelayAccessManifestV1, ResourceClass, ResourceOfferV1, ShardSetV1, StorageClass,
-    StorageLeaseV1, WorkClaimV1,
+    DeviceKind, EnrollmentInviteV1, EnrollmentRequestV1, ExecutionReceiptV1, InstalledModelV1,
+    JobSpecV1, JobState, LINK_BENCHMARK_TRANSFER_BYTES, MAX_ARTIFACT_TRANSFER_BYTES,
+    MAX_MODEL_OUTPUT_BYTES, MAX_MODEL_OUTPUT_TOKENS, MAX_MODEL_PROMPT_BYTES, MeshControlRequestV1,
+    MeshControlResponseV1, MeshEndpointRecordV1, ModelBackend, ModelChatMessageV1,
+    ModelExecutionReceiptV1, ModelInvocationFrameKind, ModelInvocationRequestV1, ModelMemoryKind,
+    ModelParallelism, ModelRuntimeOfferV1, ModelRuntimeStatus, ModelSessionLeaseV1,
+    ModelSessionRequestV1, ModelUsageV1, NodeIdentityV1, PromotionCanaryLeaseV1,
+    PromotionCandidateV1, RelayAccessManifestV1, ResourceClass, ResourceOfferV1, ShardSetV1,
+    StorageClass, StorageLeaseV1, WorkClaimV1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -2048,6 +2048,8 @@ async fn register_offer(
             Json(json!({"error": error.to_string()})),
         )
     })?;
+    validate_offer_identity_binding(&identity, &offer)
+        .map_err(|error| (StatusCode::UNAUTHORIZED, Json(json!({"error": error}))))?;
     validate_model_runtime_contracts(&offer)
         .map_err(|error| (StatusCode::BAD_REQUEST, Json(json!({"error": error}))))?;
     if let Some(benchmark) = &offer.link_benchmark
@@ -2120,6 +2122,31 @@ async fn register_offer(
         StatusCode::CREATED,
         Json(json!({"offer_id": offer.offer_id})),
     ))
+}
+
+fn validate_offer_identity_binding(
+    identity: &NodeIdentityV1,
+    offer: &ResourceOfferV1,
+) -> Result<(), String> {
+    if offer.resources.is_empty() {
+        return Err("resource offer must contain at least one exact resource".into());
+    }
+    let expected = rampage_policy::device_kind_label(identity.device_kind);
+    if offer
+        .resources
+        .iter()
+        .any(|resource| resource.labels.get("device_kind").map(String::as_str) != Some(expected))
+    {
+        return Err("resource device class does not match the enrolled native identity".into());
+    }
+    if matches!(
+        identity.device_kind,
+        DeviceKind::Phone | DeviceKind::Tablet | DeviceKind::Console
+    ) && offer.availability.battery_percent.is_none()
+    {
+        return Err("edge offers must include a native battery observation".into());
+    }
+    Ok(())
 }
 
 async fn link_probe(
@@ -5407,6 +5434,38 @@ mod tests {
         assert_eq!(validate_model_runtime_contracts(&offer), Ok(()));
         offer.model_runtimes[0].available_model_bytes += 1;
         assert!(validate_model_runtime_contracts(&offer).is_err());
+    }
+
+    #[test]
+    fn edge_offer_is_bound_to_enrolled_device_class_and_battery_telemetry() {
+        let mut offer = valid_model_offer();
+        offer.resources[0]
+            .labels
+            .insert("device_kind".into(), "phone".into());
+        offer.availability.battery_percent = Some(75);
+        let identity = NodeIdentityV1 {
+            schema: NodeIdentityV1::SCHEMA.into(),
+            node_id: offer.node_id,
+            owner_id: Uuid::now_v7(),
+            display_name: "native phone".into(),
+            device_kind: DeviceKind::Phone,
+            platform: "android".into(),
+            public_key: "a".repeat(64),
+            enrolled_at: chrono::Utc::now(),
+            fencing_epoch: 0,
+        };
+        assert_eq!(validate_offer_identity_binding(&identity, &offer), Ok(()));
+
+        offer.resources[0]
+            .labels
+            .insert("device_kind".into(), "desktop".into());
+        assert!(validate_offer_identity_binding(&identity, &offer).is_err());
+
+        offer.resources[0]
+            .labels
+            .insert("device_kind".into(), "phone".into());
+        offer.availability.battery_percent = None;
+        assert!(validate_offer_identity_binding(&identity, &offer).is_err());
     }
 
     #[test]

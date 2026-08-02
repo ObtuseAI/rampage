@@ -116,6 +116,8 @@ pub enum Denial {
     PromotionRiskMismatch,
     #[error("lease signature is invalid")]
     InvalidSignature,
+    #[error("node identity is malformed or outside enrollment limits")]
+    InvalidIdentity,
     #[error("artifact digest or size is invalid")]
     InvalidArtifact,
     #[error("node did not offer enough storage in the requested class")]
@@ -802,6 +804,21 @@ pub fn verify_mesh_endpoint_with_key(
     {
         return Err(Denial::InvalidSignature);
     }
+    verify_pinned_mesh_endpoint_with_key(public_key, endpoint)
+}
+
+/// Verify the immutable content of a controller endpoint pinned during enrollment.
+///
+/// Expiry controls discovery freshness, not the lifetime of an already-enrolled transport trust
+/// anchor. The signature is still checked on every restart so local route-file tampering cannot
+/// redirect a worker to a different address or endpoint identity.
+pub fn verify_pinned_mesh_endpoint_with_key(
+    public_key: &str,
+    endpoint: &MeshEndpointRecordV1,
+) -> Result<(), Denial> {
+    if endpoint.schema != MeshEndpointRecordV1::SCHEMA {
+        return Err(Denial::InvalidSignature);
+    }
     verify_contract_signature(public_key, &endpoint.signature, &{
         let mut unsigned = endpoint.clone();
         unsigned.signature.clear();
@@ -853,6 +870,17 @@ pub fn sign_enrollment(signing_key: &SigningKey, request: &mut EnrollmentRequest
 }
 
 pub fn verify_enrollment(request: &EnrollmentRequestV1) -> Result<(), Denial> {
+    if request.schema != "rampage.enrollment-request.v1"
+        || request.invite_id == Uuid::nil()
+        || request.enrollment_code.len() != 32
+        || !request
+            .enrollment_code
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || !request.identity.is_valid_for_enrollment()
+    {
+        return Err(Denial::InvalidIdentity);
+    }
     verify_contract_signature(&request.identity.public_key, &request.signature, &{
         let mut unsigned = request.clone();
         unsigned.signature.clear();
@@ -1284,6 +1312,41 @@ mod tests {
     }
 
     #[test]
+    fn enrollment_rejects_malformed_secrets_and_invalid_native_identities() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let identity = NodeIdentityV1 {
+            schema: NodeIdentityV1::SCHEMA.into(),
+            node_id: Uuid::now_v7(),
+            owner_id: Uuid::now_v7(),
+            display_name: "foreground phone".into(),
+            device_kind: DeviceKind::Phone,
+            platform: "android".into(),
+            public_key: hex::encode(signing_key.verifying_key().to_bytes()),
+            enrolled_at: Utc::now(),
+            fencing_epoch: 0,
+        };
+        let mut request = EnrollmentRequestV1 {
+            schema: "rampage.enrollment-request.v1".into(),
+            invite_id: Uuid::now_v7(),
+            enrollment_code: "a".repeat(32),
+            identity,
+            signature: String::new(),
+        };
+        sign_enrollment(&signing_key, &mut request);
+        assert_eq!(verify_enrollment(&request), Ok(()));
+
+        request.enrollment_code = "z".repeat(32);
+        sign_enrollment(&signing_key, &mut request);
+        assert_eq!(verify_enrollment(&request), Err(Denial::InvalidIdentity));
+
+        request.enrollment_code = "b".repeat(32);
+        request.identity.device_kind = DeviceKind::Tablet;
+        request.identity.fencing_epoch = 1;
+        sign_enrollment(&signing_key, &mut request);
+        assert_eq!(verify_enrollment(&request), Err(Denial::InvalidIdentity));
+    }
+
+    #[test]
     fn worker_can_verify_governor_lease_without_governor_secret() {
         let governor = Governor::ephemeral(GovernorConfig::default());
         let (job, offer) = fixtures("desktop", true);
@@ -1386,6 +1449,34 @@ mod tests {
         endpoint.direct_addresses[0] = "192.0.2.99:4000".into();
         assert_eq!(
             verify_mesh_endpoint_with_key(&public_key, &endpoint),
+            Err(Denial::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn expired_enrollment_pin_keeps_signature_validation_without_discovery_authority() {
+        let governor = Governor::ephemeral(GovernorConfig::default());
+        let now = Utc::now();
+        let mut endpoint = MeshEndpointRecordV1 {
+            schema: MeshEndpointRecordV1::SCHEMA.into(),
+            endpoint_id: "a".repeat(64),
+            direct_addresses: vec!["192.0.2.10:4000".into()],
+            relay_urls: vec![],
+            issued_at: now - Duration::minutes(2),
+            expires_at: now - Duration::minutes(1),
+            signature: String::new(),
+        };
+        governor.sign_mesh_endpoint(&mut endpoint);
+        let public_key = hex::encode(governor.verifying_key().to_bytes());
+        assert_eq!(
+            verify_mesh_endpoint_with_key(&public_key, &endpoint),
+            Err(Denial::InvalidSignature)
+        );
+        assert!(verify_pinned_mesh_endpoint_with_key(&public_key, &endpoint).is_ok());
+
+        endpoint.direct_addresses[0] = "192.0.2.99:4000".into();
+        assert_eq!(
+            verify_pinned_mesh_endpoint_with_key(&public_key, &endpoint),
             Err(Denial::InvalidSignature)
         );
     }

@@ -1,0 +1,151 @@
+name: Mobile edge candidates
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/mobile-edge.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'apps/edge/**'
+      - 'crates/rampage-agent/**'
+      - 'crates/rampage-edge/**'
+      - 'crates/rampage-mesh/**'
+      - 'crates/rampage-policy/**'
+      - 'crates/rampage-protocol/**'
+      - 'crates/rampage-storage/**'
+      - 'crates/tauri-plugin-rampage-edge/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/mobile-edge.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'apps/edge/**'
+      - 'crates/rampage-agent/**'
+      - 'crates/rampage-edge/**'
+      - 'crates/rampage-mesh/**'
+      - 'crates/rampage-policy/**'
+      - 'crates/rampage-protocol/**'
+      - 'crates/rampage-storage/**'
+      - 'crates/tauri-plugin-rampage-edge/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-edge-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android ARM64 foreground contributor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.8
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: dtolnay/rust-toolchain@ab40b01f54fe82bdf65693ea090a1e4942c136e7 # 1.91
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Install the bounded Android toolchain
+        env:
+          RAMPAGE_NDK_VERSION: 27.1.12297006
+        run: |
+          command -v sdkmanager
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' "ndk;${RAMPAGE_NDK_VERSION}"
+          echo "NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${RAMPAGE_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${RAMPAGE_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned Android candidate
+        env:
+          CI: 'true'
+        run: pnpm --dir apps/edge tauri android build --ci --apk --target aarch64
+
+      - name: Stage and verify Android candidate
+        run: |
+          mkdir -p output/mobile/android-arm64
+          apk="$(find apps/edge/src-tauri/gen/android/app/build/outputs -type f -name '*.apk' | head -n 1)"
+          test -n "$apk" && test -f "$apk"
+          cp "$apk" output/mobile/android-arm64/rampage-edge-android-arm64-unsigned.apk
+          file output/mobile/android-arm64/rampage-edge-android-arm64-unsigned.apk
+          unzip -t output/mobile/android-arm64/rampage-edge-android-arm64-unsigned.apk
+          (cd output/mobile/android-arm64 && sha256sum rampage-edge-android-arm64-unsigned.apk > SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rampage-edge-android-arm64-${{ github.sha }}
+          path: output/mobile/android-arm64
+          if-no-files-found: error
+
+  ios:
+    name: iOS simulator foreground contributor
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.8
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@ab40b01f54fe82bdf65693ea090a1e4942c136e7 # 1.91
+        with:
+          targets: aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Verify Apple mobile prerequisites
+        run: |
+          xcodebuild -version
+          command -v pod >/dev/null || brew install cocoapods
+          pod --version
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Generate the iOS project from committed contracts
+        env:
+          CI: 'true'
+        run: pnpm --dir apps/edge tauri ios init --ci --skip-targets-install
+
+      - name: Build unsigned Apple Silicon simulator candidate
+        env:
+          CI: 'true'
+        run: pnpm --dir apps/edge tauri ios build --ci --debug --target aarch64-sim --no-sign
+
+      - name: Stage and verify iOS simulator candidate
+        run: |
+          mkdir -p output/mobile/ios-simulator-arm64
+          app="$(find apps/edge/src-tauri/gen/apple -type d -name '*.app' | head -n 1)"
+          test -n "$app" && test -d "$app"
+          test -f "$app/Info.plist"
+          ditto -c -k --sequesterRsrc --keepParent "$app" output/mobile/ios-simulator-arm64/rampage-edge-ios-simulator-arm64-unsigned.zip
+          unzip -t output/mobile/ios-simulator-arm64/rampage-edge-ios-simulator-arm64-unsigned.zip
+          (cd output/mobile/ios-simulator-arm64 && shasum -a 256 rampage-edge-ios-simulator-arm64-unsigned.zip > SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rampage-edge-ios-simulator-arm64-${{ github.sha }}
+          path: output/mobile/ios-simulator-arm64
+          if-no-files-found: error
