@@ -161,6 +161,25 @@ surfaces, self-scan, and honest device roles.
 
 ![Rampage desktop showing the universal AI gateway, Maximum Model strategy, five-machine fabric grid, and a healthy autonomously thresholded self-scan](docs/assets/rampage-model-fabric-grid.png)
 
+## One fabric, many kinds of useful work
+
+“Universal” does not mean pretending that every program can consume remote RAM or VRAM. It means
+one signed capability language, one trust kernel, one evidence spine, and a growing set of qualified
+adapters that can move the *right unit of work* to the *right class of machine*.
+
+| Lane | Useful today | Expansion path and honest boundary |
+| --- | --- | --- |
+| Local AI | Discover installed Ollama models, select one qualified worker, stream a bounded chat through OpenAI, Anthropic Messages, or OpenRouter-style APIs, and return a transcript-matched receipt | Maximum Model can plan compatible aggregate memory, but cross-host tensor/pipeline execution stays blocked until an engine-specific adapter proves topology, recovery, and speed |
+| Agent swarms | Run independent searches, evaluations, transforms, and tool-safe shards concurrently; require a signed result and an explicit success threshold | New adapters inherit the same lease, nonce, epoch, STOP, and receipt contract rather than gaining ambient machine access |
+| Production | Place independent builds, renders, transcodes, simulations, preprocessing, and batch transforms where a shipped adapter advertises the exact operation | Interactive application memory does not become a network DIMM; large workflows must expose schedulable stages or engine-native distributed execution |
+| Gaming | Preserve the foreground gaming PC by routing eligible background AI, compilation, capture processing, media conversion, server simulation, and cache work elsewhere | Rampage does not claim that an arbitrary game can borrow another device's VRAM or increase FPS without game/engine support |
+| Phones and tablets | Contribute foreground-safe validation, scoring, preprocessing, cache, relay, sensor, and small-model tasks under thermal, battery, network, and restart-tolerance limits | Mobile packaging and platform qualification remain separate release gates; consoles additionally require platform-holder permission |
+| Donated storage | Encrypt, resume, verify, retrieve, and repair protected whole-artifact replicas across owner-controlled nodes | Current source caps an artifact at 64 MiB and uses full replicas; erasure coding and physical-loss campaigns are future qualification work |
+
+This separation is deliberate. Rampage can become broadly useful without selling users a fake
+shared-memory story, and every new backend must earn admission with deterministic tests and signed
+runtime evidence before the Governor can lease it.
+
 ## Recursively improving—without recursively expanding authority
 
 The intelligence plane runs a durable improvement loop:
