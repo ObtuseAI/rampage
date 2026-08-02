@@ -167,6 +167,10 @@ class RampageClient:
         )
         return base64.b64decode(response["data_base64"], validate=True)
 
+    def repair_protected_artifacts(self) -> dict[str, Any]:
+        """Reconcile protected replicas inside the configured autonomous authority envelope."""
+        return self._post("/v1/artifacts/repair", {})
+
     def wait_for_receipt(self, job_id: str, timeout_seconds: float = 120.0) -> dict[str, Any]:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:

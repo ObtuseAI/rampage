@@ -18,6 +18,8 @@ foreach ($required in @(
     'assets/rampage-model-fabric-grid.png',
     'assets/og-rampage.png',
     'architecture-graph',
+    'workload-section',
+    'UNIVERSAL, WITHOUT THE FICTION',
     'AI DIRECT AUTHORITY',
     'https://github.com/ObtuseAI/rampage/releases'
 )) {
@@ -26,7 +28,7 @@ foreach ($required in @(
     }
 }
 
-foreach ($required in @('```mermaid', 'docs/assets/rampage-arena-live.png', 'docs/assets/rampage-model-fabric-grid.png', 'Built—not imagined')) {
+foreach ($required in @('```mermaid', 'docs/assets/rampage-arena-live.png', 'docs/assets/rampage-model-fabric-grid.png', 'Built—not imagined', 'One fabric, many kinds of useful work')) {
     if (-not $readme.Contains($required)) {
         throw "README showcase is missing required content: $required"
     }

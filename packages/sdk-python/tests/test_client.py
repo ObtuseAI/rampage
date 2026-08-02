@@ -37,6 +37,34 @@ def test_artifact_upload_preserves_binary_content_and_token() -> None:
     assert result["digest"] == "sha256:test"
 
 
+def test_protected_storage_repair_stays_inside_autonomous_envelope() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/artifacts/repair"
+        assert request.method == "POST"
+        assert request.headers["x-rampage-token"] == "local-token"
+        return httpx.Response(
+            200,
+            json={
+                "schema": "rampage.protected-storage-reconciliation.v1",
+                "status": "reconciled",
+                "fresh_replica_receipts": 2,
+                "per_change_approval_required": False,
+                "authority_expansion": "denied",
+            },
+        )
+
+    client = RampageClient(token="local-token")
+    client._client.close()
+    client._client = httpx.Client(
+        base_url="http://127.0.0.1:47831",
+        headers={"x-rampage-token": "local-token"},
+        transport=httpx.MockTransport(handler),
+    )
+    result = client.repair_protected_artifacts()
+    assert result["fresh_replica_receipts"] == 2
+    assert result["authority_expansion"] == "denied"
+
+
 def test_topology_uses_the_token_protected_offer_route() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["x-rampage-token"] == "local-token"

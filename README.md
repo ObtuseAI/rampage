@@ -20,7 +20,8 @@ the authority to run wild.
 [Architecture](docs/ARCHITECTURE.md) ·
 [Security](SECURITY.md) ·
 [Release evidence](docs/RELEASE_EVIDENCE.md) ·
-[Owner-relay evidence](docs/OWNER_RELAY_EVIDENCE.md)
+[Owner-relay evidence](docs/OWNER_RELAY_EVIDENCE.md) ·
+[Resumable-storage evidence](docs/RESUMABLE_STORAGE_EVIDENCE.md)
 
 </div>
 
@@ -39,7 +40,7 @@ agent holding the keys to its own guardrails.
 | --- | --- |
 | A powerful desktop sits idle while another machine struggles | Place the whole job on the best available node |
 | Small machines cannot host the full workload | Give them restart-tolerant shards, preprocessing, evaluation, cache, or relay work |
-| Donated disks become brittle network mounts | Turn them into encrypted, content-addressed artifact capacity |
+| Donated disks become brittle network mounts | Turn them into encrypted, resumable, content-addressed artifact capacity with independently signed repair evidence |
 | “Autonomy” quietly becomes administrator access | Let intelligence propose; let deterministic Rust policy decide |
 | Distributed systems fail opaquely | Sign leases and receipts, fence stale work, and write every transition to a hash chain |
 | A kill switch depends on the system it is stopping | Keep STOP local, non-agentic, and independent of the controller and network |
@@ -49,14 +50,15 @@ agent holding the keys to its own guardrails.
 
 ## Built—not imagined
 
-Rampage 0.2 is a working Windows x64 release candidate with evidence for the paths it claims.
+Rampage 0.2 established the working Windows x64 release candidate. Current source adds later
+qualified milestones; the evidence links below distinguish source proofs from packaged 0.2 claims.
 
 | Proof surface | Validated result |
 | --- | --- |
-| Trust kernel | Scoped Ed25519 leases; durable one-shot nonces; restart-safe monotonic epochs; STOP fencing; fail-closed admission |
+| Trust kernel | Scoped Ed25519 leases; durable one-shot nonces; restart-safe monotonic epochs; crash-reconciled native STOP fencing; fail-closed admission and sidecar auth isolation |
 | OnePool | Three independent evaluation shards placed across bounded offers, completed with signed results, and recovered after restart |
 | Private mesh | Authenticated direct QUIC plus a forced-relay proof through the bundled owner-operated relay; no Tailscale account or silent public relay |
-| Storage fabric | Encrypted chunked CAS, signed storage leases, automatic input staging, replication, retrieval, and receipt outputs |
+| Storage fabric | Encrypted chunked CAS, flushed restart-resumable QUIC frames, full-content possession proofs, corruption quarantine, budgeted independent repair, staging, and retrieval |
 | Real AI workload | OpenAI, Anthropic Messages, and OpenRouter-style text requests crossed authenticated QUIC to a worker's loopback Ollama, streamed back, and ended in a transcript-matched signed receipt |
 | Universal capability contract | Signed offers advertise exact workload domain, adapter, operation, execution pattern, isolation, runtime digest, and qualification status; candidate profiles grant no authority |
 | Autonomous self-scan | Stable evidence digests cover routes, links, failures, denials, thermal/battery pressure, capability gaps, idle capacity, and protected-artifact replication |
@@ -70,6 +72,8 @@ and signed-canary campaign is recorded separately in
 [universal-compute evidence](docs/UNIVERSAL_COMPUTE_EVIDENCE.md). The self-hosted hard-NAT fallback
 and its forced-relay transport proof are recorded in
 [owner-relay evidence](docs/OWNER_RELAY_EVIDENCE.md).
+Restart-safe two-node protected storage, signed possession challenges, and autonomous repair are
+recorded in [resumable-storage evidence](docs/RESUMABLE_STORAGE_EVIDENCE.md).
 
 ## The design graph
 
@@ -87,7 +91,7 @@ flowchart LR
     W2 <--> M
     W3 <--> M
     M -. "hard-NAT fallback only" .-> R["Owner relay\nsigned admission · rate caps"]
-    M <--> A["Encrypted artifact fabric\ncontent-addressed · bounded"]
+    M <--> A["Encrypted artifact fabric\nresumable · content-addressed · self-repairing"]
     C --> E["Hash-chained evidence ledger"]
     G --> E
     W1 --> E
@@ -157,6 +161,25 @@ surfaces, self-scan, and honest device roles.
 
 ![Rampage desktop showing the universal AI gateway, Maximum Model strategy, five-machine fabric grid, and a healthy autonomously thresholded self-scan](docs/assets/rampage-model-fabric-grid.png)
 
+## One fabric, many kinds of useful work
+
+“Universal” does not mean pretending that every program can consume remote RAM or VRAM. It means
+one signed capability language, one trust kernel, one evidence spine, and a growing set of qualified
+adapters that can move the *right unit of work* to the *right class of machine*.
+
+| Lane | Useful today | Expansion path and honest boundary |
+| --- | --- | --- |
+| Local AI | Discover installed Ollama models, select one qualified worker, stream a bounded chat through OpenAI, Anthropic Messages, or OpenRouter-style APIs, and return a transcript-matched receipt | Maximum Model can plan compatible aggregate memory, but cross-host tensor/pipeline execution stays blocked until an engine-specific adapter proves topology, recovery, and speed |
+| Agent swarms | Run independent searches, evaluations, transforms, and tool-safe shards concurrently; require a signed result and an explicit success threshold | New adapters inherit the same lease, nonce, epoch, STOP, and receipt contract rather than gaining ambient machine access |
+| Production | Place independent builds, renders, transcodes, simulations, preprocessing, and batch transforms where a shipped adapter advertises the exact operation | Interactive application memory does not become a network DIMM; large workflows must expose schedulable stages or engine-native distributed execution |
+| Gaming | Preserve the foreground gaming PC by routing eligible background AI, compilation, capture processing, media conversion, server simulation, and cache work elsewhere | Rampage does not claim that an arbitrary game can borrow another device's VRAM or increase FPS without game/engine support |
+| Phones and tablets | Contribute foreground-safe validation, scoring, preprocessing, cache, relay, sensor, and small-model tasks under thermal, battery, network, and restart-tolerance limits | Mobile packaging and platform qualification remain separate release gates; consoles additionally require platform-holder permission |
+| Donated storage | Encrypt, resume, verify, retrieve, and repair protected whole-artifact replicas across owner-controlled nodes | Current source caps an artifact at 64 MiB and uses full replicas; erasure coding and physical-loss campaigns are future qualification work |
+
+This separation is deliberate. Rampage can become broadly useful without selling users a fake
+shared-memory story, and every new backend must earn admission with deterministic tests and signed
+runtime evidence before the Governor can lease it.
+
 ## Recursively improving—without recursively expanding authority
 
 The intelligence plane runs a durable improvement loop:
@@ -166,6 +189,10 @@ The intelligence plane runs a durable improvement loop:
 DBOS workflows make the process recoverable. Pydantic AI adapters produce typed proposals. Scientific
 memory keeps experiments content-addressed. Deterministic replay, holdouts, adversarial review,
 replication, shadow, and canary gates determine whether an idea earns promotion.
+
+The sidecar API fails closed when its authentication token is absent. The desktop gives it a fresh
+independent token rather than the controller credential, so proposal-plane compromise does not
+inherit controller admission, enrollment, STOP, storage, or lease authority.
 
 There is no per-change approval prompt inside an owner-defined autonomy envelope. Candidates that
 pass every deterministic threshold may request a signed, traffic-capped, epoch-fenced canary lease
@@ -251,6 +278,7 @@ Donated drives become explicit artifact capacity:
 ```powershell
 $artifact = rampage artifact-put .\dataset.bin | ConvertFrom-Json
 rampage artifact-replicate $artifact.digest NODE_ID
+rampage artifact-repair
 rampage artifact-hash $artifact.digest
 ```
 
@@ -264,7 +292,7 @@ rampage artifact-hash $artifact.digest
 | `rampage-agent` | Hardware discovery and allowlisted CPU/GPU/Ollama worker adapters |
 | `rampage-mesh` | Rampage-owned Iroh/QUIC identities and bounded remote control frames |
 | `rampage-relay` | Owner-hosted hard-NAT fallback with signed endpoint admission and resource limits |
-| `rampage-storage` | Encrypted, chunked content-addressed storage and durability classes |
+| `rampage-storage` | Encrypted, chunked CAS; durable resumable sessions; authenticated finalize; protected durability state |
 | `rampage-ledger` | Recoverable, paginated, hash-chained SQLite evidence |
 | `apps/desktop` | Tauri/React spatial Fabric Arena and accessible Ops Grid |
 | `services/intelligence` | Durable proposal-only DBOS/Pydantic AI improvement workflows |

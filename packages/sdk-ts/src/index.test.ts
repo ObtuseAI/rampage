@@ -247,4 +247,23 @@ describe("RampageClient", () => {
     expect(fetchMock.mock.calls[1]?.[0]).toBe("http://127.0.0.1:47831/v1/shard-sets/set-1");
     vi.unstubAllGlobals();
   });
+
+  it("requests autonomous protected-storage repair without authority expansion", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      schema: "rampage.protected-storage-reconciliation.v1",
+      status: "reconciled",
+      fresh_replica_receipts: 2,
+      per_change_approval_required: false,
+      authority_expansion: "denied",
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new RampageClient(undefined, "local-token");
+    const result = await client.repairProtectedArtifacts();
+    expect(result.fresh_replica_receipts).toBe(2);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:47831/v1/artifacts/repair");
+    expect(init.method).toBe("POST");
+    expect(new Headers(init.headers).get("x-rampage-token")).toBe("local-token");
+    vi.unstubAllGlobals();
+  });
 });

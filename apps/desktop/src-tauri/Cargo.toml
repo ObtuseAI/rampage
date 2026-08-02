@@ -20,6 +20,8 @@ tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-shell = "2"
 reqwest.workspace = true
+rand.workspace = true
+hex.workspace = true
 tokio.workspace = true
 sysinfo.workspace = true
 

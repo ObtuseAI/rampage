@@ -49,6 +49,40 @@ export interface ArtifactRef {
   encrypted: boolean;
 }
 
+export interface ArtifactReplicaReceipt {
+  schema: "rampage.artifact-replica-receipt.v1";
+  receipt_id: string;
+  session_id: string;
+  lease_id: string;
+  node_id: string;
+  digest: string;
+  size_bytes: number;
+  storage_class: StorageClass;
+  challenge_nonce: string;
+  verified_at: string;
+  expires_at: string;
+  fencing_epoch: number;
+  signature: string;
+}
+
+export interface ArtifactReplicationResult {
+  artifact: ArtifactRef;
+  node_id: string;
+  storage_lease_id: string;
+  transfer_session_id: string;
+  resumed_chunks: number;
+  chunk_count: number;
+  replica_receipt: ArtifactReplicaReceipt;
+}
+
+export interface ProtectedStorageReconciliation {
+  schema: "rampage.protected-storage-reconciliation.v1";
+  status: "reconciled";
+  fresh_replica_receipts: number;
+  per_change_approval_required: false;
+  authority_expansion: "denied";
+}
+
 export interface LinkBenchmark {
   schema: "rampage.link-benchmark.v1";
   controller_endpoint_id: string;
@@ -505,7 +539,7 @@ export class RampageClient {
     nodeId: string,
     mediaType = "application/octet-stream",
     storageClass: StorageClass = "cache",
-  ): Promise<{ artifact: ArtifactRef; node_id: string; storage_lease_id: string }> {
+  ): Promise<ArtifactReplicationResult> {
     return this.request(
       "/v1/artifacts/replicate",
       this.json({
@@ -515,6 +549,13 @@ export class RampageClient {
         storage_class: storageClass,
       }),
     );
+  }
+
+  repairProtectedArtifacts(): Promise<ProtectedStorageReconciliation> {
+    return this.request("/v1/artifacts/repair", {
+      method: "POST",
+      body: "{}",
+    });
   }
 
   async retrieveArtifact(digest: string, nodeId: string): Promise<Uint8Array> {

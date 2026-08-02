@@ -26,6 +26,7 @@
     <nav aria-label="Primary navigation">
       <a href="#proof">Proof</a>
       <a href="#model-fabric">Model Fabric</a>
+      <a href="#workloads">Workloads</a>
       <a href="#architecture">Design</a>
       <a href="#intelligence">Intelligence</a>
       <a href="https://github.com/ObtuseAI/rampage">Source</a>
@@ -51,7 +52,7 @@
         <div class="system-core"><span>R</span></div>
         <div class="satellite sat-a"><b>GPU</b><small>leased</small></div>
         <div class="satellite sat-b"><b>CPU</b><small>ready</small></div>
-        <div class="satellite sat-c"><b>CAS</b><small>sealed</small></div>
+        <div class="satellite sat-c"><b>CAS</b><small>resume · repair</small></div>
         <div class="satellite sat-d"><b>AI</b><small>propose</small></div>
       </div>
     </section>
@@ -83,7 +84,7 @@
       <div class="shift-grid">
         <article><span>01</span><h3>Pool useful work</h3><p>Move complete jobs to the right machine. Split independent evaluation, search, preprocessing, and rendering into atomic shard sets.</p></article>
         <article><span>02</span><h3>Lease exact resources</h3><p>CPU, VRAM, RAM, storage, runtime, thermal, and power capacity become scoped capabilities—not permanent ambient permission.</p></article>
-        <article><span>03</span><h3>Move sealed artifacts</h3><p>Donated drives become encrypted content-addressed capacity with signed transfer leases, bounded payloads, and verified digests.</p></article>
+        <article><span>03</span><h3>Move sealed artifacts</h3><p>Donated drives become encrypted content-addressed capacity with restart-resumable frames, signed possession challenges, and bounded autonomous repair.</p></article>
         <article><span>04</span><h3>Demand receipts</h3><p>Every accepted job returns a signed result. Every transition lands in a recoverable, hash-chained evidence ledger.</p></article>
       </div>
     </section>
@@ -114,7 +115,7 @@
           <div class="graph-node worker"><small>EDGE CLASS</small><strong>Small device</strong><span>bounded foreground work</span></div>
         </div>
         <div class="graph-row graph-foundation">
-          <div class="graph-node artifact"><small>DATA PLANE</small><strong>Encrypted artifact fabric</strong><span>CAS · replication · retrieval</span></div>
+          <div class="graph-node artifact"><small>DATA PLANE</small><strong>Encrypted artifact fabric</strong><span>resume · repair · receipt</span></div>
           <div class="graph-node ledger"><small>EVIDENCE SPINE</small><strong>Hash-chained ledger</strong><span>leases · receipts · recovery</span></div>
           <div class="graph-node stop"><small>OUT-OF-BAND</small><strong>Independent STOP</strong><span>no model · network · controller</span></div>
         </div>
@@ -150,6 +151,46 @@
       <p class="pool-note">Every contributor advertises an operation-exact signed capability contract. Old PCs can run complete jobs, shards, replicas, builds, renders, transcodes, simulations, cache, and storage when a shipped adapter proves it. A phone is not a pretend data-center GPU, but it can still preprocess, validate, score, cache, relay, or run a small model when foreground, thermal, battery, and restart-tolerance policy all agree.</p>
     </section>
 
+    <section class="section workload-section" id="workloads">
+      <div class="section-heading split-heading">
+        <div><p class="eyebrow">UNIVERSAL, WITHOUT THE FICTION</p><h2>One fabric.<br>Many useful lanes.</h2></div>
+        <p>Rampage does not claim that a network turns every remote byte into local RAM or VRAM. It standardizes identity, admission, placement, recovery, evidence, and STOP—then lets operation-specific adapters move work at the boundary that actually scales.</p>
+      </div>
+      <div class="workload-grid">
+        <article class="workload-card current">
+          <small>SHIPPED LANE</small><h3>Local AI</h3>
+          <p>Discover installed Ollama models, select an exact worker, and serve bounded text through OpenAI, Anthropic Messages, or OpenRouter-style clients.</p>
+          <ul><li>One-shot model-session lease</li><li>Authenticated QUIC streaming</li><li>Transcript-matched signed receipt</li></ul>
+        </article>
+        <article class="workload-card current">
+          <small>SHIPPED PRIMITIVE</small><h3>Agent swarms</h3>
+          <p>Scatter independent research, evaluation, preprocessing, and transformation work across eligible machines, then recover against an explicit success threshold.</p>
+          <ul><li>Atomic shard admission</li><li>Independent retry and recovery</li><li>No worker gains controller authority</li></ul>
+        </article>
+        <article class="workload-card qualified">
+          <small>ADAPTER-GATED</small><h3>Production</h3>
+          <p>Place builds, renders, transcodes, simulations, and batch stages near the compute or data they need—only when a shipped adapter proves the exact operation.</p>
+          <ul><li>Runtime digest and isolation contract</li><li>Data-local artifact movement</li><li>Candidate profiles grant no authority</li></ul>
+        </article>
+        <article class="workload-card qualified">
+          <small>FOREGROUND FIRST</small><h3>Gaming</h3>
+          <p>Keep the gaming PC responsive by moving eligible background AI, compilation, capture processing, conversion, cache, or server-simulation work elsewhere.</p>
+          <ul><li>Thermal and responsiveness envelopes</li><li>Speed lane rejects slow peers</li><li>No fake remote-VRAM FPS claim</li></ul>
+        </article>
+        <article class="workload-card bounded">
+          <small>EDGE-BOUNDED</small><h3>Phones + tablets</h3>
+          <p>Contribute scoring, validation, preprocessing, cache, relay, sensor, or small-model work only while battery, temperature, foreground, and restart policy agree.</p>
+          <ul><li>Useful work instead of pretend GPU pooling</li><li>Immediate revocation on policy pressure</li><li>Mobile packaging is still a release gate</li></ul>
+        </article>
+        <article class="workload-card current">
+          <small>PROTECTED DATA</small><h3>Donated storage</h3>
+          <p>Turn owner-controlled drives into encrypted content-addressed capacity that resumes after interruption and proves possession before it counts.</p>
+          <ul><li>Flushed 4 MiB resumable sessions</li><li>Two independent protected replicas</li><li>Bounded verification and repair</li></ul>
+        </article>
+      </div>
+      <div class="truth-line"><strong>What “universal” means:</strong> one trust contract everywhere; operation-specific proof before execution; no capability inferred from a device label.</div>
+    </section>
+
     <section class="section intelligence-section" id="intelligence">
       <div class="intelligence-copy">
         <p class="eyebrow">RECURSIVE INTELLIGENCE</p>
@@ -162,21 +203,21 @@
       <div class="authority-card">
         <p>AI DIRECT AUTHORITY</p>
         <strong>0</strong>
-        <span>No keys · no leases · no enrollment · no self-expanded envelope · no STOP bypass</span>
+        <span>Separate token · no controller keys · no leases · no enrollment · no self-expanded envelope · no STOP bypass</span>
       </div>
     </section>
 
-    <section class="section evidence">
+    <section class="section evidence" id="evidence">
       <div class="section-heading"><p class="eyebrow">NOT VAPORWARE</p><h2>Every big claim has a smaller proof.</h2></div>
       <div class="evidence-grid">
         <article><b>LEASE</b><h3>Exact durable authority</h3><p>The Governor signs only checked minimum resources. Workers persist consumed nonces and the highest authority epoch across restart.</p></article>
         <article><b>SHARD</b><h3>Atomic pooled work</h3><p>A complete set is planned against one reservation book and admitted all-or-nothing, with explicit success thresholds.</p></article>
         <article><b>MESH</b><h3>Direct first. Owner relayed.</h3><p>Signed peers use direct QUIC when possible. Hard NAT falls back only to the bundled owner relay, with a fresh Governor-signed allowlist and resource caps—never a silent public fleet.</p></article>
-        <article><b>CAS</b><h3>Encrypted donated storage</h3><p>One-shot signed transfer leases bind digest, direction, node, size, class, expiry, and fencing epoch.</p></article>
-        <article><b>RECEIPT</b><h3>Verifiable completion</h3><p>Workers sign the job result and artifact references; controller restart reconstructs durable status.</p></article>
-        <article><b>STOP</b><h3>Human-owned interruption</h3><p>Owner STOP advances the hash-chained epoch; old claims and receipts remain fenced after restart.</p></article>
+        <article><b>CAS</b><h3>Encrypted donated storage</h3><p>Flushed 4 MiB sessions resume after restart, quarantine objective corruption, and repair protected data to two independent workers.</p></article>
+        <article><b>RECEIPT</b><h3>Verifiable completion</h3><p>Workers sign job results and full-content possession challenges; rotating proof budgets keep autonomous verification bounded.</p></article>
+        <article><b>STOP</b><h3>Human-owned interruption</h3><p>Native STOP latches immediately and reconciles to a hash-chained epoch—even if a crash interrupts propagation.</p></article>
       </div>
-      <p class="pool-note">The relay proof turns off every direct IP transport on both test peers, leaving the owner service as the only possible route, then exchanges an authenticated QUIC payload. The honest boundary: public-WAN and every-NAT qualification still require a multi-network campaign.</p>
+      <p class="pool-note">The relay proof turns off every direct IP transport on both test peers, leaving the owner service as the only possible route. The storage proof interrupts a two-frame transfer, resumes it after a gateway and CAS restart, then repairs one protected artifact across two independently keyed workers. The honest boundary: public-WAN, every-NAT, and physical disk-loss qualification still require separate campaigns.</p>
     </section>
 
     <section class="section callout">
@@ -186,6 +227,7 @@
       <div class="hero-actions centered">
         <a class="button" href="https://github.com/ObtuseAI/rampage/releases">Get the Windows release</a>
         <a class="text-link" href="https://github.com/ObtuseAI/rampage">Inspect every line</a>
+        <a class="text-link" href="RESUMABLE_STORAGE_EVIDENCE.md">Read the latest proof</a>
       </div>
       <small>Trusted-circle release · public source inspection · proprietary license · unsigned binaries</small>
     </section>

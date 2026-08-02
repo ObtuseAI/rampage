@@ -3,10 +3,10 @@
 Rampage does not depend on Tailscale, a Tailscale account, or a third-party coordination plane.
 Its local API is loopback-only and protected by a random per-install token. Remote workers use the
 implemented `rampage-mesh` transport: authenticated direct QUIC, signed controller and worker
-endpoints, and separate versioned control and artifact ALPNs. Artifact transfers are capped at 64
-MiB, framed independently from JSON control traffic, content-address verified, and authorized by a
-Governor-signed storage lease scoped to node, digest, direction, size, class, expiry, and fencing
-epoch.
+endpoints, and separate versioned control and artifact ALPNs. Artifact protocol v2 caps one object
+at 64 MiB and one request or response payload at 4 MiB. Every frame is content-address verified and
+authorized by a Governor-signed storage lease scoped to node, digest, direction, size, class,
+expiry, and fencing epoch.
 
 Rampage intentionally uses Iroh as a low-level, open-source networking building block.
 Rampage owns device enrollment, peer allowlists, signed endpoint records, private relay selection,
@@ -29,6 +29,21 @@ controller verifies that its endpoint identity equals the enrolled identity befo
 worker artifact server accepts only the exact controller endpoint pinned by its enrollment invite.
 Inputs are staged before an execution lease becomes claimable; worker outputs remain encrypted in
 the donated CAS and appear as retrievable artifact references in the signed execution receipt.
+
+PUT sessions have deterministic peer/digest/direction IDs and persist their immutable contract,
+accepted chunk digests, and consumed renewal nonces beside the encrypted CAS. After either process
+restarts, the sender asks for the durable missing-chunk set and resumes without retransmitting
+accepted frames. Commit authenticates chunks incrementally, verifies the whole address and size,
+then atomically promotes the encrypted object. Retrieval uses a fresh GET lease for each bounded
+chunk, so a replay cannot read the next frame.
+
+A committed replica and each challenged HEAD probe return a possession receipt signed by the
+enrolled worker identity. For protected artifacts the controller counts only fresh receipts from
+distinct node IDs. A challenged HEAD authenticates all chunks and recomputes the full address; a
+single GET chunk produces no possession receipt. The rotating 60-second worklist is capped at four
+proofs/128 MiB and four repairs, and it cannot decide to repair from evidence deferred by that
+budget. Owner STOP suppresses both probing and repair. See
+[Resumable protected storage](RESUMABLE_STORAGE.md).
 
 ## Owner relay service
 

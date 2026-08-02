@@ -5,7 +5,8 @@ use chrono::{Duration, Utc};
 use clap::Parser;
 use ed25519_dalek::SigningKey;
 use rampage_protocol::{
-    ArtifactTransferOperation, ArtifactTransferResponseV1, AvailabilityV1, DeviceKind,
+    ArtifactRefV1, ArtifactReplicaReceiptV1, ArtifactTransferActionV2, ArtifactTransferProgressV1,
+    ArtifactTransferRequestV2, ArtifactTransferResponseV2, AvailabilityV1, DeviceKind,
     EnrollmentInviteV1, EnrollmentRequestV1, ExecutionReceiptV1, JobState,
     LINK_BENCHMARK_TRANSFER_BYTES, LinkBenchmarkV1, MAX_MODEL_OUTPUT_BYTES, MeshControlRequestV1,
     MeshEndpointRecordV1, ModelExecutionReceiptV1, ModelInvocationFrameKind,
@@ -16,8 +17,9 @@ use rand::{RngCore, rngs::OsRng};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
-    path::PathBuf,
+    fs::{self, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
     time::Instant,
 };
 use uuid::Uuid;
@@ -79,30 +81,18 @@ fn main() -> anyhow::Result<()> {
     }
     let device_kind = parse_device_kind(&args.device_kind)?;
     let signing_key = load_or_create_key(&args.key_file)?;
-    let artifact_store = std::sync::Arc::new(rampage_storage::CasStore::open(
-        data_dir.join("cas"),
-        load_or_create_secret(&data_dir.join("storage.key"))?,
-    )?);
     let identity_file = args.key_file.with_extension("identity.json");
     let (node_id, owner_id) =
         load_or_create_identity_ids(&identity_file, args.node_id, args.owner_id)?;
     let ollama_base_url = ollama_loopback_base_url()?;
     let invitation = if let Some(path) = &args.invite_file {
-        Some(serde_json::from_slice::<EnrollmentInviteV1>(&fs::read(
+        Some(read_json_file_bounded::<EnrollmentInviteV1>(
             path,
-        )?)?)
+            256 * 1024,
+        )?)
     } else {
         None
     };
-    let transport = ControllerTransport::new(
-        &args.controller,
-        invitation.as_ref(),
-        &signing_key,
-        &data_dir,
-        node_id,
-        artifact_store.clone(),
-        &ollama_base_url,
-    )?;
     let identity = NodeIdentityV1 {
         schema: "rampage.node-identity.v1".into(),
         node_id,
@@ -123,6 +113,31 @@ fn main() -> anyhow::Result<()> {
     );
     base_labels.insert("arch".into(), std::env::consts::ARCH.into());
     let discovered = discovery::discover(base_labels, &data_dir);
+    let storage_capacity = |class| {
+        discovered
+            .resources
+            .iter()
+            .find(|resource| resource.class == class)
+            .map_or(0, |resource| resource.available)
+    };
+    let artifact_store = std::sync::Arc::new(rampage_storage::CasStore::open_with_limits(
+        data_dir.join("cas"),
+        load_or_create_secret(&data_dir.join("storage.key"))?,
+        Some(rampage_storage::StorageLimits {
+            cache_bytes: storage_capacity(rampage_protocol::ResourceClass::StorageCache),
+            scratch_bytes: storage_capacity(rampage_protocol::ResourceClass::StorageScratch),
+            protected_bytes: storage_capacity(rampage_protocol::ResourceClass::ProtectedStore),
+        }),
+    )?);
+    let transport = ControllerTransport::new(
+        &args.controller,
+        invitation.as_ref(),
+        &signing_key,
+        &data_dir,
+        node_id,
+        artifact_store.clone(),
+        &ollama_base_url,
+    )?;
     let now = Utc::now();
     let mut adapters = BTreeSet::from([
         "rampage.echo.v1".into(),
@@ -323,7 +338,7 @@ fn load_or_create_identity_ids(
     requested_owner_id: Option<Uuid>,
 ) -> anyhow::Result<(Uuid, Uuid)> {
     if path.is_file() {
-        let existing: IdentityIds = serde_json::from_slice(&fs::read(path)?)?;
+        let existing: IdentityIds = read_json_file_bounded(path, 16 * 1024)?;
         if requested_node_id.is_some_and(|value| value != existing.node_id)
             || requested_owner_id.is_some_and(|value| value != existing.owner_id)
         {
@@ -339,23 +354,34 @@ fn load_or_create_identity_ids(
     Ok((identity.node_id, identity.owner_id))
 }
 
-fn load_or_create_key(path: &PathBuf) -> anyhow::Result<SigningKey> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if path.is_file() {
-        let bytes = hex::decode(fs::read_to_string(path)?.trim())?;
-        let key: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("agent key must contain exactly 32 bytes"))?;
-        return Ok(SigningKey::from_bytes(&key));
-    }
-    let mut key = [0_u8; 32];
-    OsRng.fill_bytes(&mut key);
-    let temporary = path.with_extension("key.tmp");
-    fs::write(&temporary, hex::encode(key))?;
-    fs::rename(temporary, path)?;
-    Ok(SigningKey::from_bytes(&key))
+fn read_json_file_bounded<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+    max_bytes: u64,
+) -> anyhow::Result<T> {
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(metadata.is_file(), "JSON input must be a regular file");
+    anyhow::ensure!(
+        metadata.len() <= max_bytes,
+        "JSON input exceeds the {max_bytes} byte limit"
+    );
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    Read::by_ref(&mut file)
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= max_bytes,
+        "JSON input exceeds the {max_bytes} byte limit"
+    );
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+    Ok(serde_json::from_slice(bytes)?)
+}
+
+fn load_or_create_key(path: &Path) -> anyhow::Result<SigningKey> {
+    Ok(SigningKey::from_bytes(&load_or_create_secret_bytes(
+        path,
+        "agent signing key",
+    )?))
 }
 
 enum ControllerTransport {
@@ -683,6 +709,79 @@ fn validate_probe_response(
     Ok(())
 }
 
+struct ArtifactOperationResult {
+    request_id: Uuid,
+    artifact: Option<ArtifactRefV1>,
+    progress: Option<ArtifactTransferProgressV1>,
+    chunk_index: Option<u32>,
+    chunk_digest: Option<String>,
+    replica_receipt: Option<ArtifactReplicaReceiptV1>,
+    payload: Vec<u8>,
+}
+
+fn resumable_spec(request: &ArtifactTransferRequestV2) -> rampage_storage::ResumablePutSpec {
+    rampage_storage::ResumablePutSpec {
+        session_id: request.session_id.simple().to_string(),
+        lease_id: request.lease.lease_id.simple().to_string(),
+        authority_scope: "governor".into(),
+        fencing_epoch: request.lease.fencing_epoch,
+        authority_nonce: request.lease.nonce.clone(),
+        expires_at: request.lease.expires_at,
+        digest: request.lease.digest.clone(),
+        size_bytes: request.lease.size_bytes,
+        media_type: request.media_type.clone(),
+        storage_class: request.lease.storage_class,
+        required_replicas: if request.lease.storage_class == StorageClass::Protected {
+            2
+        } else {
+            1
+        },
+        chunk_size: request.chunk_size,
+    }
+}
+
+fn transfer_progress(
+    session_id: Uuid,
+    status: rampage_storage::ResumablePutStatus,
+) -> ArtifactTransferProgressV1 {
+    ArtifactTransferProgressV1 {
+        schema: ArtifactTransferProgressV1::SCHEMA.into(),
+        session_id,
+        digest: status.digest,
+        size_bytes: status.size_bytes,
+        chunk_size: status.chunk_size,
+        chunk_count: status.chunk_count,
+        received_chunks: status.received_chunks,
+        missing_chunks: status.missing_chunks,
+        complete: status.complete,
+    }
+}
+
+fn signed_replica_receipt(
+    request: &ArtifactTransferRequestV2,
+    node_id: Uuid,
+    signing_key: &SigningKey,
+) -> ArtifactReplicaReceiptV1 {
+    let verified_at = Utc::now();
+    let mut receipt = ArtifactReplicaReceiptV1 {
+        schema: ArtifactReplicaReceiptV1::SCHEMA.into(),
+        receipt_id: Uuid::now_v7(),
+        session_id: request.session_id,
+        lease_id: request.lease.lease_id,
+        node_id,
+        digest: request.lease.digest.clone(),
+        size_bytes: request.lease.size_bytes,
+        storage_class: request.lease.storage_class,
+        challenge_nonce: request.challenge_nonce.clone(),
+        verified_at,
+        expires_at: verified_at + Duration::minutes(10),
+        fencing_epoch: request.lease.fencing_epoch,
+        signature: String::new(),
+    };
+    rampage_policy::sign_artifact_replica_receipt(signing_key, &mut receipt);
+    receipt
+}
+
 async fn serve_worker_gateway(
     endpoint: iroh::Endpoint,
     controller_endpoint_id: String,
@@ -727,6 +826,7 @@ async fn serve_worker_gateway(
             while let Ok((mut send, mut receive)) = connection.accept_bi().await {
                 let store = store.clone();
                 let governor_public_key = governor_public_key.clone();
+                let signing_key = signing_key.clone();
                 tokio::spawn(async move {
                     let parsed = rampage_mesh::read_artifact_request(&mut receive).await;
                     let response_request_id = parsed
@@ -746,71 +846,155 @@ async fn serve_worker_gateway(
                                     .is_active_at(Utc::now(), request.lease.fencing_epoch),
                             "storage lease is not active for this node"
                         );
-                        store.accept_authority(
-                            "governor",
-                            request.lease.fencing_epoch,
-                            &request.lease.nonce,
-                            request.lease.expires_at,
-                        )?;
-                        match request.lease.operation {
-                            ArtifactTransferOperation::Put => {
-                                let required_replicas =
-                                    if request.lease.storage_class == StorageClass::Protected {
-                                        2
-                                    } else {
-                                        1
-                                    };
-                                let artifact = store.put(
+                        match request.action {
+                            ArtifactTransferActionV2::Begin | ArtifactTransferActionV2::Status => {
+                                let status =
+                                    store.begin_resumable_put(&resumable_spec(&request))?;
+                                Ok(ArtifactOperationResult {
+                                    request_id: request.request_id,
+                                    artifact: None,
+                                    progress: Some(transfer_progress(request.session_id, status)),
+                                    chunk_index: None,
+                                    chunk_digest: None,
+                                    replica_receipt: None,
+                                    payload: Vec::new(),
+                                })
+                            }
+                            ArtifactTransferActionV2::PutChunk => {
+                                store.begin_resumable_put(&resumable_spec(&request))?;
+                                let index = request.chunk_index.expect("validated chunk index");
+                                let digest = request
+                                    .chunk_digest
+                                    .as_deref()
+                                    .expect("validated chunk digest");
+                                let status = store.put_resumable_chunk(
+                                    &request.session_id.simple().to_string(),
+                                    index,
+                                    digest,
                                     &payload,
-                                    rampage_storage::PutOptions {
-                                        media_type: request.media_type,
-                                        storage_class: request.lease.storage_class,
-                                        required_replicas,
-                                    },
+                                )?;
+                                Ok(ArtifactOperationResult {
+                                    request_id: request.request_id,
+                                    artifact: None,
+                                    progress: Some(transfer_progress(request.session_id, status)),
+                                    chunk_index: Some(index),
+                                    chunk_digest: Some(digest.into()),
+                                    replica_receipt: None,
+                                    payload: Vec::new(),
+                                })
+                            }
+                            ArtifactTransferActionV2::Commit => {
+                                store.begin_resumable_put(&resumable_spec(&request))?;
+                                let artifact = store.commit_resumable_put(
+                                    &request.session_id.simple().to_string(),
                                 )?;
                                 anyhow::ensure!(
                                     artifact.digest == request.lease.digest
                                         && artifact.size_bytes == request.lease.size_bytes,
                                     "stored artifact did not match its lease"
                                 );
-                                Ok((request.request_id, artifact, Vec::new()))
+                                let receipt =
+                                    signed_replica_receipt(&request, node_id, &signing_key);
+                                Ok(ArtifactOperationResult {
+                                    request_id: request.request_id,
+                                    artifact: Some(artifact),
+                                    progress: Some(transfer_progress(
+                                        request.session_id,
+                                        store.resumable_put_status(
+                                            &request.session_id.simple().to_string(),
+                                        )?,
+                                    )),
+                                    chunk_index: None,
+                                    chunk_digest: None,
+                                    replica_receipt: Some(receipt),
+                                    payload: Vec::new(),
+                                })
                             }
-                            ArtifactTransferOperation::Get => {
+                            ArtifactTransferActionV2::GetChunk => {
+                                store.accept_authority(
+                                    "governor",
+                                    request.lease.fencing_epoch,
+                                    &request.lease.nonce,
+                                    request.lease.expires_at,
+                                )?;
                                 let stored = store.head(&request.lease.digest)?;
                                 anyhow::ensure!(
                                     stored.storage_class == request.lease.storage_class
                                         && stored.size_bytes == request.lease.size_bytes,
                                     "stored artifact metadata did not match its lease"
                                 );
-                                let payload = store.get(&request.lease.digest)?;
+                                let index = request.chunk_index.expect("validated chunk index");
+                                let chunk = store.get_chunk(&request.lease.digest, index)?;
+                                let digest =
+                                    format!("sha256:{}", hex::encode(Sha256::digest(&chunk)));
+                                Ok(ArtifactOperationResult {
+                                    request_id: request.request_id,
+                                    artifact: Some(stored),
+                                    progress: None,
+                                    chunk_index: Some(index),
+                                    chunk_digest: Some(digest),
+                                    replica_receipt: None,
+                                    payload: chunk,
+                                })
+                            }
+                            ArtifactTransferActionV2::Head => {
+                                store.accept_authority(
+                                    "governor",
+                                    request.lease.fencing_epoch,
+                                    &request.lease.nonce,
+                                    request.lease.expires_at,
+                                )?;
+                                let stored = store.verify(&request.lease.digest)?;
                                 anyhow::ensure!(
-                                    payload.len() as u64 == request.lease.size_bytes,
-                                    "stored artifact size did not match its lease"
+                                    stored.storage_class == request.lease.storage_class
+                                        && stored.size_bytes == request.lease.size_bytes,
+                                    "stored artifact metadata did not match its lease"
                                 );
-                                Ok((request.request_id, stored, payload))
+                                let receipt =
+                                    signed_replica_receipt(&request, node_id, &signing_key);
+                                Ok(ArtifactOperationResult {
+                                    request_id: request.request_id,
+                                    artifact: Some(stored),
+                                    progress: None,
+                                    chunk_index: None,
+                                    chunk_digest: None,
+                                    replica_receipt: Some(receipt),
+                                    payload: Vec::new(),
+                                })
                             }
                         }
                     }
                     .await;
                     let (response, payload) = match result {
-                        Ok((request_id, artifact, payload)) => (
-                            ArtifactTransferResponseV1 {
-                                schema: ArtifactTransferResponseV1::SCHEMA.into(),
-                                request_id,
-                                status: 200,
-                                artifact: Some(artifact),
-                                payload_size: payload.len() as u64,
-                                error: None,
-                            },
-                            payload,
-                        ),
+                        Ok(result) => {
+                            let payload = result.payload;
+                            (
+                                ArtifactTransferResponseV2 {
+                                    schema: ArtifactTransferResponseV2::SCHEMA.into(),
+                                    request_id: result.request_id,
+                                    status: 200,
+                                    artifact: result.artifact,
+                                    progress: result.progress,
+                                    chunk_index: result.chunk_index,
+                                    chunk_digest: result.chunk_digest,
+                                    payload_size: payload.len() as u64,
+                                    replica_receipt: result.replica_receipt,
+                                    error: None,
+                                },
+                                payload,
+                            )
+                        }
                         Err(error) => (
-                            ArtifactTransferResponseV1 {
-                                schema: ArtifactTransferResponseV1::SCHEMA.into(),
+                            ArtifactTransferResponseV2 {
+                                schema: ArtifactTransferResponseV2::SCHEMA.into(),
                                 request_id: response_request_id,
                                 status: 400,
                                 artifact: None,
+                                progress: None,
+                                chunk_index: None,
+                                chunk_digest: None,
                                 payload_size: 0,
+                                replica_receipt: None,
                                 error: Some(error.to_string()),
                             },
                             Vec::new(),
@@ -1200,21 +1384,73 @@ fn utf8_chunks(value: &str, max_bytes: usize) -> Vec<&str> {
 }
 
 fn load_or_create_secret(path: &std::path::Path) -> anyhow::Result<[u8; 32]> {
+    load_or_create_secret_bytes(path, "agent storage secret")
+}
+
+fn load_or_create_secret_bytes(path: &std::path::Path, label: &str) -> anyhow::Result<[u8; 32]> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    if path.is_file() {
-        let bytes = hex::decode(fs::read_to_string(path)?.trim())?;
-        return bytes
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("secret must contain exactly 32 bytes"));
+    match fs::symlink_metadata(path) {
+        Ok(_) => return read_secret_file(path, label),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     let mut bytes = [0_u8; 32];
     OsRng.fill_bytes(&mut bytes);
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, hex::encode(bytes))?;
-    fs::rename(temporary, path)?;
-    Ok(bytes)
+    let encoded = hex::encode(bytes);
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(mut file) => {
+            file.write_all(encoded.as_bytes())?;
+            file.sync_all()?;
+            sync_parent_directory(path)?;
+            Ok(bytes)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_secret_file(path, label)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_secret_file(path: &std::path::Path, label: &str) -> anyhow::Result<[u8; 32]> {
+    let metadata = fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        !metadata.file_type().is_symlink() && metadata.is_file(),
+        "{label} must be a regular non-symlink file"
+    );
+    anyhow::ensure!(metadata.len() <= 128, "{label} exceeds its size limit");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        if metadata.mode() & 0o077 != 0 {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    let bytes = hex::decode(fs::read_to_string(path)?.trim())?;
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{label} must contain exactly 32 bytes"))
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &std::path::Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 impl MeshController {
@@ -1270,9 +1506,9 @@ mod tests {
         routing::{get, post},
     };
     use rampage_protocol::{
-        InstalledModelV1, ModelBackend, ModelChatMessageV1, ModelMemoryKind, ModelParallelism,
-        ModelRuntimeOfferV1, ModelRuntimeStatus, ModelSessionLeaseV1, ResourceClass,
-        ResourceQuantityV1,
+        ARTIFACT_TRANSFER_CHUNK_BYTES, ArtifactTransferOperation, InstalledModelV1, ModelBackend,
+        ModelChatMessageV1, ModelMemoryKind, ModelParallelism, ModelRuntimeOfferV1,
+        ModelRuntimeStatus, ModelSessionLeaseV1, ResourceClass, ResourceQuantityV1,
     };
 
     async fn fake_tags() -> Json<serde_json::Value> {
@@ -1548,5 +1784,179 @@ mod tests {
         worker.close().await;
         gateway.abort();
         ollama.abort();
+    }
+
+    #[tokio::test]
+    async fn encrypted_mesh_put_resumes_after_worker_gateway_and_store_restart() {
+        let governor =
+            rampage_policy::Governor::ephemeral(rampage_policy::GovernorConfig::default());
+        let governor_key = hex::encode(governor.verifying_key().to_bytes());
+        let controller =
+            rampage_mesh::bind_endpoint([81_u8; 32], &rampage_mesh::MeshConfig::default())
+                .await
+                .unwrap();
+        let agent_key = SigningKey::from_bytes(&[82_u8; 32]);
+        let worker =
+            rampage_mesh::bind_endpoint(agent_key.to_bytes(), &rampage_mesh::MeshConfig::default())
+                .await
+                .unwrap();
+        let node_id = Uuid::now_v7();
+        let temp = tempfile::tempdir().unwrap();
+        let store =
+            std::sync::Arc::new(rampage_storage::CasStore::open(temp.path(), [83_u8; 32]).unwrap());
+        let gateway = tokio::spawn(serve_worker_gateway(
+            worker.clone(),
+            controller.id().to_string(),
+            node_id,
+            governor_key.clone(),
+            store.clone(),
+            agent_key.clone(),
+            "http://127.0.0.1:11434".into(),
+        ));
+        let now = Utc::now();
+        let offer = ResourceOfferV1 {
+            schema: "rampage.resource-offer.v1".into(),
+            offer_id: Uuid::now_v7(),
+            node_id,
+            observed_at: now,
+            expires_at: now + Duration::minutes(2),
+            resources: vec![ResourceQuantityV1 {
+                class: ResourceClass::ProtectedStore,
+                capacity: 16 * 1024 * 1024,
+                available: 16 * 1024 * 1024,
+                unit: "byte".into(),
+                labels: BTreeMap::new(),
+            }],
+            availability: AvailabilityV1 {
+                on_ac_power: true,
+                battery_percent: None,
+                thermal_headroom_percent: 80,
+                foreground_allowed: true,
+                owner_idle: true,
+            },
+            adapters: BTreeSet::new(),
+            workload_capabilities: Vec::new(),
+            model_runtimes: Vec::new(),
+            link_benchmark: None,
+            mesh_endpoint: None,
+            signature: "test".into(),
+        };
+        let payload = vec![57_u8; ARTIFACT_TRANSFER_CHUNK_BYTES as usize + 31];
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(&payload)));
+        let lease = governor
+            .authorize_storage_at_epoch(
+                &offer,
+                &digest,
+                payload.len() as u64,
+                StorageClass::Protected,
+                ArtifactTransferOperation::Put,
+                7,
+            )
+            .unwrap();
+        let session_id = Uuid::now_v7();
+        let context = |destination: iroh::EndpointAddr, challenge_nonce: &str| {
+            rampage_mesh::ArtifactTransferContext {
+                destination,
+                lease: lease.clone(),
+                media_type: "application/octet-stream".into(),
+                session_id,
+                challenge_nonce: challenge_nonce.into(),
+            }
+        };
+        let started =
+            rampage_mesh::artifact_put(&controller, context(worker.addr(), "start-before-restart"))
+                .await
+                .unwrap();
+        assert_eq!(started.missing_chunks, vec![0, 1]);
+        let first = &payload[..ARTIFACT_TRANSFER_CHUNK_BYTES as usize];
+        let after_first = rampage_mesh::artifact_put_chunk(
+            &controller,
+            context(worker.addr(), "chunk-before-restart"),
+            0,
+            format!("sha256:{}", hex::encode(Sha256::digest(first))),
+            first,
+        )
+        .await
+        .unwrap();
+        assert_eq!(after_first.received_chunks, vec![0]);
+
+        gateway.abort();
+        worker.close().await;
+        drop(store);
+
+        let reopened =
+            std::sync::Arc::new(rampage_storage::CasStore::open(temp.path(), [83_u8; 32]).unwrap());
+        let restarted_worker =
+            rampage_mesh::bind_endpoint(agent_key.to_bytes(), &rampage_mesh::MeshConfig::default())
+                .await
+                .unwrap();
+        let restarted_gateway = tokio::spawn(serve_worker_gateway(
+            restarted_worker.clone(),
+            controller.id().to_string(),
+            node_id,
+            governor_key,
+            reopened.clone(),
+            agent_key.clone(),
+            "http://127.0.0.1:11434".into(),
+        ));
+        let resumed = rampage_mesh::artifact_put(
+            &controller,
+            context(restarted_worker.addr(), "resume-after-restart"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed.received_chunks, vec![0]);
+        assert_eq!(resumed.missing_chunks, vec![1]);
+        let second = &payload[ARTIFACT_TRANSFER_CHUNK_BYTES as usize..];
+        rampage_mesh::artifact_put_chunk(
+            &controller,
+            context(restarted_worker.addr(), "chunk-after-restart"),
+            1,
+            format!("sha256:{}", hex::encode(Sha256::digest(second))),
+            second,
+        )
+        .await
+        .unwrap();
+        let challenge = "commit-after-restart";
+        let (artifact, receipt) =
+            rampage_mesh::artifact_commit(&controller, context(restarted_worker.addr(), challenge))
+                .await
+                .unwrap();
+        assert_eq!(artifact.digest, digest);
+        assert_eq!(receipt.challenge_nonce, challenge);
+        let identity = NodeIdentityV1 {
+            schema: "rampage.node-identity.v1".into(),
+            node_id,
+            owner_id: Uuid::now_v7(),
+            display_name: "restarted-worker".into(),
+            device_kind: DeviceKind::Desktop,
+            platform: "test".into(),
+            public_key: hex::encode(agent_key.verifying_key().to_bytes()),
+            enrolled_at: now,
+            fencing_epoch: 7,
+        };
+        assert!(rampage_policy::verify_artifact_replica_receipt(&identity, &receipt).is_ok());
+        assert_eq!(reopened.get(&digest).unwrap(), payload);
+
+        restarted_gateway.abort();
+        restarted_worker.close().await;
+        controller.close().await;
+    }
+
+    #[test]
+    fn bounded_json_loader_accepts_windows_utf8_bom_and_rejects_oversize() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("identity.json");
+        let expected = IdentityIds {
+            node_id: Uuid::now_v7(),
+            owner_id: Uuid::now_v7(),
+        };
+        let mut encoded = vec![0xEF, 0xBB, 0xBF];
+        encoded.extend(serde_json::to_vec(&expected).unwrap());
+        fs::write(&path, encoded).unwrap();
+        let parsed: IdentityIds = read_json_file_bounded(&path, 1024).unwrap();
+        assert_eq!(parsed.node_id, expected.node_id);
+        assert_eq!(parsed.owner_id, expected.owner_id);
+        assert!(read_json_file_bounded::<IdentityIds>(&path, 8).is_err());
     }
 }

@@ -894,6 +894,218 @@ impl ArtifactTransferResponseV1 {
     pub const SCHEMA: &'static str = "rampage.artifact-transfer-response.v1";
 }
 
+/// Bounded, restart-safe artifact transfer operations. A PUT session may reuse one exact signed
+/// lease for idempotent chunk retries; GET_CHUNK and HEAD consume a fresh signed lease per request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactTransferActionV2 {
+    Begin,
+    Status,
+    PutChunk,
+    Commit,
+    GetChunk,
+    Head,
+}
+
+pub const ARTIFACT_TRANSFER_CHUNK_BYTES: u32 = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactTransferRequestV2 {
+    pub schema: String,
+    pub request_id: Uuid,
+    pub session_id: Uuid,
+    pub lease: StorageLeaseV1,
+    pub media_type: String,
+    pub action: ArtifactTransferActionV2,
+    pub chunk_size: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_digest: Option<String>,
+    pub payload_size: u64,
+    pub challenge_nonce: String,
+}
+
+impl ArtifactTransferRequestV2 {
+    pub const SCHEMA: &'static str = "rampage.artifact-transfer-request.v2";
+
+    pub fn is_valid(&self) -> bool {
+        if self.schema != Self::SCHEMA
+            || self.request_id.is_nil()
+            || self.session_id.is_nil()
+            || self.lease.schema != StorageLeaseV1::SCHEMA
+            || self.lease.size_bytes == 0
+            || self.lease.size_bytes > MAX_ARTIFACT_TRANSFER_BYTES
+            || self.media_type.is_empty()
+            || self.media_type.len() > 255
+            || !self.media_type.is_ascii()
+            || self.chunk_size != ARTIFACT_TRANSFER_CHUNK_BYTES
+            || self.challenge_nonce.is_empty()
+            || self.challenge_nonce.len() > 128
+            || !self.challenge_nonce.is_ascii()
+        {
+            return false;
+        }
+        let chunk_count = self.lease.size_bytes.div_ceil(u64::from(self.chunk_size));
+        match self.action {
+            ArtifactTransferActionV2::Begin
+            | ArtifactTransferActionV2::Status
+            | ArtifactTransferActionV2::Commit => {
+                self.lease.operation == ArtifactTransferOperation::Put
+                    && self.chunk_index.is_none()
+                    && self.chunk_digest.is_none()
+                    && self.payload_size == 0
+            }
+            ArtifactTransferActionV2::Head => {
+                self.lease.operation == ArtifactTransferOperation::Get
+                    && self.chunk_index.is_none()
+                    && self.chunk_digest.is_none()
+                    && self.payload_size == 0
+            }
+            ArtifactTransferActionV2::PutChunk => {
+                self.lease.operation == ArtifactTransferOperation::Put
+                    && self
+                        .chunk_index
+                        .is_some_and(|index| u64::from(index) < chunk_count)
+                    && self.chunk_digest.as_deref().is_some_and(is_sha256_digest)
+                    && self.payload_size
+                        == expected_artifact_chunk_size(
+                            self.lease.size_bytes,
+                            self.chunk_size,
+                            self.chunk_index.unwrap_or_default(),
+                        )
+                        .unwrap_or_default()
+            }
+            ArtifactTransferActionV2::GetChunk => {
+                self.lease.operation == ArtifactTransferOperation::Get
+                    && self
+                        .chunk_index
+                        .is_some_and(|index| u64::from(index) < chunk_count)
+                    && self.chunk_digest.is_none()
+                    && self.payload_size == 0
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactTransferProgressV1 {
+    pub schema: String,
+    pub session_id: Uuid,
+    pub digest: String,
+    pub size_bytes: u64,
+    pub chunk_size: u32,
+    pub chunk_count: u32,
+    pub received_chunks: Vec<u32>,
+    pub missing_chunks: Vec<u32>,
+    pub complete: bool,
+}
+
+impl ArtifactTransferProgressV1 {
+    pub const SCHEMA: &'static str = "rampage.artifact-transfer-progress.v1";
+
+    pub fn is_valid(&self) -> bool {
+        self.schema == Self::SCHEMA
+            && !self.session_id.is_nil()
+            && is_sha256_digest(&self.digest)
+            && self.size_bytes > 0
+            && self.size_bytes <= MAX_ARTIFACT_TRANSFER_BYTES
+            && self.chunk_size == ARTIFACT_TRANSFER_CHUNK_BYTES
+            && self.chunk_count
+                == u32::try_from(self.size_bytes.div_ceil(u64::from(self.chunk_size)))
+                    .unwrap_or_default()
+            && self
+                .received_chunks
+                .iter()
+                .chain(&self.missing_chunks)
+                .all(|index| *index < self.chunk_count)
+    }
+}
+
+/// Node-signed proof that an exact content-addressed artifact was authenticated at a specific
+/// fencing epoch in response to the controller's fresh challenge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactReplicaReceiptV1 {
+    pub schema: String,
+    pub receipt_id: Uuid,
+    pub session_id: Uuid,
+    pub lease_id: Uuid,
+    pub node_id: Uuid,
+    pub digest: String,
+    pub size_bytes: u64,
+    pub storage_class: StorageClass,
+    pub challenge_nonce: String,
+    pub verified_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub fencing_epoch: u64,
+    pub signature: String,
+}
+
+impl ArtifactReplicaReceiptV1 {
+    pub const SCHEMA: &'static str = "rampage.artifact-replica-receipt.v1";
+
+    pub fn is_valid_at(&self, now: DateTime<Utc>) -> bool {
+        self.schema == Self::SCHEMA
+            && !self.receipt_id.is_nil()
+            && !self.session_id.is_nil()
+            && !self.lease_id.is_nil()
+            && !self.node_id.is_nil()
+            && is_sha256_digest(&self.digest)
+            && self.size_bytes > 0
+            && self.size_bytes <= MAX_ARTIFACT_TRANSFER_BYTES
+            && !self.challenge_nonce.is_empty()
+            && self.challenge_nonce.len() <= 128
+            && self.challenge_nonce.is_ascii()
+            && self.verified_at <= now
+            && now < self.expires_at
+            && self.expires_at - self.verified_at <= chrono::Duration::minutes(15)
+            && !self.signature.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactTransferResponseV2 {
+    pub schema: String,
+    pub request_id: Uuid,
+    pub status: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<ArtifactRefV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ArtifactTransferProgressV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_digest: Option<String>,
+    pub payload_size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_receipt: Option<ArtifactReplicaReceiptV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ArtifactTransferResponseV2 {
+    pub const SCHEMA: &'static str = "rampage.artifact-transfer-response.v2";
+}
+
+pub fn expected_artifact_chunk_size(
+    size_bytes: u64,
+    chunk_size: u32,
+    chunk_index: u32,
+) -> Option<u64> {
+    if size_bytes == 0 || chunk_size == 0 {
+        return None;
+    }
+    let offset = u64::from(chunk_index).checked_mul(u64::from(chunk_size))?;
+    if offset >= size_bytes {
+        return None;
+    }
+    Some((size_bytes - offset).min(u64::from(chunk_size)))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnrollmentRequestV1 {
@@ -1062,9 +1274,12 @@ pub enum ContractError {
 }
 
 fn is_sha256_digest(value: &str) -> bool {
-    value
-        .strip_prefix("sha256:")
-        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 impl JobSpecV1 {
@@ -1148,6 +1363,12 @@ impl CapabilityLeaseV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sha256_contracts_require_canonical_lowercase_hex() {
+        assert!(is_sha256_digest(&format!("sha256:{}", "a".repeat(64))));
+        assert!(!is_sha256_digest(&format!("sha256:{}", "A".repeat(64))));
+    }
     use chrono::Duration;
 
     #[test]
@@ -1478,5 +1699,47 @@ mod tests {
         manifest.allowed_endpoint_ids.remove("not-an-endpoint");
         manifest.expires_at = now + chrono::Duration::minutes(16);
         assert!(!manifest.is_valid_at(now));
+    }
+
+    #[test]
+    fn artifact_v2_frames_are_chunk_bounded_and_operation_exact() {
+        let now = Utc::now();
+        let lease = StorageLeaseV1 {
+            schema: StorageLeaseV1::SCHEMA.into(),
+            lease_id: Uuid::now_v7(),
+            node_id: Uuid::now_v7(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            operation: ArtifactTransferOperation::Put,
+            storage_class: StorageClass::Protected,
+            size_bytes: u64::from(ARTIFACT_TRANSFER_CHUNK_BYTES) + 17,
+            issued_at: now,
+            expires_at: now + chrono::Duration::minutes(2),
+            nonce: "one-shot".into(),
+            fencing_epoch: 9,
+            signature: "signed".into(),
+        };
+        let mut request = ArtifactTransferRequestV2 {
+            schema: ArtifactTransferRequestV2::SCHEMA.into(),
+            request_id: Uuid::now_v7(),
+            session_id: Uuid::now_v7(),
+            lease,
+            media_type: "application/octet-stream".into(),
+            action: ArtifactTransferActionV2::PutChunk,
+            chunk_size: ARTIFACT_TRANSFER_CHUNK_BYTES,
+            chunk_index: Some(1),
+            chunk_digest: Some(format!("sha256:{}", "b".repeat(64))),
+            payload_size: 17,
+            challenge_nonce: "challenge".into(),
+        };
+        assert!(request.is_valid());
+        request.payload_size = 18;
+        assert!(!request.is_valid());
+        request.payload_size = 17;
+        request.action = ArtifactTransferActionV2::GetChunk;
+        request.chunk_digest = None;
+        assert!(!request.is_valid());
+        request.lease.operation = ArtifactTransferOperation::Get;
+        request.payload_size = 0;
+        assert!(request.is_valid());
     }
 }

@@ -512,11 +512,12 @@ export const useRampage = create<RampageState>((set, get) => ({
       killLatch: true,
       nodes: state.nodes.map((node) => ({ ...node, state: "offline" })),
     }));
-    void invoke("local_stop").catch(async () => {
+    void invoke("local_stop").catch(() => undefined).finally(async () => {
       try {
         await fetch(`${controller}/v1/stop`, { method: "POST", headers: controllerHeaders() });
       } catch {
-        // Browser preview has no Tauri IPC. The visible local state still fails closed.
+        // The Tauri latch is independent. The API call adds the durable remote fencing epoch when
+        // the controller is reachable; browser preview still fails closed in visible local state.
       }
     });
   },

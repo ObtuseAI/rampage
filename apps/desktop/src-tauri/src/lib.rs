@@ -1,4 +1,10 @@
-use std::{io::Read, path::PathBuf, sync::Mutex, time::Duration};
+use rand::RngCore;
+use std::{
+    io::{Read, Write},
+    path::PathBuf,
+    sync::Mutex,
+    time::Duration,
+};
 use sysinfo::{Pid, System};
 use tauri::{
     AppHandle, Manager, WindowEvent,
@@ -24,6 +30,12 @@ const AUTOSTART_RUN_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\R
 #[cfg(target_os = "windows")]
 const AUTOSTART_APPROVAL_KEY: &str =
     "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+
+fn fresh_intelligence_token() -> String {
+    let mut token = [0_u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut token);
+    hex::encode(token)
+}
 
 fn launched_in_background<I, S>(args: I) -> bool
 where
@@ -107,7 +119,42 @@ fn runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
 fn local_stop(app: AppHandle) -> Result<(), String> {
     let data_dir = runtime_dir(&app)?;
     std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
-    std::fs::write(data_dir.join("KILL"), b"owner-stop-v1\n").map_err(|error| error.to_string())
+    let kill_path = data_dir.join("KILL");
+    match std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&kill_path)
+    {
+        Ok(mut file) => {
+            file.write_all(b"owner-stop-v1\n")
+                .and_then(|()| file.sync_all())
+                .map_err(|error| error.to_string())?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    propagate_controller_stop(data_dir);
+    Ok(())
+}
+
+fn propagate_controller_stop(data_dir: PathBuf) {
+    let token_path = data_dir.join("controller.token");
+    let Ok(token) = read_bounded_regular_file(&token_path, 512, "controller token")
+        .and_then(|bytes| String::from_utf8(bytes).map_err(|error| error.to_string()))
+    else {
+        return;
+    };
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let _ = reqwest::Client::new()
+            .post("http://127.0.0.1:47831/v1/stop")
+            .header("x-rampage-token", token)
+            .send()
+            .await;
+    });
 }
 
 #[tauri::command]
@@ -209,9 +256,10 @@ fn platform_set_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> 
 
 #[tauri::command]
 fn controller_token(app: AppHandle) -> Result<String, String> {
-    std::fs::read_to_string(runtime_dir(&app)?.join("controller.token"))
+    let path = runtime_dir(&app)?.join("controller.token");
+    String::from_utf8(read_bounded_regular_file(&path, 512, "controller token")?)
         .map(|value| value.trim().to_string())
-        .map_err(|error| format!("controller token unavailable: {error}"))
+        .map_err(|error| format!("controller token is not UTF-8: {error}"))
 }
 
 #[tauri::command]
@@ -304,6 +352,11 @@ fn read_bounded_regular_file(
     limit: u64,
     label: &str,
 ) -> Result<Vec<u8>, String> {
+    let path_metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("could not inspect {label} path: {error}"))?;
+    if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
+        return Err(format!("{label} is not a regular non-symlink file"));
+    }
     let file =
         std::fs::File::open(path).map_err(|error| format!("could not open {label}: {error}"))?;
     let metadata = file
@@ -394,13 +447,16 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
         return Err("controller token is empty".into());
     }
     launch_owner_relay_if_configured(app, &data_dir)?;
+    let intelligence_token = fresh_intelligence_token();
     let (_, intelligence) = app
         .shell()
         .sidecar("rampage-intelligence")
         .map_err(|error| error.to_string())?
         .env("RAMPAGE_DATA_DIR", &intelligence_dir)
         .env("RAMPAGE_ENABLE_MODELS", "false")
-        .env("RAMPAGE_TOKEN", &token)
+        // The proposal-only sidecar never receives the controller owner token. Compromise of the
+        // Python process therefore cannot authenticate directly to controller authority routes.
+        .env("RAMPAGE_TOKEN", intelligence_token)
         .spawn()
         .map_err(|error| format!("could not start intelligence service: {error}"))?;
     app.state::<Sidecars>()
@@ -627,6 +683,15 @@ mod tests {
             "rampage.exe",
             "--background-worker"
         ]));
+    }
+
+    #[test]
+    fn intelligence_uses_an_independent_high_entropy_token() {
+        let first = fresh_intelligence_token();
+        let second = fresh_intelligence_token();
+        assert_eq!(first.len(), 64);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first, second);
     }
 
     #[test]

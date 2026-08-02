@@ -32,7 +32,8 @@ All state transitions -> hash-chained evidence ledger
   HTTPS deployment, bandwidth caps, and connection thresholds. No public relay is selected by
   default.
 - **Intelligence plane (Python):** intent compilation, planning, research, building, criticism,
-  adversarial review, evolution, and synthesis. It can only request typed capabilities.
+  adversarial review, evolution, and synthesis. It can only request typed capabilities, fails
+  closed without authentication, and receives a fresh sidecar-only token—not the controller token.
 - **Experience plane (native Tauri/React):** one-click enrollment, spatial Arena, accessible 2D
   parity, role-aware system tray, close-to-tray, start-at-login, explanations, replay, and owner
   controls. Explicit Quit owns deterministic sidecar cleanup.
@@ -41,8 +42,10 @@ All state transitions -> hash-chained evidence ledger
 
 Signing a lease is necessary but not sufficient. The controller keeps a monotonic authority epoch
 in the hash-chained SQLite ledger. A normal crash or process restart reuses that durable epoch so
-recoverable work remains valid; an explicit owner STOP advances it before any later admission.
-Claims and receipts must match the controller's current epoch.
+recoverable work remains valid; an explicit owner STOP advances it before any later admission. The
+native desktop latch and its reconciled epoch marker are separate, so startup advances fencing if a
+crash interrupted propagation from the tray/UI to the controller. Claims and receipts must match
+the controller's current epoch.
 
 Workers and artifact gateways verify the Governor signature first, then atomically consume the
 lease nonce and update their locally durable highest-seen epoch in the local CAS index beside the
@@ -75,11 +78,18 @@ services, and availability/thermal/power constraints.
 Donated drive space is a distributed content-addressed artifact layer, not a mounted remote drive.
 The controller ingests an artifact into its encrypted CAS, then obtains a short-lived signed storage
 lease before opening the worker's artifact QUIC protocol. Cache and scratch replicas may be
-recomputed; protected data requires at least two declared replicas. Every transfer validates its
-SHA-256 address, every storage lease is consumed once, every worker encrypts chunks with its own
-local key, and replication, retrieval, input staging, and output registration become ledger events.
-Jobs declare artifact references; the controller stages missing inputs before issuing work, and
-receipts can return remotely retrievable outputs.
+recomputed; protected data requires fresh signed possession evidence from at least two distinct
+enrolled nodes. Protocol v2 persists an immutable transfer session and encrypted partial chunks, so
+a process restart resumes from the authenticated missing-chunk set. PUT authority is one-shot and
+renewable only at the same or a higher fencing epoch; retrieval uses a fresh signed GET lease for
+each bounded chunk. Commit validates every chunk and the complete SHA-256 address before atomic CAS
+promotion. A challenged HEAD authenticates every encrypted chunk and the complete content address;
+a single GET chunk cannot produce whole-artifact evidence. Workers sign challenge-bound replica
+receipts, and the controller's rotating reconciler caps each cycle at four proofs/128 MiB and four
+repairs inside the owner donation envelope. Every
+replication, verification, repair, retrieval, input stage, and output registration becomes a ledger
+event. Jobs declare artifact references; the controller stages missing inputs before issuing work,
+and receipts can return remotely retrievable outputs.
 
 ## Scheduling hierarchy
 

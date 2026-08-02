@@ -57,9 +57,12 @@ async def require_local_token(request: Request, call_next):  # type: ignore[no-u
     if request.url.path == "/health":
         return await call_next(request)
     expected = os.getenv("RAMPAGE_TOKEN")
-    if expected and not secrets.compare_digest(
-        request.headers.get("x-rampage-token", ""), expected
-    ):
+    if not expected:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Rampage intelligence token is not configured"},
+        )
+    if not secrets.compare_digest(request.headers.get("x-rampage-token", ""), expected):
         return JSONResponse(
             status_code=401,
             content={"detail": "valid local Rampage token required"},
@@ -69,11 +72,13 @@ async def require_local_token(request: Request, call_next):  # type: ignore[no-u
 
 @app.get("/health")
 async def health(request: Request) -> dict[str, Any]:
+    auth_configured = bool(os.getenv("RAMPAGE_TOKEN"))
     return {
         "service": "rampage-intelligence",
-        "status": "ready",
+        "status": "ready" if auth_configured else "blocked",
         "capability": request.app.state.capability,
         "authority": "proposal_only",
+        "auth_configured": auth_configured,
         "model_error": request.app.state.runtime_error,
     }
 
