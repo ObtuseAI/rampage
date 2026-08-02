@@ -13,6 +13,7 @@ the authority to run wild.
 [![CI](https://github.com/ObtuseAI/rampage/actions/workflows/ci.yml/badge.svg)](https://github.com/ObtuseAI/rampage/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/ObtuseAI/rampage/actions/workflows/codeql.yml/badge.svg)](https://github.com/ObtuseAI/rampage/actions/workflows/codeql.yml)
 [![Native distribution](https://github.com/ObtuseAI/rampage/actions/workflows/distribution.yml/badge.svg)](https://github.com/ObtuseAI/rampage/actions/workflows/distribution.yml)
+[![Mobile edge](https://github.com/ObtuseAI/rampage/actions/workflows/mobile-edge.yml/badge.svg)](https://github.com/ObtuseAI/rampage/actions/workflows/mobile-edge.yml)
 [![Windows x64](https://img.shields.io/badge/release-Windows%20x64-0b0f17?logo=windows&logoColor=67f5c5)](docs/PLATFORM_MATRIX.md)
 [![Rust 1.91](https://img.shields.io/badge/Rust-1.91%2B-0b0f17?logo=rust&logoColor=67f5c5)](Cargo.toml)
 [![AI authority](https://img.shields.io/badge/AI%20authority-proposals%20only-0b0f17?logo=probot&logoColor=67f5c5)](docs/ARCHITECTURE.md#recursive-improvement)
@@ -23,7 +24,8 @@ the authority to run wild.
 [Release evidence](docs/RELEASE_EVIDENCE.md) ·
 [Owner-relay evidence](docs/OWNER_RELAY_EVIDENCE.md) ·
 [Resumable-storage evidence](docs/RESUMABLE_STORAGE_EVIDENCE.md) ·
-[Native distribution](docs/DISTRIBUTION.md)
+[Native distribution](docs/DISTRIBUTION.md) ·
+[Mobile edge](docs/EDGE_DEVICES.md)
 
 </div>
 
@@ -132,6 +134,21 @@ Phones and tablets are not pretend GPU servers. Their best future contribution i
 foreground, restart-tolerant work: data preparation, scoring, validation, sensor processing, relay,
 cache, and small-model inference. Console support remains constrained by platform-holder policy.
 
+### Rampage Edge: the useful part of mobile compute
+
+The current native mobile source narrows that expansion vision to two adapters that are implemented
+and safe to preempt today: hashing and independent evaluation shards. The app reads battery,
+external power, low-power mode, thermal pressure, foreground lifecycle, and phone/tablet identity
+from Kotlin on Android or Swift on iOS. It offers CPU for 20 seconds at a time and stops locally on
+pressure, lifecycle loss, network failure, or owner STOP.
+
+![Rampage Edge mobile app showing a foreground lease pulse, native safety telemetry, signed receipts, and the hard capability boundary](docs/assets/rampage-edge-mobile.png)
+
+The screenshot is the real React interface in its labeled browser showcase state. Native packages
+replace the demonstration values with direct platform telemetry. The worker runs in-process—no
+mobile daemon, shell, model server, protected replica, public marketplace, or ambient background
+authority. See [Rampage Edge](docs/EDGE_DEVICES.md) for the trust flow and exact platform boundary.
+
 ## Model Fabric: biggest model and fastest chat are different lanes
 
 The desktop now defaults to **Maximum Model** and exposes five explicit ways to use added compute:
@@ -175,7 +192,7 @@ adapters that can move the *right unit of work* to the *right class of machine*.
 | Agent swarms | Run independent searches, evaluations, transforms, and tool-safe shards concurrently; require a signed result and an explicit success threshold | New adapters inherit the same lease, nonce, epoch, STOP, and receipt contract rather than gaining ambient machine access |
 | Production | Place independent builds, renders, transcodes, simulations, preprocessing, and batch transforms where a shipped adapter advertises the exact operation | Interactive application memory does not become a network DIMM; large workflows must expose schedulable stages or engine-native distributed execution |
 | Gaming | Preserve the foreground gaming PC by routing eligible background AI, compilation, capture processing, media conversion, server simulation, and cache work elsewhere | Rampage does not claim that an arbitrary game can borrow another device's VRAM or increase FPS without game/engine support |
-| Phones and tablets | Contribute foreground-safe validation, scoring, preprocessing, cache, relay, sensor, and small-model tasks under thermal, battery, network, and restart-tolerance limits | Mobile packaging and platform qualification remain separate release gates; consoles additionally require platform-holder permission |
+| Phones and tablets | Native source implements foreground-safe hashing and independent evaluation shards under thermal, battery, network, identity, and restart-tolerance limits | More adapters require their own proof; mobile CI candidates are not store releases, and consoles require platform-holder permission |
 | Donated storage | Encrypt, resume, verify, retrieve, and repair protected whole-artifact replicas across owner-controlled nodes | Current source caps an artifact at 64 MiB and uses full replicas; erasure coding and physical-loss campaigns are future qualification work |
 
 This separation is deliberate. Rampage can become broadly useful without selling users a fake
@@ -195,7 +212,7 @@ and let capability discovery do the rest.
 | Linux x64 | Debian package and AppImage with the same Tauri shell and native sidecars | Fresh Ubuntu 24.04 candidate gate; stable repository/AppImage signing remains channel-specific |
 | macOS Apple Silicon | Native app bundle and DMG | Fresh macOS 15/M1 candidate gate; stable publication requires Developer ID signing, Gatekeeper acceptance, notarization, and a stapled ticket |
 | Windows 10 x64 | MSI/NSIS lifecycle, desktop shortcut, tray, sidecars, restart, STOP, and uninstall campaign | Deliberately unqualified until a real self-hosted Windows 10 runner completes the fail-closed workflow |
-| Phones and tablets | Foreground-safe contributor contract | Native enrollment, transport, packaging, and physical-device qualification remain a later gate—not a shipped claim |
+| Phones and tablets | Native Tauri app; Kotlin/Swift telemetry; in-process Rust worker; Android ARM64 and iOS simulator candidate gates | Unsigned CI candidates are not store releases; physical-device signing and lifecycle qualification remain separate gates |
 
 Every staged candidate carries SHA-256 checksums plus a source-bound distribution manifest.
 Non-pull-request artifacts can receive GitHub OIDC provenance attestations, but provenance is not a
@@ -317,11 +334,13 @@ rampage artifact-hash $artifact.digest
 | `rampage-policy` | The deterministic Governor, signatures, admission, fencing, STOP, and promotion gates |
 | `rampage-controller` | Scheduling, recovery, atomic shard admission, local API, and mesh gateway |
 | `rampage-agent` | Hardware discovery and allowlisted CPU/GPU/Ollama worker adapters |
+| `rampage-edge` | Foreground-only mobile identity, enrollment, offers, bounded claims, and signed receipts |
 | `rampage-mesh` | Rampage-owned Iroh/QUIC identities and bounded remote control frames |
 | `rampage-relay` | Owner-hosted hard-NAT fallback with signed endpoint admission and resource limits |
 | `rampage-storage` | Encrypted, chunked CAS; durable resumable sessions; authenticated finalize; protected durability state |
 | `rampage-ledger` | Recoverable, paginated, hash-chained SQLite evidence |
 | `apps/desktop` | Tauri/React spatial Fabric Arena and accessible Ops Grid |
+| `apps/edge` | Native Android/iOS foreground contributor and live safety UI |
 | `services/intelligence` | Durable proposal-only DBOS/Pydantic AI improvement workflows |
 | `packages/sdk-*` | Token-aware TypeScript and Python integration surfaces |
 | `integrations/dumbmoney` | Read-only telemetry in; signed proposals out |

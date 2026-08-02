@@ -38,8 +38,33 @@ const blankNative: NativeStatus = {
   screenKeptAwake: false
 };
 
+const showcasePreview = !("__TAURI_INTERNALS__" in window) && new URLSearchParams(window.location.search).has("showcase");
+const showcaseView: EdgeView = {
+  native: {
+    platform: "android",
+    deviceKind: "phone",
+    foreground: true,
+    donationRequested: true,
+    batteryPercent: 78,
+    onExternalPower: true,
+    lowPowerMode: false,
+    thermalHeadroomPercent: 82,
+    screenKeptAwake: true
+  },
+  session: {
+    nodeId: "019fb9d3-foreground-edge",
+    controllerEndpointId: "owner-pinned-controller",
+    enrolled: true,
+    eligible: true,
+    offerExpiresAt: new Date(Date.now() + 20_000).toISOString(),
+    receiptsSubmitted: 1842,
+    lastResult: "eligible; no admitted work waiting"
+  },
+  message: "SHOWCASE PREVIEW · live builds use native platform telemetry"
+};
+
 export default function App() {
-  const [view, setView] = useState<EdgeView>({ native: blankNative, message: "Native telemetry is starting." });
+  const [view, setView] = useState<EdgeView>(showcasePreview ? showcaseView : { native: blankNative, message: "Native telemetry is starting." });
   const [displayName, setDisplayName] = useState("My Edge Device");
   const [invitation, setInvitation] = useState("");
   const [busy, setBusy] = useState(false);
@@ -65,18 +90,20 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (showcasePreview) return;
     void invoke<EdgeView>("edge_status").then(setView).catch((error: unknown) => {
       setView((current) => ({ ...current, message: String(error) }));
     });
   }, []);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || showcasePreview) return;
     const timer = window.setInterval(() => void pulse(), 5_000);
     return () => window.clearInterval(timer);
   }, [active, pulse]);
 
   useEffect(() => {
+    if (showcasePreview) return;
     const stopWhenHidden = () => {
       if (document.visibilityState !== "visible" && active) {
         void invoke<EdgeView>("edge_stop").then(setView).catch(() => undefined);

@@ -19,7 +19,6 @@ import app.tauri.plugin.Plugin
 class DonationArgs {
     var enabled: Boolean = false
 }
-
 @TauriPlugin
 class RampageEdgePlugin(private val activity: Activity) : Plugin(activity) {
     private var resumed = false
@@ -97,4 +96,3 @@ class RampageEdgePlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 }
-

@@ -24,4 +24,3 @@ button { width:100%; min-height:52px; display:flex; align-items:center; justify-
 footer { padding:18px 0 0; color:#5f6d80; font:.58rem/1.5 ui-monospace,monospace; } footer span { float:right; display:flex; align-items:center; gap:4px; } footer svg { width:12px; }
 @media (min-width: 620px) { .telemetry { grid-template-columns:repeat(4,1fr); }.telemetry article,.telemetry article:nth-child(2n),.telemetry article:nth-last-child(-n+2){border-bottom:0;border-right:1px solid #1b2938}.telemetry article:last-child{border-right:0} }
 @media (prefers-reduced-motion: reduce) { * { animation-duration:.01ms!important; animation-iteration-count:1!important; } }
-

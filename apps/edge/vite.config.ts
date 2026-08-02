@@ -7,4 +7,3 @@ export default defineConfig({
   server: { port: 1421, strictPort: true },
   envPrefix: ["VITE_", "TAURI_"]
 });
-

@@ -8,4 +8,3 @@ let package = Package(
   dependencies: [.package(name: "Tauri", path: "../.tauri/tauri-api")],
   targets: [.target(name: "tauri-plugin-rampage-edge", dependencies: [.byName(name: "Tauri")], path: "Sources")]
 )
-

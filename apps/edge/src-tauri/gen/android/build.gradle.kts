@@ -8,7 +8,6 @@ buildscript {
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.25")
     }
 }
-
 allprojects {
     repositories {
         google()
@@ -19,4 +18,3 @@ allprojects {
 tasks.register("clean").configure {
     delete("build")
 }
-

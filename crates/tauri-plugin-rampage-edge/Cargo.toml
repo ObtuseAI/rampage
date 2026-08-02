@@ -15,4 +15,3 @@ tauri-plugin = { version = "2", features = ["build"] }
 serde.workspace = true
 tauri = "2"
 thiserror.workspace = true
-

@@ -69,11 +69,13 @@ jobs:
         env:
           RAMPAGE_NDK_VERSION: 27.1.12297006
         run: |
-          command -v sdkmanager
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' "ndk;${RAMPAGE_NDK_VERSION}"
-          echo "NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${RAMPAGE_NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${RAMPAGE_NDK_VERSION}" >> "$GITHUB_ENV"
+          sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          sdkmanager="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null || true
+          "$sdkmanager" 'platforms;android-36' 'build-tools;36.0.0' "ndk;${RAMPAGE_NDK_VERSION}"
+          echo "NDK_HOME=$sdk_root/ndk/${RAMPAGE_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$sdk_root/ndk/${RAMPAGE_NDK_VERSION}" >> "$GITHUB_ENV"
 
       - run: pnpm install --frozen-lockfile
 
@@ -132,6 +134,7 @@ jobs:
       - name: Build unsigned Apple Silicon simulator candidate
         env:
           CI: 'true'
+          PNPM_CONFIG_CONFIRM_MODULES_PURGE: 'false'
         run: pnpm --dir apps/edge tauri ios build --ci --debug --target aarch64-sim --no-sign
 
       - name: Stage and verify iOS simulator candidate

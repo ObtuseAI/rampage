@@ -2,7 +2,6 @@ plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
 }
-
 android {
     namespace = "ai.obtuse.rampage.edge"
     compileSdk = 36
@@ -30,4 +29,3 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation(project(":tauri-android"))
 }
-

@@ -20,4 +20,3 @@ serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-rampage-edge = { path = "../../../crates/tauri-plugin-rampage-edge" }
-

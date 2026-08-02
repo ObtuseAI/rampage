@@ -3,7 +3,7 @@ use tauri::{AppHandle, Runtime, plugin::PluginApi};
 
 use crate::{EdgeDeviceStatus, Error, Result};
 
-pub struct RampageEdge<R: Runtime>(PhantomData<R>);
+pub struct RampageEdge<R: Runtime>(PhantomData<fn() -> R>);
 
 pub fn init<R: Runtime, C: serde::de::DeserializeOwned>(
     _app: &AppHandle<R>,
