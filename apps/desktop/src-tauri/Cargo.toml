@@ -1,6 +1,6 @@
 [package]
 name = "rampage-desktop"
-version = "0.2.0"
+version = "0.2.1"
 description = "Rampage personal compute fabric"
 authors = ["ObtuseAI"]
 edition = "2024"
@@ -13,8 +13,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+aes-gcm.workspace = true
+base64.workspace = true
+hkdf.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
@@ -24,6 +28,7 @@ rand.workspace = true
 hex.workspace = true
 tokio.workspace = true
 sysinfo.workspace = true
+x25519-dalek.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

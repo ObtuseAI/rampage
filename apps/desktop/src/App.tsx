@@ -2,6 +2,8 @@ import { Activity, Boxes, BrainCircuit, CircleStop, Command, Grid2X2, Orbit, Pla
 import { lazy, Suspense, useEffect } from "react";
 import { CommandPalette } from "./components/CommandPalette";
 import { ComputeStrategyPanel } from "./components/ComputeStrategyPanel";
+import { ArenaBoundary, ArenaLoading } from "./components/ArenaBoundary";
+import { PairingPanel } from "./components/PairingPanel";
 import { Onboarding } from "./components/Onboarding";
 import { OpsGrid } from "./components/OpsGrid";
 import { useRampage } from "./store";
@@ -15,6 +17,13 @@ export default function App() {
     const interval = window.setInterval(() => void useRampage.getState().refresh(), 8_000);
     return () => window.clearInterval(interval);
   }, []);
+  useEffect(() => {
+    const active = state.onboarding || state.pairingWindow?.open || state.workerPairing.state !== "idle";
+    if (!active) return;
+    void state.refreshPairing();
+    const interval = window.setInterval(() => void useRampage.getState().refreshPairing(), 1_000);
+    return () => window.clearInterval(interval);
+  }, [state.onboarding, state.pairingWindow?.open, state.workerPairing.state]);
   const selected = state.nodes.find((node) => node.id === state.selectedNode) ?? state.nodes[0];
   return (
     <div className="shell">
@@ -25,7 +34,7 @@ export default function App() {
         <div className="status-ribbon" role="status"><i className={state.connected && !state.killLatch ? "online" : "reduced"} /><strong>{state.killLatch ? "OWNER STOPPED" : state.fabricRole === "worker" ? "WORKER ACTIVE" : state.connected ? "FABRIC LIVE" : "LOCAL REDUCED"}</strong><span>{state.nodes.length} nodes</span><span>{state.meshMode.replace("_", " ")}</span><span>{state.diagnostic ? `self-scan ${state.diagnostic.health_score}/100` : state.capability.replaceAll("_", " ")}</span></div>
         <div className="header-actions">
           <button className="icon-button" onClick={() => void state.refresh()} aria-label="Refresh fabric"><RefreshCw size={17} /></button>
-          {state.fabricRole === "owner" && <button className="command-button" onClick={() => void state.createInvite().catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Invite creation failed." }))}><UserPlus size={15} /> Add machine</button>}
+          {state.fabricRole === "owner" && <button className="command-button" onClick={() => void state.openPairingWindow().catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Pairing could not start." }))}><UserPlus size={15} /> Add machine</button>}
           <button className={`autostart-button ${state.runAtLogin ? "active" : ""}`} onClick={() => void state.toggleAutostart()} aria-label={state.runAtLogin ? "Stop launching Rampage with Windows" : "Start Rampage with Windows"} title="Keep your fabric available after sign-in"><Rocket size={15} /> {state.runAtLogin ? "AUTO-START ON" : "AUTO-START OFF"}</button>
           <button className="command-button" onClick={() => state.setCommandOpen(true)}><Command size={16} /> Command <kbd>Ctrl K</kbd></button>
           {state.killLatch
@@ -48,12 +57,15 @@ export default function App() {
           <div className="section-heading"><div><p className="eyebrow">FABRIC DECK</p><h1>Your machines, acting as one.</h1></div><div className="view-switch" role="group" aria-label="View"><button className={state.mode === "arena" ? "active" : ""} onClick={() => state.setMode("arena")}><Orbit size={15} /> Arena</button><button className={state.mode === "grid" ? "active" : ""} onClick={() => state.setMode("grid")}><Grid2X2 size={15} /> Grid</button></div></div>
           {state.fabricRole === "owner" && <ComputeStrategyPanel />}
           {state.mode === "arena" ? (
-            <Suspense fallback={<div className="arena-loading" role="status">Initializing spatial fabric…</div>}>
-              <Arena />
-            </Suspense>
+            <ArenaBoundary openGrid={() => state.setMode("grid")}>
+              <Suspense fallback={<ArenaLoading openGrid={() => state.setMode("grid")} />}>
+                <Arena openGrid={() => state.setMode("grid")} />
+              </Suspense>
+            </ArenaBoundary>
           ) : <OpsGrid />}
         </section>
         <aside className="inspector" aria-live="polite">
+          <PairingPanel />
           {selected ? <>
           <p className="eyebrow">SELECTED NODE</p>
           <h2>{selected.name}</h2><span className={`badge ${selected.state}`}>{selected.state}</span>
@@ -64,7 +76,7 @@ export default function App() {
           <button className="secondary">Open evidence trail</button>
           {state.fabricRole === "owner" && <label className="secondary file-action">{selected.artifactEndpoint ? "Encrypt + replicate file" : "Encrypt file locally"}<input type="file" onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void state.storeFile(file, selected.id).catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Artifact transfer failed." })); event.currentTarget.value = ""; }} /></label>}
           {state.inviteCode && <div className="explanation"><ShieldCheck size={18} /><div><strong>One-time invite</strong><p>{state.inviteCode}</p>{state.inviteBundle && <button className="secondary" onClick={() => void navigator.clipboard.writeText(state.inviteBundle!)}>Copy complete invite</button>}</div></div>}
-          </> : <div className="empty-fabric"><p className="eyebrow">NO ACTIVE NODES</p><h2>Add your first machine</h2><p>Rampage will show only enrolled machines with fresh signed offers. Showcase devices never appear in production.</p><button className="secondary" onClick={() => void state.createInvite().catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Invite creation failed." }))}><UserPlus size={16} /> Create ten-minute invite</button>{state.inviteCode && <div className="explanation"><ShieldCheck size={18} /><div><strong>One-time invite</strong><p>{state.inviteCode}</p>{state.inviteBundle && <button className="secondary" onClick={() => void navigator.clipboard.writeText(state.inviteBundle!)}>Copy complete invite</button>}</div></div>}</div>}
+          </> : <div className="empty-fabric"><p className="eyebrow">NO ACTIVE NODES</p><h2>Add your first machine</h2><p>Rampage will show only enrolled machines with fresh signed offers. Showcase devices never appear in production.</p><button className="secondary" onClick={() => void state.openPairingWindow().catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Pairing could not start." }))}><UserPlus size={16} /> Find nearby laptop</button></div>}
         </aside>
       </main>
       <footer className="evidence-spine"><span><i /> EVIDENCE SPINE</span><strong>{state.lastAction ?? (state.events.length ? `${state.events.length} verified events` : "No controller evidence yet")}</strong><span>{state.lastSync ? `Synced ${state.lastSync.toLocaleTimeString()}` : "Discovering…"}</span><span className="push">THRESHOLDED AUTONOMY · NO PER-CHANGE APPROVAL</span></footer>

@@ -1,3 +1,5 @@
+mod pairing;
+
 use rand::{TryRng as _, rngs::SysRng};
 use std::{
     io::{Read, Write},
@@ -7,10 +9,12 @@ use std::{
 };
 use sysinfo::{Pid, System};
 use tauri::{
-    AppHandle, Manager, WindowEvent,
+    AppHandle, Manager, State, WindowEvent,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+
+use pairing::{PairingManager, PairingRequestView, PairingWindowView, WorkerPairingView};
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_shell::{ShellExt, process::CommandChild};
@@ -264,9 +268,94 @@ fn controller_token(app: AppHandle) -> Result<String, String> {
         .map_err(|error| format!("controller token is not UTF-8: {error}"))
 }
 
+fn local_device_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "Rampage Device".into())
+}
+
+#[tauri::command]
+async fn open_pairing_window(
+    app: AppHandle,
+    pairing: State<'_, PairingManager>,
+) -> Result<PairingWindowView, String> {
+    if fabric_mode(app)? != "owner" {
+        return Err("only the owner PC can approve a new machine".into());
+    }
+    pairing::open_owner_window(&pairing, local_device_name()).await
+}
+
+#[tauri::command]
+fn pairing_window(pairing: State<'_, PairingManager>) -> Result<PairingWindowView, String> {
+    pairing::owner_window(&pairing)
+}
+
+#[tauri::command]
+fn begin_pairing(
+    app: AppHandle,
+    pairing: State<'_, PairingManager>,
+) -> Result<WorkerPairingView, String> {
+    if fabric_mode(app.clone())? == "worker" {
+        return Err("this machine is already enrolled as a worker".into());
+    }
+    pairing::begin_worker(app, &pairing, local_device_name())
+}
+
+#[tauri::command]
+fn pairing_status(pairing: State<'_, PairingManager>) -> Result<WorkerPairingView, String> {
+    pairing::worker_status(&pairing)
+}
+
+#[tauri::command]
+fn cancel_pairing(pairing: State<'_, PairingManager>) -> Result<(), String> {
+    pairing::cancel_worker(&pairing)
+}
+
+#[tauri::command]
+async fn approve_pairing(
+    app: AppHandle,
+    pairing: State<'_, PairingManager>,
+    request_id: String,
+) -> Result<PairingRequestView, String> {
+    if fabric_mode(app.clone())? != "owner" {
+        return Err("only the owner PC can approve a new machine".into());
+    }
+    let token = controller_token(app)?;
+    let response = reqwest::Client::new()
+        .post("http://127.0.0.1:47831/v1/enrollment/invites")
+        .header("x-rampage-token", token)
+        .send()
+        .await
+        .map_err(|error| format!("could not create the encrypted enrollment invite: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "controller refused enrollment approval with status {}",
+            response.status()
+        ));
+    }
+    let invitation = response
+        .text()
+        .await
+        .map_err(|error| format!("could not read the enrollment invite: {error}"))?;
+    pairing::approve(&pairing, &request_id, &invitation).await
+}
+
+#[tauri::command]
+async fn reject_pairing(
+    pairing: State<'_, PairingManager>,
+    request_id: String,
+) -> Result<(), String> {
+    pairing::reject(&pairing, &request_id).await
+}
+
 #[tauri::command]
 fn join_remote(app: AppHandle, invitation: String) -> Result<(), String> {
-    let parsed: serde_json::Value = serde_json::from_str(&invitation)
+    persist_remote_invite(&app, &invitation)?;
+    app.restart()
+}
+
+fn persist_remote_invite(app: &AppHandle, invitation: &str) -> Result<(), String> {
+    let parsed: serde_json::Value = serde_json::from_str(invitation)
         .map_err(|error| format!("invite is not valid JSON: {error}"))?;
     if parsed.get("schema").and_then(serde_json::Value::as_str)
         != Some("rampage.enrollment-invite.v1")
@@ -281,21 +370,42 @@ fn join_remote(app: AppHandle, invitation: String) -> Result<(), String> {
     {
         return Err("invite is missing its signed Rampage mesh endpoint".into());
     }
-    let data_dir = runtime_dir(&app)?;
+    let data_dir = runtime_dir(app)?;
     std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
     let destination = data_dir.join("remote-invite.json");
-    let temporary = data_dir.join("remote-invite.tmp");
-    std::fs::write(&temporary, invitation).map_err(|error| error.to_string())?;
-    std::fs::rename(&temporary, destination).map_err(|error| error.to_string())?;
-    app.restart()
+    if destination.exists() {
+        return Err("this machine is already enrolled; remove it from the current fabric before enrolling again".into());
+    }
+    let temporary = data_dir.join(format!(
+        "remote-invite.{}.tmp",
+        &fresh_intelligence_token()[..16]
+    ));
+    let write_result = (|| -> Result<(), String> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| format!("could not create the protected enrollment file: {error}"))?;
+        file.write_all(invitation.as_bytes())
+            .map_err(|error| format!("could not write the enrollment file: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("could not durably store the enrollment file: {error}"))?;
+        drop(file);
+        std::fs::rename(&temporary, &destination)
+            .map_err(|error| format!("could not activate the enrollment file: {error}"))?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    write_result?;
+    Ok(())
 }
 
 fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(), String> {
     let invite_file = data_dir.join("remote-invite.json");
     let key_file = data_dir.join("agent.key");
-    let display_name = std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "Rampage Worker".into());
+    let display_name = local_device_name();
     let (_, agent) = app
         .shell()
         .sidecar("rampage-agent")
@@ -647,6 +757,7 @@ pub fn run() {
             }
         })
         .manage(Sidecars::default())
+        .manage(PairingManager::default())
         .setup(|app| {
             launch_fabric(app.handle()).map_err(std::io::Error::other)?;
             install_desktop_lifecycle(app)?;
@@ -658,6 +769,13 @@ pub fn run() {
             fabric_mode,
             controller_token,
             join_remote,
+            open_pairing_window,
+            pairing_window,
+            begin_pairing,
+            pairing_status,
+            cancel_pairing,
+            approve_pairing,
+            reject_pairing,
             autostart_enabled,
             set_autostart
         ])

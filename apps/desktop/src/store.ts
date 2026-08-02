@@ -39,6 +39,29 @@ interface IntelligenceHealth {
   authority: "proposal_only";
 }
 
+export interface PairingRequest {
+  request_id: string;
+  device_name: string;
+  device_kind: string;
+  verification_code: string;
+  expires_at_ms: number;
+  state: "awaiting_approval" | "approved" | "completed";
+}
+
+export interface PairingWindow {
+  schema: "rampage.pairing-window.v1";
+  open: boolean;
+  open_until_ms: number;
+  requests: PairingRequest[];
+}
+
+export type WorkerPairing =
+  | { state: "idle" }
+  | { state: "searching"; request_id: string; expires_at_ms: number }
+  | { state: "waiting_approval"; request_id: string; owner_name: string; verification_code: string; expires_at_ms: number }
+  | { state: "approved"; request_id: string; owner_name: string }
+  | { state: "failed"; message: string };
+
 const demoNodes: FabricNode[] = [
   { id: "home", name: "Command Rig", kind: "desktop", state: "ready", cpu: 31, memory: 46, gpu: 18, storage: 22, storageAvailableGb: 120, modelMemoryAvailableGb: 10, modelRuntimeCount: 1, artifactEndpoint: false, latencyMs: 0, topologyConfidence: "controller_local", x: 0, y: 0, z: 0 },
   { id: "deck", name: "Steam Deck", kind: "steam_deck", state: "working", cpu: 64, memory: 53, gpu: 72, storage: 35, storageAvailableGb: 18, modelMemoryAvailableGb: 8, modelRuntimeCount: 0, artifactEndpoint: true, latencyMs: 18.4, downlinkMbps: 386, uplinkMbps: 201, topologyConfidence: "measured", x: -3.2, y: -0.4, z: 1.8 },
@@ -92,6 +115,8 @@ interface RampageState {
   modelPlanPending: boolean;
   gatewayModels: string[];
   diagnostic: FabricDiagnosticReport | null;
+  pairingWindow: PairingWindow | null;
+  workerPairing: WorkerPairing;
   setMode: (mode: "arena" | "grid") => void;
   setSelectedNode: (id: string) => void;
   setCommandOpen: (open: boolean) => void;
@@ -106,6 +131,12 @@ interface RampageState {
   refresh: () => Promise<void>;
   createInvite: () => Promise<void>;
   joinFabric: (invitation: string) => Promise<void>;
+  openPairingWindow: () => Promise<void>;
+  refreshPairing: () => Promise<void>;
+  beginPairing: () => Promise<void>;
+  cancelPairing: () => Promise<void>;
+  approvePairing: (requestId: string) => Promise<void>;
+  rejectPairing: (requestId: string) => Promise<void>;
   runDemo: () => Promise<void>;
   runPoolProof: () => Promise<void>;
   storeFile: (file: File, nodeId: string) => Promise<void>;
@@ -182,6 +213,8 @@ export const useRampage = create<RampageState>((set, get) => ({
   modelPlanPending: false,
   gatewayModels: [],
   diagnostic: import.meta.env.DEV ? demoDiagnostic : null,
+  pairingWindow: null,
+  workerPairing: { state: "idle" },
   setMode: (mode) => set({ mode }),
   setSelectedNode: (selectedNode) => set({ selectedNode }),
   setCommandOpen: (commandOpen) => set({ commandOpen }),
@@ -375,6 +408,45 @@ export const useRampage = create<RampageState>((set, get) => ({
     const parsed = JSON.parse(invitation) as { schema?: string };
     if (parsed.schema !== "rampage.enrollment-invite.v1") throw new Error("This is not a Rampage invite.");
     await invoke("join_remote", { invitation });
+  },
+  openPairingWindow: async () => {
+    const pairingWindow = await invoke<PairingWindow>("open_pairing_window");
+    set({
+      pairingWindow,
+      lastAction: "Listening locally for a nearby Rampage laptop. No invite secret is being broadcast.",
+    });
+  },
+  refreshPairing: async () => {
+    try {
+      const [pairingWindow, workerPairing] = await Promise.all([
+        invoke<PairingWindow>("pairing_window"),
+        invoke<WorkerPairing>("pairing_status"),
+      ]);
+      set({ pairingWindow, workerPairing });
+    } catch {
+      // Browser showcases and an app that is still starting have no native pairing bridge.
+    }
+  },
+  beginPairing: async () => {
+    const workerPairing = await invoke<WorkerPairing>("begin_pairing");
+    set({
+      workerPairing,
+      lastAction: "Laptop waiting locally for its owner PC. Nothing needs to be copied.",
+    });
+  },
+  cancelPairing: async () => {
+    await invoke("cancel_pairing");
+    set({ workerPairing: { state: "idle" }, lastAction: "Laptop pairing cancelled." });
+  },
+  approvePairing: async (requestId) => {
+    await invoke<PairingRequest>("approve_pairing", { requestId });
+    await get().refreshPairing();
+    set({ lastAction: "Encrypted enrollment approved and delivered directly to the laptop." });
+  },
+  rejectPairing: async (requestId) => {
+    await invoke("reject_pairing", { requestId });
+    await get().refreshPairing();
+    set({ lastAction: "Pairing request declined." });
   },
   runDemo: async () => {
     const now = Date.now();

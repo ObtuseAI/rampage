@@ -20,8 +20,9 @@ the authority to run wild.
 
 [**Launch the showcase**](https://obtuseai.github.io/rampage/) ·
 [Architecture](docs/ARCHITECTURE.md) ·
+[Easy pairing](docs/PAIRING.md) ·
 [Security](SECURITY.md) ·
-[Release evidence](docs/RELEASE_EVIDENCE.md) ·
+[0.2.1 release evidence](docs/RELEASE_EVIDENCE_0.2.1.md) ·
 [Owner-relay evidence](docs/OWNER_RELAY_EVIDENCE.md) ·
 [Resumable-storage evidence](docs/RESUMABLE_STORAGE_EVIDENCE.md) ·
 [Native distribution](docs/DISTRIBUTION.md) ·
@@ -34,9 +35,11 @@ the authority to run wild.
 
 ## This is what personal compute should feel like
 
-Install Rampage on an owner PC. Install it on another machine. Paste one short-lived signed invite.
-Rampage discovers usable CPU, GPU/VRAM, RAM, storage, power, thermals, runtimes, and local Ollama
-models automatically—then moves bounded work to the machine that can actually perform it.
+Install Rampage on an owner PC. Install it on another machine. Choose **Join my fabric**, compare
+the same four digits on both screens, and approve once on the owner PC. There are no addresses,
+accounts, terminals, or secrets to copy. Rampage discovers usable CPU, GPU/VRAM, RAM, storage,
+power, thermals, runtimes, and local Ollama models automatically—then moves bounded work to the
+machine that can actually perform it.
 
 No Tailscale account. No fictional “global RAM.” No mystery daemon with unlimited authority. No AI
 agent holding the keys to its own guardrails.
@@ -55,8 +58,10 @@ agent holding the keys to its own guardrails.
 
 ## Built—not imagined
 
-Rampage 0.2 established the working Windows x64 release candidate. Current source adds later
-qualified milestones; the evidence links below distinguish source proofs from packaged 0.2 claims.
+Rampage 0.2.1 is the current Windows x64 pairing candidate. It combines the established compute,
+mesh, storage, and gateway foundations with zero-copy nearby enrollment and a self-contained
+packaged 3D Arena. Evidence links distinguish automated and packaged proof from the still-pending
+physical laptop and phone gates.
 
 | Proof surface | Validated result |
 | --- | --- |
@@ -71,8 +76,10 @@ qualified milestones; the evidence links below distinguish source proofs from pa
 | Packaged product | Native Tauri shell, role-aware system tray, close-to-tray, start-at-login, governed sidecars, clean explicit shutdown, installer, and automatic desktop launcher |
 | Verification | Rust, desktop, TypeScript SDK, Python intelligence, Python SDK, deterministic universal-gateway, forced-relay mesh, packaging, and lifecycle gates |
 
-The packaged 0.2 qualification record—including artifact hashes and the unsigned-release boundary—is
-in [the release evidence](docs/RELEASE_EVIDENCE.md). The newer API, workload-contract, self-scan,
+The packaged 0.2.1 qualification record—including artifact hashes and the unsigned-release
+boundary—is in [the current release evidence](docs/RELEASE_EVIDENCE_0.2.1.md). The original 0.2
+record remains in [its immutable evidence page](docs/RELEASE_EVIDENCE.md). The newer API,
+workload-contract, self-scan,
 and signed-canary campaign is recorded separately in
 [universal-compute evidence](docs/UNIVERSAL_COMPUTE_EVIDENCE.md). The self-hosted hard-NAT fallback
 and its forced-relay transport proof are recorded in
@@ -205,9 +212,10 @@ runtime evidence before the Governor can lease it.
 ## A native application, not a terminal ritual
 
 Rampage owns the complete desktop lifecycle: sidecars, policy state, local discovery, the system
-tray, start-at-login, emergency STOP, explicit shutdown, and the desktop launcher. The owner should
-be able to install the app, create a fabric, paste one signed invite on each contributing machine,
-and let capability discovery do the rest.
+tray, start-at-login, emergency STOP, explicit shutdown, and the desktop launcher. A normal user
+installs the app, creates a fabric, lets each new machine wait nearby, compares four digits, and
+approves it once. The full signed invite is encrypted directly between ephemeral device keys and is
+never displayed or copied. Capability discovery does the rest.
 
 | Platform lane | Native deliverables | Current qualification boundary |
 | --- | --- | --- |
@@ -256,8 +264,15 @@ ambiguous evidence fails closed.
 1. Download the Windows installer from [Releases](https://github.com/ObtuseAI/rampage/releases).
 2. Open the **Rampage** shortcut created on the Windows desktop.
 3. Choose **Create my fabric** on the main machine.
-4. Choose **Add machine**, then paste the complete signed invitation into Rampage on the other PC.
-5. Leave contribution limits on automatic or tune them. Press **STOP** whenever you want the node back.
+4. On the laptop, choose **Join my fabric** and **Find my fabric**. It can wait while you move back to the main PC.
+5. On the main PC, choose **Add machine**. Confirm the same four digits and press **Codes match—approve**.
+6. Rampage securely enrolls and restarts the laptop automatically. Leave contribution limits on automatic or tune them. Press **STOP** whenever you want the node back.
+
+The nearby flow uses only the private LAN. If Windows asks, allow Rampage on **private networks**.
+The complete invite remains available under **Advanced** for segmented networks where local
+discovery is intentionally blocked. See [Easy and secure pairing](docs/PAIRING.md).
+
+![Rampage laptop onboarding showing the zero-copy Join your fabric flow](docs/assets/rampage-zero-copy-pairing.png)
 
 Closing the window keeps the governed fabric alive in the Windows system tray. Left-click the tray
 icon to restore it, or right-click for role status, Start with Windows, emergency stop, and an

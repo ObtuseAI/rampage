@@ -19,9 +19,14 @@ function Read-TomlVersion([string]$Path, [string]$SectionPattern) {
 
 $versions = [ordered]@{
     cargo_workspace = Read-TomlVersion (Join-Path $root 'Cargo.toml') 'workspace\.package'
+    desktop_rust = Read-TomlVersion (Join-Path $root 'apps/desktop/src-tauri/Cargo.toml') 'package'
     tauri = (Get-Content -LiteralPath (Join-Path $root 'apps/desktop/src-tauri/tauri.conf.json') -Raw |
         ConvertFrom-Json).version
     desktop = (Get-Content -LiteralPath (Join-Path $root 'apps/desktop/package.json') -Raw |
+        ConvertFrom-Json).version
+    edge_tauri = (Get-Content -LiteralPath (Join-Path $root 'apps/edge/src-tauri/tauri.conf.json') -Raw |
+        ConvertFrom-Json).version
+    edge = (Get-Content -LiteralPath (Join-Path $root 'apps/edge/package.json') -Raw |
         ConvertFrom-Json).version
     typescript_sdk = (Get-Content -LiteralPath (Join-Path $root 'packages/sdk-ts/package.json') -Raw |
         ConvertFrom-Json).version

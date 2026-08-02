@@ -21,10 +21,15 @@ The owner installation launches controller, intelligence, and one local worker. 
 for the controller token before launching dependent sidecars, gives the proposal-only intelligence
 service a separate random token rather than controller authority, creates a one-time invite for its
 own worker, and then discovers and advertises available resources. Intelligence work fails closed
-when that sidecar-only token is absent. Additional invitations are complete
-signed JSON documents; transfer them directly to the intended device and never post them publicly.
-When an owner relay is configured, those signed documents include its HTTPS route. The joining
-worker enables only the explicitly signed route and still authenticates the controller endpoint.
+when that sidecar-only token is absent. For normal enrollment, the joining machine broadcasts only
+an ephemeral pairing request while the owner has explicitly opened a three-minute local window.
+Both screens derive the same four-digit verification code. After the owner confirms it, the full
+signed invitation is encrypted directly to the joining machine and followed by an authenticated
+completion receipt. The invitation is never broadcast or shown. Complete signed JSON invitations
+remain an advanced fallback: transfer one directly to its intended device and never post it
+publicly. When an owner relay is configured, the signed invitation includes its HTTPS route. The
+joining worker enables only the explicitly signed route and still authenticates the controller
+endpoint. See [PAIRING.md](PAIRING.md).
 
 ## Worker flow
 

@@ -8,6 +8,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $triple = (& rustc --print host-tuple).Trim()
+$runningOnWindows = if (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) {
+    [bool]$IsWindows
+} else {
+    $env:OS -eq 'Windows_NT'
+}
 $cargoArgs = @(
     'build',
     '-p', 'rampage-controller',
@@ -23,7 +28,7 @@ $source = Join-Path $root "target\$Profile"
 $destination = Join-Path $root 'apps\desktop\src-tauri\binaries'
 New-Item -ItemType Directory -Force -Path $destination | Out-Null
 foreach ($name in @('rampage-controller', 'rampage-agent', 'rampage', 'rampage-relay')) {
-    $extension = if ($IsWindows) { '.exe' } else { '' }
+    $extension = if ($runningOnWindows) { '.exe' } else { '' }
     Copy-Item -Force (Join-Path $source "$name$extension") `
         (Join-Path $destination "$name-$triple$extension")
 }
@@ -39,7 +44,7 @@ $intelligenceProject = Join-Path $root 'services\intelligence'
     --copy-metadata dbos `
     (Join-Path $intelligenceProject 'rampage_intelligence_entry.py')
 if ($LASTEXITCODE -ne 0) { throw 'Intelligence sidecar build failed' }
-$intelligenceExtension = if ($IsWindows) { '.exe' } else { '' }
+$intelligenceExtension = if ($runningOnWindows) { '.exe' } else { '' }
 Copy-Item -Force (Join-Path $root "dist\rampage-intelligence$intelligenceExtension") `
     (Join-Path $destination "rampage-intelligence-$triple$intelligenceExtension")
 
