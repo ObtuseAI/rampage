@@ -18,6 +18,12 @@ the authority to run wild.
 [![Rust 1.91](https://img.shields.io/badge/Rust-1.91%2B-0b0f17?logo=rust&logoColor=67f5c5)](Cargo.toml)
 [![AI authority](https://img.shields.io/badge/AI%20authority-proposals%20only-0b0f17?logo=probot&logoColor=67f5c5)](docs/ARCHITECTURE.md#recursive-improvement)
 
+## [⬇ Download Rampage 0.2.1 for Windows](https://obtuseai.github.io/rampage/download/)
+
+**One installer. Desktop shortcut included.**
+[Release notes and SHA-256](https://github.com/ObtuseAI/rampage/releases/tag/v0.2.1-pairing.1) ·
+[All releases](https://github.com/ObtuseAI/rampage/releases)
+
 [**Launch the showcase**](https://obtuseai.github.io/rampage/) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Easy pairing](docs/PAIRING.md) ·
@@ -258,7 +264,7 @@ ambiguous evidence fails closed.
 
 ## Start the fabric
 
-1. Download the Windows installer from [Releases](https://github.com/ObtuseAI/rampage/releases).
+1. [Download the current Windows installer](https://obtuseai.github.io/rampage/download/).
 2. Open the **Rampage** shortcut created on the Windows desktop.
 3. Choose **Create my fabric** on the main machine.
 4. On the laptop, choose **Join my fabric** and **Find my fabric**. It can wait while you move back to the main PC.
