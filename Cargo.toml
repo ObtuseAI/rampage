@@ -55,6 +55,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1.18", features = ["v4", "v7", "serde"] }
 webpki-types = { package = "rustls-pki-types", version = "1.12" }
-windows = "=0.61.3"
+windows = "=0.62.2"
 windows-core = "=0.61.2"
 walkdir = "2.5"
