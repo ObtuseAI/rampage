@@ -213,7 +213,7 @@ impl EdgeWorker {
             }),
         )?;
 
-        let mut worker = Self {
+        let worker = Self {
             data_dir,
             runtime,
             endpoint,
