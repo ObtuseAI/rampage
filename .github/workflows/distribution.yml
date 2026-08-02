@@ -52,10 +52,6 @@ jobs:
       contents: read
     env:
       RAMPAGE_STABLE: ${{ (github.event_name == 'push' && !contains(github.ref_name, '-')) || (github.event_name == 'workflow_dispatch' && inputs.channel == 'stable') }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.8
@@ -140,6 +136,10 @@ jobs:
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
@@ -156,7 +156,20 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
           security list-keychain -d user -s "$keychain" login.keychain-db
 
+      - name: Bundle signed and notarized macOS application
+        if: matrix.platform == 'macos-arm64' && env.RAMPAGE_STABLE == 'true'
+        shell: pwsh
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          & pnpm --dir apps/desktop tauri build
+          if ($LASTEXITCODE -ne 0) { throw 'signed macOS desktop bundle failed' }
+
       - name: Bundle desktop application
+        if: matrix.platform != 'macos-arm64' || env.RAMPAGE_STABLE != 'true'
         shell: pwsh
         run: |
           $arguments = @('--dir', 'apps/desktop', 'tauri', 'build')
@@ -169,9 +182,9 @@ jobs:
       - name: Stage and verify distribution
         shell: pwsh
         run: |
-          $arguments = @('-Platform', '${{ matrix.platform }}')
+          $arguments = @{ Platform = '${{ matrix.platform }}' }
           if ($env:RAMPAGE_STABLE -eq 'true' -and '${{ matrix.platform }}' -ne 'linux-x64') {
-            $arguments += '-RequirePlatformSignature'
+            $arguments.RequirePlatformSignature = $true
           }
           & ./scripts/Stage-RampageDistribution.ps1 @arguments
 
