@@ -41,9 +41,6 @@ accounts, terminals, or secrets to copy. Rampage discovers usable CPU, GPU/VRAM,
 power, thermals, runtimes, and local Ollama models automatically—then moves bounded work to the
 machine that can actually perform it.
 
-No Tailscale account. No fictional “global RAM.” No mystery daemon with unlimited authority. No AI
-agent holding the keys to its own guardrails.
-
 | The old constraint | The Rampage move |
 | --- | --- |
 | A powerful desktop sits idle while another machine struggles | Place the whole job on the best available node |
@@ -67,7 +64,7 @@ physical laptop and phone gates.
 | --- | --- |
 | Trust kernel | Scoped Ed25519 leases; durable one-shot nonces; restart-safe monotonic epochs; crash-reconciled native STOP fencing; fail-closed admission and sidecar auth isolation |
 | OnePool | Three independent evaluation shards placed across bounded offers, completed with signed results, and recovered after restart |
-| Private mesh | Authenticated direct QUIC plus a forced-relay proof through the bundled owner-operated relay; no Tailscale account or silent public relay |
+| Private mesh | Authenticated direct QUIC plus a forced-relay proof through the bundled owner-operated relay; no third-party overlay account or silent public relay |
 | Storage fabric | Encrypted chunked CAS, flushed restart-resumable QUIC frames, full-content possession proofs, corruption quarantine, budgeted independent repair, staging, and retrieval |
 | Real AI workload | OpenAI, Anthropic Messages, and OpenRouter-style text requests crossed authenticated QUIC to a worker's loopback Ollama, streamed back, and ended in a transcript-matched signed receipt |
 | Universal capability contract | Signed offers advertise exact workload domain, adapter, operation, execution pattern, isolation, runtime digest, and qualification status; candidate profiles grant no authority |
