@@ -26,6 +26,7 @@ impl EdgeDeviceStatus {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(mobile)]
 pub(crate) struct DonationPayload {
     pub enabled: bool,
 }

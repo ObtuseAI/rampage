@@ -131,10 +131,12 @@ jobs:
           CI: 'true'
         run: pnpm --dir apps/edge tauri ios init --ci --skip-targets-install
 
+      - name: Configure non-interactive nested pnpm builds
+        run: pnpm config set --global confirmModulesPurge false
+
       - name: Build unsigned Apple Silicon simulator candidate
         env:
           CI: 'true'
-          PNPM_CONFIG_CONFIRM_MODULES_PURGE: 'false'
         run: pnpm --dir apps/edge tauri ios build --ci --debug --target aarch64-sim --no-sign
 
       - name: Stage and verify iOS simulator candidate
