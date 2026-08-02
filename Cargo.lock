@@ -1202,7 +1202,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.119",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -4626,6 +4626,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rampage-edge-app"
+version = "0.2.0"
+dependencies = [
+ "rampage-edge",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-rampage-edge",
+]
+
+[[package]]
 name = "rampage-ledger"
 version = "0.2.0"
 dependencies = [
@@ -4652,7 +4664,7 @@ dependencies = [
  "tokio",
  "uuid",
  "windows 0.61.3",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -5920,6 +5932,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
 dependencies = [
  "proc-macro2",
+ "quote",
  "unicode-ident",
 ]
 
