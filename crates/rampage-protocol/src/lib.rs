@@ -454,6 +454,25 @@ pub struct NodeIdentityV1 {
     pub fencing_epoch: u64,
 }
 
+impl NodeIdentityV1 {
+    pub const SCHEMA: &'static str = "rampage.node-identity.v1";
+
+    pub fn is_valid_for_enrollment(&self) -> bool {
+        self.schema == Self::SCHEMA
+            && self.node_id != Uuid::nil()
+            && self.owner_id != Uuid::nil()
+            && !self.display_name.trim().is_empty()
+            && self.display_name.len() <= 80
+            && !self.display_name.chars().any(char::is_control)
+            && !self.platform.is_empty()
+            && self.platform.len() <= 100
+            && self.platform.is_ascii()
+            && self.public_key.len() == 64
+            && self.public_key.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && self.fencing_epoch == 0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceQuantityV1 {

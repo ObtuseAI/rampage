@@ -1,0 +1,22 @@
+[package]
+name = "rampage-edge-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[lib]
+name = "rampage_edge_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+rampage-edge = { path = "../../../crates/rampage-edge" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-rampage-edge = { path = "../../../crates/tauri-plugin-rampage-edge" }

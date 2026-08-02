@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "apps/desktop/src-tauri",
+    "apps/edge/src-tauri",
     "crates/rampage-protocol",
     "crates/rampage-ledger",
     "crates/rampage-policy",
@@ -12,7 +13,9 @@ members = [
     "crates/rampage-sdk",
     "crates/rampage-controller",
     "crates/rampage-agent",
+    "crates/rampage-edge",
     "crates/rampage-cli",
+    "crates/tauri-plugin-rampage-edge",
 ]
 
 [workspace.package]

@@ -182,6 +182,37 @@ pub fn endpoint_addr_from_record(record: &MeshEndpointRecordV1) -> Result<Endpoi
     if record.schema != MeshEndpointRecordV1::SCHEMA || record.expires_at <= chrono::Utc::now() {
         return Err(MeshError::InvalidEndpointRecord);
     }
+    endpoint_addr_from_record_inner(record)
+}
+
+/// Resolve a controller route pinned during a successful one-time enrollment.
+///
+/// The advertisement expiry is deliberately not reinterpreted as an authority grant here. The
+/// endpoint public key remains the transport trust anchor, while the controller still requires an
+/// enrolled peer and a fresh Governor lease for every operation. This permits restart after the
+/// original ten-minute invitation has expired without trusting a new endpoint identity.
+pub fn endpoint_addr_from_pinned_record(
+    record: &MeshEndpointRecordV1,
+) -> Result<EndpointAddr, MeshError> {
+    if record.schema != MeshEndpointRecordV1::SCHEMA {
+        return Err(MeshError::InvalidEndpointRecord);
+    }
+    endpoint_addr_from_record_inner(record)
+}
+
+fn endpoint_addr_from_record_inner(
+    record: &MeshEndpointRecordV1,
+) -> Result<EndpointAddr, MeshError> {
+    if record.direct_addresses.len() > 16
+        || record.relay_urls.len() > 16
+        || record
+            .direct_addresses
+            .iter()
+            .chain(&record.relay_urls)
+            .any(|address| address.len() > 2_048)
+    {
+        return Err(MeshError::InvalidEndpointRecord);
+    }
     let endpoint_id = record
         .endpoint_id
         .parse::<EndpointId>()
@@ -625,6 +656,39 @@ mod tests {
         let endpoint = bind_endpoint([17_u8; 32], &MeshConfig::default())
             .await
             .unwrap();
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn enrolled_endpoint_pin_survives_advertisement_expiry_without_replacing_identity() {
+        let endpoint = bind_endpoint([18_u8; 32], &MeshConfig::default())
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let mut record = MeshEndpointRecordV1 {
+            schema: MeshEndpointRecordV1::SCHEMA.into(),
+            endpoint_id: endpoint.id().to_string(),
+            direct_addresses: endpoint
+                .bound_sockets()
+                .into_iter()
+                .map(|address| address.to_string())
+                .collect(),
+            relay_urls: Vec::new(),
+            issued_at: now - Duration::minutes(2),
+            expires_at: now - Duration::minutes(1),
+            signature: "enrollment-verified".into(),
+        };
+        assert!(matches!(
+            endpoint_addr_from_record(&record),
+            Err(MeshError::InvalidEndpointRecord)
+        ));
+        assert!(endpoint_addr_from_pinned_record(&record).is_ok());
+
+        record.endpoint_id = "replacement-identity".into();
+        assert!(matches!(
+            endpoint_addr_from_pinned_record(&record),
+            Err(MeshError::InvalidEndpointRecord)
+        ));
         endpoint.close().await;
     }
 

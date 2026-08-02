@@ -4604,6 +4604,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "rampage-edge"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "ed25519-dalek 2.2.0",
+ "hex",
+ "iroh",
+ "rampage-agent",
+ "rampage-mesh",
+ "rampage-policy",
+ "rampage-protocol",
+ "rampage-storage",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "rampage-ledger"
 version = "0.2.0"
 dependencies = [
@@ -6192,6 +6214,16 @@ dependencies = [
  "auto-launch",
  "serde",
  "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "tauri-plugin-rampage-edge"
+version = "0.2.0"
+dependencies = [
+ "serde",
  "tauri",
  "tauri-plugin",
  "thiserror 2.0.19",
