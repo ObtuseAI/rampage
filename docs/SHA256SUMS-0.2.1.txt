@@ -1,0 +1,2 @@
+d81ae34fecd7c2b7faeeb3542cc0e3d5092852fa5f3765c127f160ee2a3c7a2b *Rampage_0.2.1_x64-setup.exe
+af2ae59db323dec6c8ae9dfb3aec1b8f8eeb873e2e42da62db3311822732df95 *Rampage_0.2.1_x64_en-US.msi

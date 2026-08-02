@@ -1,6 +1,7 @@
-import { Billboard, Line, OrbitControls, Text } from "@react-three/drei";
+import { Line, OrbitControls } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
-import { useMemo } from "react";
+import { CanvasTexture, LinearFilter, SRGBColorSpace } from "three";
+import { useEffect, useMemo } from "react";
 import { useRampage } from "../store";
 import type { FabricNode } from "../types";
 
@@ -10,6 +11,39 @@ const colors = {
   sleeping: "#e7a85a",
   offline: "#5b6170",
 };
+
+function NodeLabel({ name }: { name: string }) {
+  const texture = useMemo(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 512;
+    canvas.height = 96;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.font = '600 38px "Segoe UI", sans-serif';
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.shadowColor = "rgba(0, 0, 0, 0.9)";
+    context.shadowBlur = 12;
+    context.lineWidth = 8;
+    context.strokeStyle = "rgba(7, 9, 15, 0.95)";
+    context.strokeText(name, canvas.width / 2, canvas.height / 2);
+    context.fillStyle = "#dce7ff";
+    context.fillText(name, canvas.width / 2, canvas.height / 2);
+    const label = new CanvasTexture(canvas);
+    label.colorSpace = SRGBColorSpace;
+    label.minFilter = LinearFilter;
+    label.needsUpdate = true;
+    return label;
+  }, [name]);
+  useEffect(() => () => texture?.dispose(), [texture]);
+  if (!texture) return null;
+  return (
+    <sprite position={[0, -0.86, 0]} scale={[2.7, 0.5, 1]}>
+      <spriteMaterial map={texture} transparent depthTest={false} toneMapped={false} />
+    </sprite>
+  );
+}
 
 function Node({ node }: { node: FabricNode }) {
   const selected = useRampage((state) => state.selectedNode === node.id);
@@ -30,11 +64,7 @@ function Node({ node }: { node: FabricNode }) {
         <icosahedronGeometry args={[0.52, 1]} />
         <meshBasicMaterial color={colors[node.state]} wireframe transparent opacity={0.18} />
       </mesh>
-      <Billboard position={[0, -0.86, 0]} follow lockX={false} lockY={false} lockZ={false}>
-        <Text fontSize={0.21} color="#dce7ff" anchorX="center" anchorY="middle">
-          {node.name}
-        </Text>
-      </Billboard>
+      <NodeLabel name={node.name} />
     </group>
   );
 }
@@ -58,10 +88,36 @@ function Fabric() {
   );
 }
 
-export function Arena() {
+function webGlAvailable() {
+  try {
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("webgl2") || canvas.getContext("webgl");
+    context?.getExtension("WEBGL_lose_context")?.loseContext();
+    return Boolean(context);
+  } catch {
+    return false;
+  }
+}
+
+export function Arena({ openGrid }: { openGrid: () => void }) {
+  const canRender = useMemo(webGlAvailable, []);
+  if (!canRender) {
+    return (
+      <div className="arena-unavailable" role="status">
+        <strong>3D acceleration is unavailable.</strong>
+        <span>Your fabric is still active and the Ops Grid remains fully functional.</span>
+        <button type="button" onClick={openGrid}>Open Ops Grid</button>
+      </div>
+    );
+  }
   return (
     <div className="arena" aria-label="Spatial fabric view. Use the Ops Grid for keyboard-accessible node controls.">
-      <Canvas camera={{ position: [0, 4.8, 7.8], fov: 48 }} dpr={[1, 1.7]} frameloop="always">
+      <Canvas
+        camera={{ position: [0, 4.8, 7.8], fov: 48 }}
+        dpr={[1, 1.7]}
+        frameloop="always"
+        fallback={<div className="arena-unavailable" aria-hidden="true">3D acceleration is unavailable. The Ops Grid remains fully functional.</div>}
+      >
         <color attach="background" args={["#07090f"]} />
         <fog attach="fog" args={["#07090f", 7, 16]} />
         <Fabric />
