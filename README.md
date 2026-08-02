@@ -251,12 +251,6 @@ The model cannot mint leases, enroll peers, edit the Governor, access signing ke
 promote itself, authorize destructive tools, change financial policy, or bypass STOP. Missing or
 ambiguous evidence fails closed.
 
-## Optional DumbMoney cell
-
-Rampage can operate universally or attach as an infrastructure cell for DumbMoney. That bridge is a
-deliberately narrow external trust boundary: read-only telemetry enters Rampage; signed proposals
-return. Trading, capital, credentials, live databases, promotion, and policy authority never cross it.
-
 ## Start the fabric
 
 1. Download the Windows installer from [Releases](https://github.com/ObtuseAI/rampage/releases).
@@ -346,7 +340,6 @@ rampage artifact-hash $artifact.digest
 | `apps/edge` | Native Android/iOS foreground contributor and live safety UI |
 | `services/intelligence` | Durable proposal-only DBOS/Pydantic AI improvement workflows |
 | `packages/sdk-*` | Token-aware TypeScript and Python integration surfaces |
-| `integrations/dumbmoney` | Read-only telemetry in; signed proposals out |
 
 ## Build and prove it
 
