@@ -19,19 +19,20 @@ use rampage_controller::{
 use rampage_ledger::{Ledger, LedgerEvent};
 use rampage_mesh::{MeshConfig, MeshMode, MeshNode};
 use rampage_policy::{
-    Governor, GovernorConfig, ModelSessionLimits, verify_enrollment, verify_mesh_endpoint_with_key,
-    verify_model_receipt, verify_offer,
+    Governor, GovernorConfig, ModelSessionLimits, verify_artifact_replica_receipt,
+    verify_enrollment, verify_mesh_endpoint_with_key, verify_model_receipt, verify_offer,
 };
 use rampage_protocol::{
-    ArtifactRefV1, ArtifactTransferOperation, CapabilityLeaseV1, EnrollmentInviteV1,
-    EnrollmentRequestV1, ExecutionReceiptV1, InstalledModelV1, JobSpecV1, JobState,
-    LINK_BENCHMARK_TRANSFER_BYTES, MAX_ARTIFACT_TRANSFER_BYTES, MAX_MODEL_OUTPUT_BYTES,
+    ArtifactRefV1, ArtifactReplicaReceiptV1, ArtifactTransferOperation, CapabilityLeaseV1,
+    EnrollmentInviteV1, EnrollmentRequestV1, ExecutionReceiptV1, InstalledModelV1, JobSpecV1,
+    JobState, LINK_BENCHMARK_TRANSFER_BYTES, MAX_ARTIFACT_TRANSFER_BYTES, MAX_MODEL_OUTPUT_BYTES,
     MAX_MODEL_OUTPUT_TOKENS, MAX_MODEL_PROMPT_BYTES, MeshControlRequestV1, MeshControlResponseV1,
     MeshEndpointRecordV1, ModelBackend, ModelChatMessageV1, ModelExecutionReceiptV1,
     ModelInvocationFrameKind, ModelInvocationRequestV1, ModelMemoryKind, ModelParallelism,
     ModelRuntimeOfferV1, ModelRuntimeStatus, ModelSessionLeaseV1, ModelSessionRequestV1,
     ModelUsageV1, NodeIdentityV1, PromotionCanaryLeaseV1, PromotionCandidateV1,
-    RelayAccessManifestV1, ResourceClass, ResourceOfferV1, ShardSetV1, StorageClass, WorkClaimV1,
+    RelayAccessManifestV1, ResourceClass, ResourceOfferV1, ShardSetV1, StorageClass,
+    StorageLeaseV1, WorkClaimV1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -75,6 +76,8 @@ struct AppState {
     completed_receipts: Arc<RwLock<HashMap<Uuid, Uuid>>>,
     shard_sets: Arc<RwLock<HashMap<Uuid, ShardSetRecord>>>,
     artifact_replicas: Arc<RwLock<HashMap<(String, Uuid), ArtifactRefV1>>>,
+    replica_evidence: Arc<RwLock<HashMap<(String, Uuid), ArtifactReplicaReceiptV1>>>,
+    storage_probe_cursor: Arc<AtomicU64>,
     artifact_store: Arc<rampage_storage::CasStore>,
     local_api_token: Arc<String>,
     admission_gate: Arc<tokio::sync::Mutex<()>>,
@@ -252,10 +255,21 @@ async fn main() -> anyhow::Result<()> {
     ledger
         .verify()
         .context("refusing to start with an invalid evidence ledger")?;
-    let fencing_epoch = match ledger.current_fencing_epoch("controller")? {
+    let mut fencing_epoch = match ledger.current_fencing_epoch("controller")? {
         0 => ledger.advance_fencing_epoch("controller")?,
         current => current,
     };
+    let kill_latch_path = data_dir.join("KILL");
+    if kill_latch_path.is_file() && read_stop_epoch_marker(&kill_latch_path) != Some(fencing_epoch)
+    {
+        fencing_epoch = ledger.advance_fencing_epoch("controller")?;
+        write_stop_epoch_marker(&kill_latch_path, fencing_epoch)?;
+        ledger.append(
+            "fabric.owner_stop.recovered",
+            "local-fabric",
+            &json!({"fencing_epoch": fencing_epoch}),
+        )?;
+    }
     let address: SocketAddr = std::env::var("RAMPAGE_BIND")
         .unwrap_or_else(|_| "127.0.0.1:47831".into())
         .parse()?;
@@ -291,6 +305,7 @@ async fn main() -> anyhow::Result<()> {
         completed_receipts,
         shard_sets,
         artifact_replicas,
+        replica_evidence,
     ) = restore_state(&ledger, fencing_epoch)?;
     let mesh_config = mesh_config_from_env(&nodes)?;
     let mesh = Arc::new(
@@ -314,13 +329,15 @@ async fn main() -> anyhow::Result<()> {
         assignments: Arc::new(RwLock::new(assignments)),
         idempotency: Arc::new(RwLock::new(idempotency)),
         local_enrollment_enabled: address.ip().is_loopback(),
-        kill_latch_path: Arc::new(data_dir.join("KILL")),
+        kill_latch_path: Arc::new(kill_latch_path),
         mesh,
         reservations: Arc::new(RwLock::new(reservations)),
         admission_policy: Arc::new(AdmissionPolicy::default()),
         completed_receipts: Arc::new(RwLock::new(completed_receipts)),
         shard_sets: Arc::new(RwLock::new(shard_sets)),
         artifact_replicas: Arc::new(RwLock::new(artifact_replicas)),
+        replica_evidence: Arc::new(RwLock::new(replica_evidence)),
+        storage_probe_cursor: Arc::new(AtomicU64::new(0)),
         artifact_store: Arc::new(rampage_storage::CasStore::open(
             data_dir.join("cas"),
             load_or_create_secret(&data_dir.join("storage.key"))?,
@@ -335,6 +352,7 @@ async fn main() -> anyhow::Result<()> {
     };
     refresh_diagnostics(&state).map_err(anyhow::Error::msg)?;
     tokio::spawn(run_diagnostic_loop(state.clone()));
+    tokio::spawn(run_storage_repair_loop(state.clone()));
     let mesh_state = state.clone();
     let protected = Router::new()
         .route("/v1/stop", post(local_stop))
@@ -362,6 +380,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/artifacts/get", get(get_artifact))
         .route("/v1/artifacts/replicate", post(replicate_artifact))
         .route("/v1/artifacts/retrieve", post(retrieve_artifact))
+        .route("/v1/artifacts/repair", post(repair_protected_artifacts))
         .route("/v1/benchmarks/link", post(link_probe))
         .route("/v1/mesh/relay-access", get(relay_access_manifest))
         .route("/v1/governor/key", get(governor_key))
@@ -1890,22 +1909,33 @@ async fn local_stop(
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     let _admission_guard = state.admission_gate.lock().await;
-    if state.kill_latch_path.is_file() {
+    let current_epoch = state.fencing_epoch.load(Ordering::Acquire);
+    if state.kill_latch_path.is_file()
+        && read_stop_epoch_marker(state.kill_latch_path.as_ref()) == Some(current_epoch)
+    {
         return Ok((
             StatusCode::OK,
             Json(json!({
                 "stopped": true,
-                "fencing_epoch": state.fencing_epoch.load(Ordering::Acquire),
+                "fencing_epoch": current_epoch,
                 "duplicate": true
             })),
         ));
     }
-    std::fs::write(state.kill_latch_path.as_ref(), b"owner-stop-v1\n").map_err(internal_error)?;
+    if !state.kill_latch_path.is_file() {
+        match write_new_durable_file(state.kill_latch_path.as_ref(), b"owner-stop-v1\n") {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(internal_error(error)),
+        }
+    }
     let fencing_epoch = state
         .ledger
         .advance_fencing_epoch("controller")
         .map_err(internal_error)?;
     state.fencing_epoch.store(fencing_epoch, Ordering::Release);
+    write_stop_epoch_marker(state.kill_latch_path.as_ref(), fencing_epoch)
+        .map_err(internal_error)?;
     for cancellation in state.model_cancellations.lock().await.values() {
         let _ = cancellation.send(true);
     }
@@ -1940,6 +1970,10 @@ async fn local_resume(
         ));
     }
     let _admission_guard = state.admission_gate.lock().await;
+    let marker = stop_epoch_marker(state.kill_latch_path.as_ref());
+    if marker.is_file() {
+        std::fs::remove_file(marker).map_err(internal_error)?;
+    }
     if state.kill_latch_path.is_file() {
         std::fs::remove_file(state.kill_latch_path.as_ref()).map_err(internal_error)?;
     }
@@ -1958,6 +1992,32 @@ async fn local_resume(
             "fencing_epoch": state.fencing_epoch.load(Ordering::Acquire)
         })),
     ))
+}
+
+fn stop_epoch_marker(kill_latch_path: &std::path::Path) -> PathBuf {
+    kill_latch_path.with_extension("epoch")
+}
+
+fn read_stop_epoch_marker(kill_latch_path: &std::path::Path) -> Option<u64> {
+    std::fs::read_to_string(stop_epoch_marker(kill_latch_path))
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+}
+
+fn write_stop_epoch_marker(
+    kill_latch_path: &std::path::Path,
+    fencing_epoch: u64,
+) -> std::io::Result<()> {
+    let marker = stop_epoch_marker(kill_latch_path);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&marker)?;
+    use std::io::Write as _;
+    file.write_all(format!("{fencing_epoch}\n").as_bytes())?;
+    file.sync_all()?;
+    sync_parent_directory(&marker)
 }
 
 async fn register_offer(
@@ -2171,6 +2231,325 @@ async fn run_diagnostic_loop(state: AppState) {
     }
 }
 
+const MAX_AUTONOMOUS_REPAIRS_PER_CYCLE: usize = 4;
+const MAX_REPLICA_PROBES_PER_CYCLE: usize = 4;
+const MAX_REPLICA_VERIFICATION_BYTES_PER_CYCLE: u64 = 128 * 1024 * 1024;
+
+async fn run_storage_repair_loop(state: AppState) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        if let Err(error) = reconcile_protected_artifacts(&state).await {
+            warn!(%error, "Rampage protected-storage reconciliation failed");
+        }
+    }
+}
+
+async fn repair_protected_artifacts(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    reconcile_protected_artifacts(&state)
+        .await
+        .map_err(internal_error)?;
+    refresh_diagnostics(&state).map_err(internal_error)?;
+    let evidence = state
+        .replica_evidence
+        .read()
+        .map_err(lock_error)?
+        .values()
+        .filter(|receipt| receipt.is_valid_at(chrono::Utc::now()))
+        .count();
+    Ok(Json(json!({
+        "schema": "rampage.protected-storage-reconciliation.v1",
+        "status": "reconciled",
+        "fresh_replica_receipts": evidence,
+        "per_change_approval_required": false,
+        "authority_expansion": "denied"
+    })))
+}
+
+async fn reconcile_protected_artifacts(state: &AppState) -> Result<(), String> {
+    let _admission_guard = state.admission_gate.lock().await;
+    if state.kill_latch_path.is_file() {
+        return Ok(());
+    }
+    let now = chrono::Utc::now();
+    let offers = state
+        .offers
+        .read()
+        .map_err(|_| "offer registry lock is poisoned".to_string())?
+        .values()
+        .filter(|offer| offer.expires_at > now && offer.mesh_endpoint.is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut protected = state
+        .artifact_replicas
+        .read()
+        .map_err(|_| "artifact replica registry lock is poisoned".to_string())?
+        .iter()
+        .filter(|(_, artifact)| artifact.storage_class == StorageClass::Protected)
+        .map(|((digest, node_id), artifact)| (digest.clone(), *node_id, artifact.clone()))
+        .collect::<Vec<_>>();
+    protected.sort_by(|left, right| (&left.0, left.1).cmp(&(&right.0, right.1)));
+    let evidence = state
+        .replica_evidence
+        .read()
+        .map_err(|_| "replica evidence registry lock is poisoned".to_string())?
+        .clone();
+    let stale = protected
+        .iter()
+        .filter(|(digest, node_id, _)| {
+            !evidence
+                .get(&(digest.clone(), *node_id))
+                .is_some_and(|receipt| receipt.is_valid_at(now))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_probes = select_replica_probes(
+        &stale,
+        state
+            .storage_probe_cursor
+            .fetch_add(MAX_REPLICA_PROBES_PER_CYCLE as u64, Ordering::AcqRel),
+    );
+    let mut by_digest = BTreeMap::<String, (ArtifactRefV1, BTreeSet<Uuid>)>::new();
+    for (digest, node_id, artifact) in protected {
+        let entry = by_digest
+            .entry(digest)
+            .or_insert_with(|| (artifact, BTreeSet::new()));
+        entry.1.insert(node_id);
+    }
+    let mut repairs = 0_usize;
+    for (digest, (remote_artifact, recorded_nodes)) in by_digest {
+        let known_nodes = recorded_nodes.clone();
+        let mut verified_nodes = recorded_nodes
+            .iter()
+            .filter(|node_id| {
+                evidence
+                    .get(&(digest.clone(), **node_id))
+                    .is_some_and(|receipt| receipt.is_valid_at(now))
+            })
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let verification_complete = recorded_nodes.iter().all(|node_id| {
+            verified_nodes.contains(node_id)
+                || selected_probes.contains(&(digest.clone(), *node_id))
+        });
+        for node_id in recorded_nodes {
+            if !selected_probes.contains(&(digest.clone(), node_id)) {
+                continue;
+            }
+            let Some(offer) = offers.iter().find(|offer| offer.node_id == node_id) else {
+                continue;
+            };
+            match probe_replica(state, offer, &remote_artifact).await {
+                Ok(receipt) => {
+                    state
+                        .replica_evidence
+                        .write()
+                        .map_err(|_| "replica evidence registry lock is poisoned".to_string())?
+                        .insert((digest.clone(), node_id), receipt.clone());
+                    state
+                        .ledger
+                        .append(
+                            "artifact.replica.verified",
+                            &digest,
+                            &json!({
+                                "node_id": node_id,
+                                "artifact": remote_artifact,
+                                "replica_receipt": receipt
+                            }),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    verified_nodes.insert(node_id);
+                }
+                Err(error) => invalidate_replica(state, &digest, node_id, &error.to_string())?,
+            }
+        }
+        if !verification_complete
+            || verified_nodes.len() >= 2
+            || repairs >= MAX_AUTONOMOUS_REPAIRS_PER_CYCLE
+        {
+            continue;
+        }
+        let source = match state.artifact_store.head(&digest) {
+            Ok(source) => source,
+            Err(error) => {
+                state
+                    .ledger
+                    .append(
+                        "artifact.repair.blocked",
+                        &digest,
+                        &json!({"reason": format!("local source unavailable: {error}")}),
+                    )
+                    .map_err(|ledger_error| ledger_error.to_string())?;
+                continue;
+            }
+        };
+        for offer in offers
+            .iter()
+            .filter(|offer| !known_nodes.contains(&offer.node_id))
+        {
+            if verified_nodes.len() >= 2 || repairs >= MAX_AUTONOMOUS_REPAIRS_PER_CYCLE {
+                break;
+            }
+            let Some(endpoint_record) = &offer.mesh_endpoint else {
+                continue;
+            };
+            let endpoint = match rampage_mesh::endpoint_addr_from_record(endpoint_record) {
+                Ok(endpoint) => endpoint,
+                Err(_) => continue,
+            };
+            match replicate_to_offer(state, offer, endpoint, &source, StorageClass::Protected).await
+            {
+                Ok(outcome) => {
+                    let key = (digest.clone(), offer.node_id);
+                    state
+                        .artifact_replicas
+                        .write()
+                        .map_err(|_| "artifact replica registry lock is poisoned".to_string())?
+                        .insert(key.clone(), outcome.artifact.clone());
+                    state
+                        .replica_evidence
+                        .write()
+                        .map_err(|_| "replica evidence registry lock is poisoned".to_string())?
+                        .insert(key, outcome.receipt.clone());
+                    state
+                        .ledger
+                        .append(
+                            "artifact.repaired",
+                            &digest,
+                            &json!({
+                                "node_id": offer.node_id,
+                                "artifact": outcome.artifact,
+                                "storage_lease_id": outcome.lease_id,
+                                "transfer_session_id": outcome.session_id,
+                                "resumed_chunks": outcome.resumed_chunks,
+                                "chunk_count": outcome.chunk_count,
+                                "replica_receipt": outcome.receipt,
+                                "autonomous_threshold": "fewer_than_two_fresh_independent_receipts"
+                            }),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    verified_nodes.insert(offer.node_id);
+                    repairs += 1;
+                }
+                Err(error) => {
+                    state
+                        .ledger
+                        .append(
+                            "artifact.repair.attempt_failed",
+                            &digest,
+                            &json!({"node_id": offer.node_id, "reason": error.to_string()}),
+                        )
+                        .map_err(|ledger_error| ledger_error.to_string())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn select_replica_probes(
+    candidates: &[(String, Uuid, ArtifactRefV1)],
+    cursor: u64,
+) -> BTreeSet<(String, Uuid)> {
+    if candidates.is_empty() {
+        return BTreeSet::new();
+    }
+    let start = cursor as usize % candidates.len();
+    let mut selected = BTreeSet::new();
+    let mut bytes = 0_u64;
+    for offset in 0..candidates.len() {
+        if selected.len() >= MAX_REPLICA_PROBES_PER_CYCLE {
+            break;
+        }
+        let candidate = &candidates[(start + offset) % candidates.len()];
+        let Some(next_bytes) = bytes.checked_add(candidate.2.size_bytes) else {
+            continue;
+        };
+        if next_bytes > MAX_REPLICA_VERIFICATION_BYTES_PER_CYCLE && !selected.is_empty() {
+            continue;
+        }
+        bytes = next_bytes;
+        selected.insert((candidate.0.clone(), candidate.1));
+    }
+    selected
+}
+
+fn invalidate_replica(
+    state: &AppState,
+    digest: &str,
+    node_id: Uuid,
+    reason: &str,
+) -> Result<(), String> {
+    let key = (digest.to_string(), node_id);
+    state
+        .replica_evidence
+        .write()
+        .map_err(|_| "replica evidence registry lock is poisoned".to_string())?
+        .remove(&key);
+    state
+        .ledger
+        .append(
+            "artifact.replica.invalidated",
+            digest,
+            &json!({"digest": digest, "node_id": node_id, "reason": reason}),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn probe_replica(
+    state: &AppState,
+    offer: &ResourceOfferV1,
+    artifact: &ArtifactRefV1,
+) -> anyhow::Result<ArtifactReplicaReceiptV1> {
+    let endpoint_record = offer
+        .mesh_endpoint
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("replica has no signed mesh endpoint"))?;
+    let endpoint = rampage_mesh::endpoint_addr_from_record(endpoint_record)?;
+    let lease = state.governor.authorize_storage_at_epoch(
+        offer,
+        &artifact.digest,
+        artifact.size_bytes,
+        artifact.storage_class,
+        ArtifactTransferOperation::Get,
+        state.fencing_epoch.load(Ordering::Acquire),
+    )?;
+    state
+        .ledger
+        .append("storage.lease.issued", &lease.lease_id.to_string(), &lease)?;
+    let session_id = artifact_transfer_session_id(
+        offer.node_id,
+        &artifact.digest,
+        ArtifactTransferOperation::Get,
+    );
+    let challenge_nonce = Uuid::new_v4().simple().to_string();
+    let (remote, receipt) = rampage_mesh::artifact_head(
+        &state.mesh.endpoint(),
+        rampage_mesh::ArtifactTransferContext {
+            destination: endpoint,
+            lease: lease.clone(),
+            media_type: artifact.media_type.clone(),
+            session_id,
+            challenge_nonce: challenge_nonce.clone(),
+        },
+    )
+    .await?;
+    anyhow::ensure!(
+        remote.digest == artifact.digest
+            && remote.size_bytes == artifact.size_bytes
+            && remote.media_type == artifact.media_type
+            && remote.storage_class == artifact.storage_class
+            && remote.encrypted,
+        "replica probe returned a different artifact contract"
+    );
+    verify_replica_evidence(state, offer, &lease, session_id, &challenge_nonce, &receipt)?;
+    Ok(receipt)
+}
+
 fn refresh_diagnostics(state: &AppState) -> Result<(), String> {
     let now = chrono::Utc::now();
     let nodes = state
@@ -2195,6 +2574,11 @@ fn refresh_diagnostics(state: &AppState) -> Result<(), String> {
         .read()
         .map_err(|_| "artifact replica registry lock is poisoned".to_string())?
         .clone();
+    let replica_evidence = state
+        .replica_evidence
+        .read()
+        .map_err(|_| "replica evidence registry lock is poisoned".to_string())?
+        .clone();
     let events = state
         .ledger
         .latest_events(512)
@@ -2204,7 +2588,10 @@ fn refresh_diagnostics(state: &AppState) -> Result<(), String> {
         &nodes,
         &offers,
         active_assignments,
-        &artifact_replicas,
+        ArtifactDiagnosticState {
+            replicas: &artifact_replicas,
+            evidence: &replica_evidence,
+        },
         &events,
         state.kill_latch_path.is_file(),
     );
@@ -2310,12 +2697,17 @@ fn placement_offers(state: &AppState) -> Result<Vec<ResourceOfferV1>, (StatusCod
         .collect())
 }
 
+struct ArtifactDiagnosticState<'a> {
+    replicas: &'a HashMap<(String, Uuid), ArtifactRefV1>,
+    evidence: &'a HashMap<(String, Uuid), ArtifactReplicaReceiptV1>,
+}
+
 fn build_diagnostic_report(
     now: chrono::DateTime<chrono::Utc>,
     nodes: &HashMap<Uuid, NodeIdentityV1>,
     offers: &HashMap<Uuid, ResourceOfferV1>,
     active_assignments: usize,
-    artifact_replicas: &HashMap<(String, Uuid), ArtifactRefV1>,
+    artifacts: ArtifactDiagnosticState<'_>,
     events: &[LedgerEvent],
     kill_latch: bool,
 ) -> FabricDiagnosticReport {
@@ -2582,9 +2974,16 @@ fn build_diagnostic_report(
     }
 
     let mut protected_replica_counts = HashMap::<String, usize>::new();
-    for ((digest, _), artifact) in artifact_replicas {
+    for (key @ (digest, _), artifact) in artifacts.replicas {
         if artifact.storage_class == StorageClass::Protected {
-            *protected_replica_counts.entry(digest.clone()).or_default() += 1;
+            protected_replica_counts.entry(digest.clone()).or_default();
+            if artifacts
+                .evidence
+                .get(key)
+                .is_some_and(|receipt| receipt.is_valid_at(now))
+            {
+                *protected_replica_counts.entry(digest.clone()).or_default() += 1;
+            }
         }
     }
     let under_replicated_protected_artifacts = protected_replica_counts
@@ -3758,6 +4157,167 @@ fn remote_offer(
     Ok((offer, endpoint))
 }
 
+struct ReplicationOutcome {
+    artifact: ArtifactRefV1,
+    receipt: ArtifactReplicaReceiptV1,
+    lease_id: Uuid,
+    session_id: Uuid,
+    resumed_chunks: usize,
+    chunk_count: usize,
+}
+
+fn artifact_transfer_session_id(
+    node_id: Uuid,
+    digest: &str,
+    operation: ArtifactTransferOperation,
+) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rampage.artifact-transfer-session.v1\0");
+    hasher.update(node_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(digest.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(match operation {
+        ArtifactTransferOperation::Put => b"put".as_slice(),
+        ArtifactTransferOperation::Get => b"get".as_slice(),
+    });
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn verify_replica_evidence(
+    state: &AppState,
+    offer: &ResourceOfferV1,
+    lease: &StorageLeaseV1,
+    session_id: Uuid,
+    challenge_nonce: &str,
+    receipt: &ArtifactReplicaReceiptV1,
+) -> anyhow::Result<()> {
+    let identity = state
+        .nodes
+        .read()
+        .map_err(|_| anyhow::anyhow!("node identity lock is poisoned"))?
+        .get(&offer.node_id)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("replica node identity is unavailable"))?;
+    verify_artifact_replica_receipt(&identity, receipt)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    anyhow::ensure!(
+        receipt.session_id == session_id
+            && receipt.lease_id == lease.lease_id
+            && receipt.node_id == offer.node_id
+            && receipt.digest == lease.digest
+            && receipt.size_bytes == lease.size_bytes
+            && receipt.storage_class == lease.storage_class
+            && receipt.challenge_nonce == challenge_nonce
+            && receipt.fencing_epoch == lease.fencing_epoch,
+        "replica receipt is not bound to the exact transfer authority"
+    );
+    Ok(())
+}
+
+async fn replicate_to_offer(
+    state: &AppState,
+    offer: &ResourceOfferV1,
+    endpoint: iroh::EndpointAddr,
+    source: &ArtifactRefV1,
+    storage_class: StorageClass,
+) -> anyhow::Result<ReplicationOutcome> {
+    let lease = state.governor.authorize_storage_at_epoch(
+        offer,
+        &source.digest,
+        source.size_bytes,
+        storage_class,
+        ArtifactTransferOperation::Put,
+        state.fencing_epoch.load(Ordering::Acquire),
+    )?;
+    state
+        .ledger
+        .append("storage.lease.issued", &lease.lease_id.to_string(), &lease)?;
+    let session_id = artifact_transfer_session_id(
+        offer.node_id,
+        &source.digest,
+        ArtifactTransferOperation::Put,
+    );
+    let progress = rampage_mesh::artifact_put(
+        &state.mesh.endpoint(),
+        rampage_mesh::ArtifactTransferContext {
+            destination: endpoint.clone(),
+            lease: lease.clone(),
+            media_type: source.media_type.clone(),
+            session_id,
+            challenge_nonce: Uuid::new_v4().simple().to_string(),
+        },
+    )
+    .await?;
+    anyhow::ensure!(
+        progress.is_valid()
+            && progress.session_id == session_id
+            && progress.digest == source.digest
+            && progress.size_bytes == source.size_bytes,
+        "remote transfer progress is malformed or mismatched"
+    );
+    let resumed_chunks = progress.received_chunks.len();
+    let chunk_count = progress.chunk_count as usize;
+    for index in progress.missing_chunks {
+        let chunk = state.artifact_store.get_chunk(&source.digest, index)?;
+        let chunk_digest = format!("sha256:{}", hex::encode(Sha256::digest(&chunk)));
+        let updated = rampage_mesh::artifact_put_chunk(
+            &state.mesh.endpoint(),
+            rampage_mesh::ArtifactTransferContext {
+                destination: endpoint.clone(),
+                lease: lease.clone(),
+                media_type: source.media_type.clone(),
+                session_id,
+                challenge_nonce: Uuid::new_v4().simple().to_string(),
+            },
+            index,
+            chunk_digest,
+            &chunk,
+        )
+        .await?;
+        anyhow::ensure!(
+            updated.is_valid()
+                && updated.session_id == session_id
+                && updated.digest == source.digest,
+            "remote transfer progress changed its content binding"
+        );
+    }
+    let challenge_nonce = Uuid::new_v4().simple().to_string();
+    let (artifact, receipt) = rampage_mesh::artifact_commit(
+        &state.mesh.endpoint(),
+        rampage_mesh::ArtifactTransferContext {
+            destination: endpoint,
+            lease: lease.clone(),
+            media_type: source.media_type.clone(),
+            session_id,
+            challenge_nonce: challenge_nonce.clone(),
+        },
+    )
+    .await?;
+    anyhow::ensure!(
+        artifact.digest == source.digest
+            && artifact.size_bytes == source.size_bytes
+            && artifact.media_type == source.media_type
+            && artifact.storage_class == storage_class
+            && artifact.encrypted,
+        "remote artifact does not match the source contract"
+    );
+    verify_replica_evidence(state, offer, &lease, session_id, &challenge_nonce, &receipt)?;
+    Ok(ReplicationOutcome {
+        artifact,
+        receipt,
+        lease_id: lease.lease_id,
+        session_id,
+        resumed_chunks,
+        chunk_count,
+    })
+}
+
 async fn stage_job_inputs(
     state: &AppState,
     offer: &ResourceOfferV1,
@@ -3797,53 +4357,24 @@ async fn stage_job_inputs(
                     Json(json!({"error": error.to_string()})),
                 )
             })?;
-        let payload = state
-            .artifact_store
-            .get(&input.digest)
-            .map_err(internal_error)?;
-        let storage_lease = state
-            .governor
-            .authorize_storage_at_epoch(
-                offer,
-                &input.digest,
-                input.size_bytes,
-                input.storage_class,
-                ArtifactTransferOperation::Put,
-                state.fencing_epoch.load(Ordering::Acquire),
-            )
+        let outcome = replicate_to_offer(state, offer, endpoint, &local, input.storage_class)
+            .await
             .map_err(|error| {
                 (
-                    StatusCode::FORBIDDEN,
-                    Json(json!({"error": error.to_string()})),
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": format!("input staging failed: {error}")})),
                 )
             })?;
-        state
-            .ledger
-            .append(
-                "storage.lease.issued",
-                &storage_lease.lease_id.to_string(),
-                &storage_lease,
-            )
-            .map_err(internal_error)?;
-        let remote = rampage_mesh::artifact_put(
-            &state.mesh.endpoint(),
-            endpoint,
-            storage_lease.clone(),
-            input.media_type.clone(),
-            &payload,
-        )
-        .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"error": format!("input staging failed: {error}")})),
-            )
-        })?;
+        let remote = outcome.artifact;
         state
             .artifact_replicas
             .write()
             .map_err(lock_error)?
             .insert((remote.digest.clone(), offer.node_id), remote.clone());
+        state.replica_evidence.write().map_err(lock_error)?.insert(
+            (remote.digest.clone(), offer.node_id),
+            outcome.receipt.clone(),
+        );
         state
             .ledger
             .append(
@@ -3853,7 +4384,11 @@ async fn stage_job_inputs(
                     "node_id": offer.node_id,
                     "job_id": job.job_id,
                     "artifact": remote,
-                    "storage_lease_id": storage_lease.lease_id
+                    "storage_lease_id": outcome.lease_id,
+                    "transfer_session_id": outcome.session_id,
+                    "resumed_chunks": outcome.resumed_chunks,
+                    "chunk_count": outcome.chunk_count,
+                    "replica_receipt": outcome.receipt
                 }),
             )
             .map_err(internal_error)?;
@@ -3881,48 +4416,29 @@ async fn replicate_artifact(
                 Json(json!({"error": error.to_string()})),
             )
         })?;
-    let payload = state
-        .artifact_store
-        .get(&request.digest)
-        .map_err(internal_error)?;
+    if request.media_type != source.media_type {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "replica media type must match the source artifact"})),
+        ));
+    }
     let (offer, endpoint) = remote_offer(&state, request.node_id)?;
-    let lease = state
-        .governor
-        .authorize_storage_at_epoch(
-            &offer,
-            &source.digest,
-            source.size_bytes,
-            request.storage_class,
-            ArtifactTransferOperation::Put,
-            state.fencing_epoch.load(Ordering::Acquire),
-        )
+    let outcome = replicate_to_offer(&state, &offer, endpoint, &source, request.storage_class)
+        .await
         .map_err(|error| {
             (
-                StatusCode::FORBIDDEN,
+                StatusCode::BAD_GATEWAY,
                 Json(json!({"error": error.to_string()})),
             )
         })?;
-    state
-        .ledger
-        .append("storage.lease.issued", &lease.lease_id.to_string(), &lease)
-        .map_err(internal_error)?;
-    let remote_artifact = rampage_mesh::artifact_put(
-        &state.mesh.endpoint(),
-        endpoint,
-        lease.clone(),
-        request.media_type,
-        &payload,
-    )
-    .await
-    .map_err(|error| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({"error": error.to_string()})),
-        )
-    })?;
+    let remote_artifact = outcome.artifact;
     state.artifact_replicas.write().map_err(lock_error)?.insert(
         (remote_artifact.digest.clone(), request.node_id),
         remote_artifact.clone(),
+    );
+    state.replica_evidence.write().map_err(lock_error)?.insert(
+        (remote_artifact.digest.clone(), request.node_id),
+        outcome.receipt.clone(),
     );
     state
         .ledger
@@ -3932,7 +4448,11 @@ async fn replicate_artifact(
             &json!({
                 "node_id": request.node_id,
                 "artifact": remote_artifact,
-                "storage_lease_id": lease.lease_id
+                "storage_lease_id": outcome.lease_id,
+                "transfer_session_id": outcome.session_id,
+                "resumed_chunks": outcome.resumed_chunks,
+                "chunk_count": outcome.chunk_count,
+                "replica_receipt": outcome.receipt
             }),
         )
         .map_err(internal_error)?;
@@ -3941,7 +4461,11 @@ async fn replicate_artifact(
         Json(json!({
             "artifact": remote_artifact,
             "node_id": request.node_id,
-            "storage_lease_id": lease.lease_id
+            "storage_lease_id": outcome.lease_id,
+            "transfer_session_id": outcome.session_id,
+            "resumed_chunks": outcome.resumed_chunks,
+            "chunk_count": outcome.chunk_count,
+            "replica_receipt": outcome.receipt
         })),
     ))
 }
@@ -3970,7 +4494,16 @@ async fn retrieve_artifact(
             )
         })?;
     let (offer, endpoint) = remote_offer(&state, request.node_id)?;
-    let lease = state
+    let local_contract = state.artifact_store.head(&remote_artifact.digest).ok();
+    let (sink_storage_class, sink_required_replicas) =
+        retrieval_sink_contract(&remote_artifact, local_contract.as_ref())
+            .map_err(|error| (StatusCode::CONFLICT, Json(json!({"error": error}))))?;
+    let session_id = artifact_transfer_session_id(
+        request.node_id,
+        &remote_artifact.digest,
+        ArtifactTransferOperation::Get,
+    );
+    let mut lease = state
         .governor
         .authorize_storage_at_epoch(
             &offer,
@@ -3990,54 +4523,182 @@ async fn retrieve_artifact(
         .ledger
         .append("storage.lease.issued", &lease.lease_id.to_string(), &lease)
         .map_err(internal_error)?;
-    let (artifact, payload) = rampage_mesh::artifact_get(
-        &state.mesh.endpoint(),
-        endpoint,
-        lease.clone(),
-        remote_artifact.media_type.clone(),
-    )
-    .await
-    .map_err(|error| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({"error": error.to_string()})),
+    let initial_spec = rampage_storage::ResumablePutSpec {
+        session_id: session_id.simple().to_string(),
+        lease_id: lease.lease_id.simple().to_string(),
+        authority_scope: "governor".into(),
+        fencing_epoch: lease.fencing_epoch,
+        authority_nonce: lease.nonce.clone(),
+        expires_at: lease.expires_at,
+        digest: remote_artifact.digest.clone(),
+        size_bytes: remote_artifact.size_bytes,
+        media_type: remote_artifact.media_type.clone(),
+        // Retrieval verifies remote bytes into the controller's existing local content-address
+        // contract. A protected remote replica must not silently relabel a cache source object.
+        storage_class: sink_storage_class,
+        required_replicas: sink_required_replicas,
+        chunk_size: rampage_protocol::ARTIFACT_TRANSFER_CHUNK_BYTES,
+    };
+    let progress = state
+        .artifact_store
+        .begin_resumable_put(&initial_spec)
+        .map_err(internal_error)?;
+    let resumed_chunks = progress.received_chunks.len();
+    let mut lease_ids = Vec::new();
+    for (position, index) in progress.missing_chunks.into_iter().enumerate() {
+        if position > 0 {
+            lease = state
+                .governor
+                .authorize_storage_at_epoch(
+                    &offer,
+                    &remote_artifact.digest,
+                    remote_artifact.size_bytes,
+                    remote_artifact.storage_class,
+                    ArtifactTransferOperation::Get,
+                    state.fencing_epoch.load(Ordering::Acquire),
+                )
+                .map_err(|error| {
+                    (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({"error": error.to_string()})),
+                    )
+                })?;
+            state
+                .ledger
+                .append("storage.lease.issued", &lease.lease_id.to_string(), &lease)
+                .map_err(internal_error)?;
+        }
+        lease_ids.push(lease.lease_id);
+        let (artifact, chunk_digest, chunk) = rampage_mesh::artifact_get_chunk(
+            &state.mesh.endpoint(),
+            rampage_mesh::ArtifactTransferContext {
+                destination: endpoint.clone(),
+                lease: lease.clone(),
+                media_type: remote_artifact.media_type.clone(),
+                session_id,
+                challenge_nonce: Uuid::new_v4().simple().to_string(),
+            },
+            index,
         )
-    })?;
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": error.to_string()})),
+            )
+        })?;
+        if artifact.digest != remote_artifact.digest
+            || artifact.size_bytes != remote_artifact.size_bytes
+            || artifact.media_type != remote_artifact.media_type
+            || artifact.storage_class != remote_artifact.storage_class
+            || !artifact.encrypted
+        {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": "remote chunk changed the artifact contract"})),
+            ));
+        }
+        let spec = rampage_storage::ResumablePutSpec {
+            lease_id: lease.lease_id.simple().to_string(),
+            fencing_epoch: lease.fencing_epoch,
+            authority_nonce: lease.nonce.clone(),
+            expires_at: lease.expires_at,
+            ..initial_spec.clone()
+        };
+        state
+            .artifact_store
+            .begin_resumable_put(&spec)
+            .map_err(internal_error)?;
+        state
+            .artifact_store
+            .put_resumable_chunk(
+                &session_id.simple().to_string(),
+                index,
+                &chunk_digest,
+                &chunk,
+            )
+            .map_err(internal_error)?;
+    }
     let local = state
         .artifact_store
-        .put(
-            &payload,
-            rampage_storage::PutOptions {
-                media_type: artifact.media_type.clone(),
-                storage_class: artifact.storage_class,
-                required_replicas: if artifact.storage_class == StorageClass::Protected {
-                    2
-                } else {
-                    1
-                },
-            },
-        )
+        .commit_resumable_put(&session_id.simple().to_string())
         .map_err(internal_error)?;
-    if local.digest != artifact.digest {
+    if local.digest != remote_artifact.digest {
         return Err((
             StatusCode::BAD_GATEWAY,
             Json(json!({"error": "retrieved artifact failed content-address verification"})),
         ));
     }
+    let replica_receipt = probe_replica(&state, &offer, &remote_artifact)
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": format!("replica possession proof failed: {error}")})),
+            )
+        })?;
+    state.replica_evidence.write().map_err(lock_error)?.insert(
+        (remote_artifact.digest.clone(), request.node_id),
+        replica_receipt.clone(),
+    );
+    let payload = state
+        .artifact_store
+        .get(&local.digest)
+        .map_err(internal_error)?;
     state
         .ledger
         .append(
             "artifact.retrieved",
-            &artifact.digest,
-            &json!({"node_id": request.node_id, "artifact": artifact, "storage_lease_id": lease.lease_id}),
+            &local.digest,
+            &json!({
+                "node_id": request.node_id,
+                "artifact": local,
+                "storage_lease_ids": lease_ids,
+                "transfer_session_id": session_id,
+                "resumed_chunks": resumed_chunks,
+                "replica_receipt": replica_receipt
+            }),
         )
         .map_err(internal_error)?;
     Ok(Json(json!({
         "schema": "rampage.artifact-payload.v1",
-        "artifact": artifact,
+        "artifact": local,
         "node_id": request.node_id,
+        "transfer_session_id": session_id,
+        "resumed_chunks": resumed_chunks,
         "data_base64": BASE64.encode(payload)
     })))
+}
+
+fn retrieval_sink_contract(
+    remote: &ArtifactRefV1,
+    local: Option<&ArtifactRefV1>,
+) -> Result<(StorageClass, u8), String> {
+    if let Some(local) = local {
+        if local.digest != remote.digest
+            || local.size_bytes != remote.size_bytes
+            || local.media_type != remote.media_type
+            || !local.encrypted
+        {
+            return Err("local content address conflicts with the remote artifact contract".into());
+        }
+        return Ok((
+            local.storage_class,
+            if local.storage_class == StorageClass::Protected {
+                2
+            } else {
+                1
+            },
+        ));
+    }
+    Ok((
+        remote.storage_class,
+        if remote.storage_class == StorageClass::Protected {
+            2
+        } else {
+            1
+        },
+    ))
 }
 
 async fn events(
@@ -4046,7 +4707,10 @@ async fn events(
 ) -> Result<Json<Vec<LedgerEvent>>, (StatusCode, Json<Value>)> {
     state
         .ledger
-        .events(query.after.unwrap_or(0), query.limit.unwrap_or(250))
+        .events(
+            query.after.unwrap_or(0),
+            query.limit.unwrap_or(250).clamp(1, 10_000),
+        )
         .map(Json)
         .map_err(internal_error)
 }
@@ -4077,18 +4741,81 @@ fn load_or_create_governor(
 
 fn load_or_create_secret(path: &std::path::Path) -> anyhow::Result<[u8; 32]> {
     use rand::RngCore;
-    if path.is_file() {
-        let bytes = hex::decode(std::fs::read_to_string(path)?.trim())?;
-        return bytes
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("secret key must contain exactly 32 bytes"));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => return read_secret_file(path, "secret key"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     let mut bytes = [0_u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    let temporary = path.with_extension("key.tmp");
-    std::fs::write(&temporary, hex::encode(bytes))?;
-    std::fs::rename(temporary, path)?;
-    Ok(bytes)
+    let encoded = hex::encode(bytes);
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(mut file) => {
+            use std::io::Write as _;
+            file.write_all(encoded.as_bytes())?;
+            file.sync_all()?;
+            sync_parent_directory(path)?;
+            Ok(bytes)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_secret_file(path, "secret key")
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_secret_file(path: &std::path::Path, label: &str) -> anyhow::Result<[u8; 32]> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        !metadata.file_type().is_symlink() && metadata.is_file(),
+        "{label} must be a regular non-symlink file"
+    );
+    anyhow::ensure!(metadata.len() <= 128, "{label} exceeds its size limit");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        if metadata.mode() & 0o077 != 0 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    let bytes = hex::decode(std::fs::read_to_string(path)?.trim())?;
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("{label} must contain exactly 32 bytes"))
+}
+
+fn write_new_durable_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)?;
+    use std::io::Write as _;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    sync_parent_directory(path)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &std::path::Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn governor_config_from_env() -> anyhow::Result<GovernorConfig> {
@@ -4148,6 +4875,7 @@ type RestoredState = (
     HashMap<Uuid, Uuid>,
     HashMap<Uuid, ShardSetRecord>,
     HashMap<(String, Uuid), ArtifactRefV1>,
+    HashMap<(String, Uuid), ArtifactReplicaReceiptV1>,
 );
 
 fn restore_state(ledger: &Ledger, fencing_epoch: u64) -> anyhow::Result<RestoredState> {
@@ -4159,6 +4887,7 @@ fn restore_state(ledger: &Ledger, fencing_epoch: u64) -> anyhow::Result<Restored
     let mut completed_receipts = HashMap::new();
     let mut shard_sets = HashMap::new();
     let mut artifact_replicas = HashMap::new();
+    let mut replica_evidence = HashMap::new();
     let now = chrono::Utc::now();
     let mut after_sequence = 0_u64;
     loop {
@@ -4279,7 +5008,11 @@ fn restore_state(ledger: &Ledger, fencing_epoch: u64) -> anyhow::Result<Restored
                         }
                     }
                 }
-                "artifact.replicated" | "artifact.input.staged" | "artifact.output.recorded" => {
+                "artifact.replicated"
+                | "artifact.input.staged"
+                | "artifact.output.recorded"
+                | "artifact.replica.verified"
+                | "artifact.repaired" => {
                     let Some(node_id) = event
                         .payload
                         .get("node_id")
@@ -4292,7 +5025,43 @@ fn restore_state(ledger: &Ledger, fencing_epoch: u64) -> anyhow::Result<Restored
                         continue;
                     };
                     let artifact: ArtifactRefV1 = serde_json::from_value(artifact_value.clone())?;
-                    artifact_replicas.insert((artifact.digest.clone(), node_id), artifact);
+                    let key = (artifact.digest.clone(), node_id);
+                    artifact_replicas.insert(key.clone(), artifact);
+                    if let Some(receipt) = event
+                        .payload
+                        .get("replica_receipt")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                        .filter(|receipt: &ArtifactReplicaReceiptV1| {
+                            receipt.node_id == node_id
+                                && receipt.digest == key.0
+                                && receipt.size_bytes
+                                    == artifact_replicas
+                                        .get(&key)
+                                        .map(|artifact| artifact.size_bytes)
+                                        .unwrap_or_default()
+                                && nodes.get(&node_id).is_some_and(|identity| {
+                                    verify_artifact_replica_receipt(identity, receipt).is_ok()
+                                })
+                        })
+                    {
+                        replica_evidence.insert(key, receipt);
+                    }
+                }
+                "artifact.replica.invalidated" => {
+                    let Some(node_id) = event
+                        .payload
+                        .get("node_id")
+                        .and_then(Value::as_str)
+                        .and_then(|value| Uuid::parse_str(value).ok())
+                    else {
+                        continue;
+                    };
+                    let Some(digest) = event.payload.get("digest").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let key = (digest.to_string(), node_id);
+                    replica_evidence.remove(&key);
                 }
                 _ => {}
             }
@@ -4333,6 +5102,7 @@ fn restore_state(ledger: &Ledger, fencing_epoch: u64) -> anyhow::Result<Restored
         completed_receipts,
         shard_sets,
         artifact_replicas,
+        replica_evidence,
     ))
 }
 
@@ -4748,7 +5518,10 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             0,
-            &HashMap::new(),
+            ArtifactDiagnosticState {
+                replicas: &HashMap::new(),
+                evidence: &HashMap::new(),
+            },
             &[],
             false,
         );
@@ -4757,7 +5530,10 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             0,
-            &HashMap::new(),
+            ArtifactDiagnosticState {
+                replicas: &HashMap::new(),
+                evidence: &HashMap::new(),
+            },
             &[],
             false,
         );
@@ -4793,7 +5569,10 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             0,
-            &HashMap::new(),
+            ArtifactDiagnosticState {
+                replicas: &HashMap::new(),
+                evidence: &HashMap::new(),
+            },
             &ledger.latest_events(10).unwrap(),
             false,
         );
@@ -4826,7 +5605,10 @@ mod tests {
             &HashMap::from([(identity.node_id, identity.clone())]),
             &HashMap::from([(offer.node_id, offer.clone())]),
             0,
-            &HashMap::new(),
+            ArtifactDiagnosticState {
+                replicas: &HashMap::new(),
+                evidence: &HashMap::new(),
+            },
             &[],
             false,
         );
@@ -4855,7 +5637,10 @@ mod tests {
             &HashMap::from([(identity.node_id, identity.clone())]),
             &HashMap::from([(offer.node_id, offer.clone())]),
             0,
-            &HashMap::new(),
+            ArtifactDiagnosticState {
+                replicas: &HashMap::new(),
+                evidence: &HashMap::new(),
+            },
             &[],
             false,
         );
@@ -4866,5 +5651,173 @@ mod tests {
             &["AUTHENTICATED_ROUTE_EMPTY".to_string()]
         );
         assert_eq!(constraints.evidence_digest, report.evidence_digest);
+    }
+
+    #[test]
+    fn protected_durability_counts_only_fresh_independent_receipts() {
+        let now = chrono::Utc::now();
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+        let artifact = ArtifactRefV1 {
+            schema: "rampage.artifact-ref.v1".into(),
+            digest: digest.clone(),
+            size_bytes: 42,
+            media_type: "application/octet-stream".into(),
+            storage_class: StorageClass::Protected,
+            encrypted: true,
+        };
+        let replicas = HashMap::from([
+            ((digest.clone(), first), artifact.clone()),
+            ((digest.clone(), second), artifact),
+        ]);
+        let receipt = |node_id, expires_at| ArtifactReplicaReceiptV1 {
+            schema: ArtifactReplicaReceiptV1::SCHEMA.into(),
+            receipt_id: Uuid::now_v7(),
+            session_id: Uuid::now_v7(),
+            lease_id: Uuid::now_v7(),
+            node_id,
+            digest: digest.clone(),
+            size_bytes: 42,
+            storage_class: StorageClass::Protected,
+            challenge_nonce: Uuid::new_v4().simple().to_string(),
+            verified_at: now - Duration::minutes(1),
+            expires_at,
+            fencing_epoch: 3,
+            signature: "signed".into(),
+        };
+        let evidence = HashMap::from([
+            (
+                (digest.clone(), first),
+                receipt(first, now + Duration::minutes(9)),
+            ),
+            (
+                (digest.clone(), second),
+                receipt(second, now - Duration::seconds(1)),
+            ),
+        ]);
+        let report = build_diagnostic_report(
+            now,
+            &HashMap::new(),
+            &HashMap::new(),
+            0,
+            ArtifactDiagnosticState {
+                replicas: &replicas,
+                evidence: &evidence,
+            },
+            &[],
+            false,
+        );
+        assert_eq!(report.metrics.protected_artifacts, 1);
+        assert_eq!(report.metrics.under_replicated_protected_artifacts, 1);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "PROTECTED_ARTIFACT_UNDER_REPLICATED")
+        );
+    }
+
+    #[test]
+    fn transfer_sessions_are_deterministic_but_peer_and_direction_specific() {
+        let digest = format!("sha256:{}", "e".repeat(64));
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+        let put = artifact_transfer_session_id(first, &digest, ArtifactTransferOperation::Put);
+        assert_eq!(
+            put,
+            artifact_transfer_session_id(first, &digest, ArtifactTransferOperation::Put)
+        );
+        assert_ne!(
+            put,
+            artifact_transfer_session_id(first, &digest, ArtifactTransferOperation::Get)
+        );
+        assert_ne!(
+            put,
+            artifact_transfer_session_id(second, &digest, ArtifactTransferOperation::Put)
+        );
+    }
+
+    #[test]
+    fn protected_remote_retrieval_preserves_the_local_content_address_contract() {
+        let digest = format!("sha256:{}", "f".repeat(64));
+        let remote = ArtifactRefV1 {
+            schema: "rampage.artifact-ref.v1".into(),
+            digest: digest.clone(),
+            size_bytes: 42,
+            media_type: "application/octet-stream".into(),
+            storage_class: StorageClass::Protected,
+            encrypted: true,
+        };
+        let local = ArtifactRefV1 {
+            storage_class: StorageClass::Cache,
+            ..remote.clone()
+        };
+        assert_eq!(
+            retrieval_sink_contract(&remote, Some(&local)).unwrap(),
+            (StorageClass::Cache, 1)
+        );
+        assert_eq!(
+            retrieval_sink_contract(&remote, None).unwrap(),
+            (StorageClass::Protected, 2)
+        );
+
+        let conflicting = ArtifactRefV1 {
+            size_bytes: 43,
+            ..local
+        };
+        assert!(retrieval_sink_contract(&remote, Some(&conflicting)).is_err());
+    }
+
+    #[test]
+    fn replica_probe_selection_is_rotating_and_resource_bounded() {
+        let artifact = |suffix: char, size_bytes| ArtifactRefV1 {
+            schema: "rampage.artifact-ref.v1".into(),
+            digest: format!("sha256:{}", suffix.to_string().repeat(64)),
+            size_bytes,
+            media_type: "application/octet-stream".into(),
+            storage_class: StorageClass::Protected,
+            encrypted: true,
+        };
+        let candidates = (0..6)
+            .map(|index| {
+                let artifact = artifact((b'a' + index as u8) as char, 40 * 1024 * 1024);
+                (artifact.digest.clone(), Uuid::now_v7(), artifact)
+            })
+            .collect::<Vec<_>>();
+        let first = select_replica_probes(&candidates, 0);
+        let rotated = select_replica_probes(&candidates, 4);
+        assert_eq!(first.len(), 3);
+        assert_eq!(rotated.len(), 3);
+        assert_ne!(first, rotated);
+    }
+
+    #[test]
+    fn durable_secret_creation_is_idempotent_and_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("controller.key");
+        let first = load_or_create_secret(&path).unwrap();
+        let second = load_or_create_secret(&path).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(std::fs::read_to_string(path).unwrap().len(), 64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_loader_rejects_symlinks_and_removes_group_permissions() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target.key");
+        std::fs::write(&target, "11".repeat(32)).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let linked = temp.path().join("linked.key");
+        symlink(&target, &linked).unwrap();
+        assert!(load_or_create_secret(&linked).is_err());
+        assert!(load_or_create_secret(&target).is_ok());
+        assert_eq!(
+            std::fs::metadata(target).unwrap().permissions().mode() & 0o077,
+            0
+        );
     }
 }

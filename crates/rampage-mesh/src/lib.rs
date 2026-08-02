@@ -10,8 +10,9 @@ use iroh::{
     endpoint::{Connection, RecvStream, SendStream, presets},
 };
 use rampage_protocol::{
-    ArtifactRefV1, ArtifactTransferOperation, ArtifactTransferRequestV1,
-    ArtifactTransferResponseV1, MAX_ARTIFACT_TRANSFER_BYTES, MeshControlRequestV1,
+    ARTIFACT_TRANSFER_CHUNK_BYTES, ArtifactRefV1, ArtifactReplicaReceiptV1,
+    ArtifactTransferActionV2, ArtifactTransferOperation, ArtifactTransferProgressV1,
+    ArtifactTransferRequestV2, ArtifactTransferResponseV2, MeshControlRequestV1,
     MeshControlResponseV1, MeshEndpointRecordV1, ModelInvocationFrameV1, ModelInvocationRequestV1,
     StorageLeaseV1,
 };
@@ -21,7 +22,7 @@ use std::net::SocketAddr;
 use thiserror::Error;
 
 pub const CONTROL_ALPN: &[u8] = b"rampage.mesh.control.v1";
-pub const ARTIFACT_ALPN: &[u8] = b"rampage.mesh.artifact.v1";
+pub const ARTIFACT_ALPN: &[u8] = b"rampage.mesh.artifact.v2";
 pub const MODEL_ALPN: &[u8] = b"rampage.mesh.model.v1";
 const MAX_ARTIFACT_HEADER_BYTES: usize = 64 * 1024;
 
@@ -323,16 +324,11 @@ pub async fn invoke_model(
 
 pub async fn read_artifact_request(
     receive: &mut RecvStream,
-) -> anyhow::Result<(ArtifactTransferRequestV1, Vec<u8>)> {
-    let request: ArtifactTransferRequestV1 = read_header(receive).await?;
-    anyhow::ensure!(
-        request.schema == ArtifactTransferRequestV1::SCHEMA
-            && request.lease.schema == StorageLeaseV1::SCHEMA
-            && request.lease.size_bytes <= MAX_ARTIFACT_TRANSFER_BYTES,
-        MeshError::InvalidArtifactHeader
-    );
-    let payload = if request.lease.operation == ArtifactTransferOperation::Put {
-        let mut payload = vec![0_u8; request.lease.size_bytes as usize];
+) -> anyhow::Result<(ArtifactTransferRequestV2, Vec<u8>)> {
+    let request: ArtifactTransferRequestV2 = read_header(receive).await?;
+    anyhow::ensure!(request.is_valid(), MeshError::InvalidArtifactHeader);
+    let payload = if request.action == ArtifactTransferActionV2::PutChunk {
+        let mut payload = vec![0_u8; request.payload_size as usize];
         receive.read_exact(&mut payload).await?;
         payload
     } else {
@@ -343,12 +339,12 @@ pub async fn read_artifact_request(
 
 pub async fn write_artifact_response(
     send: &mut SendStream,
-    response: &ArtifactTransferResponseV1,
+    response: &ArtifactTransferResponseV2,
     payload: &[u8],
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         response.payload_size == payload.len() as u64
-            && response.payload_size <= MAX_ARTIFACT_TRANSFER_BYTES,
+            && response.payload_size <= u64::from(ARTIFACT_TRANSFER_CHUNK_BYTES),
         MeshError::ArtifactSizeMismatch
     );
     write_header(send, response).await?;
@@ -362,16 +358,12 @@ pub async fn write_artifact_response(
 async fn artifact_request(
     endpoint: &Endpoint,
     destination: EndpointAddr,
-    request: &ArtifactTransferRequestV1,
+    request: &ArtifactTransferRequestV2,
     payload: &[u8],
-) -> anyhow::Result<(ArtifactTransferResponseV1, Vec<u8>)> {
-    anyhow::ensure!(
-        request.schema == ArtifactTransferRequestV1::SCHEMA
-            && request.lease.size_bytes <= MAX_ARTIFACT_TRANSFER_BYTES,
-        MeshError::InvalidArtifactHeader
-    );
-    let expected_request_payload = if request.lease.operation == ArtifactTransferOperation::Put {
-        request.lease.size_bytes
+) -> anyhow::Result<(ArtifactTransferResponseV2, Vec<u8>)> {
+    anyhow::ensure!(request.is_valid(), MeshError::InvalidArtifactHeader);
+    let expected_request_payload = if request.action == ArtifactTransferActionV2::PutChunk {
+        request.payload_size
     } else {
         0
     };
@@ -386,11 +378,11 @@ async fn artifact_request(
         send.write_all(payload).await?;
     }
     send.finish()?;
-    let response: ArtifactTransferResponseV1 = read_header(&mut receive).await?;
+    let response: ArtifactTransferResponseV2 = read_header(&mut receive).await?;
     anyhow::ensure!(
-        response.schema == ArtifactTransferResponseV1::SCHEMA
+        response.schema == ArtifactTransferResponseV2::SCHEMA
             && response.request_id == request.request_id
-            && response.payload_size <= MAX_ARTIFACT_TRANSFER_BYTES,
+            && response.payload_size <= u64::from(ARTIFACT_TRANSFER_CHUNK_BYTES),
         MeshError::MismatchedResponse
     );
     if !(200..300).contains(&response.status) {
@@ -408,54 +400,177 @@ async fn artifact_request(
     Ok((response, response_payload))
 }
 
+#[derive(Clone)]
+pub struct ArtifactTransferContext {
+    pub destination: EndpointAddr,
+    pub lease: StorageLeaseV1,
+    pub media_type: String,
+    pub session_id: uuid::Uuid,
+    pub challenge_nonce: String,
+}
+
 pub async fn artifact_put(
     endpoint: &Endpoint,
-    destination: EndpointAddr,
-    lease: StorageLeaseV1,
-    media_type: String,
-    payload: &[u8],
-) -> anyhow::Result<ArtifactRefV1> {
+    context: ArtifactTransferContext,
+) -> anyhow::Result<ArtifactTransferProgressV1> {
     anyhow::ensure!(
-        lease.operation == ArtifactTransferOperation::Put,
+        context.lease.operation == ArtifactTransferOperation::Put,
         MeshError::InvalidArtifactHeader
     );
-    let request = ArtifactTransferRequestV1 {
-        schema: ArtifactTransferRequestV1::SCHEMA.into(),
+    let request = ArtifactTransferRequestV2 {
+        schema: ArtifactTransferRequestV2::SCHEMA.into(),
         request_id: uuid::Uuid::now_v7(),
-        lease,
-        media_type,
+        session_id: context.session_id,
+        lease: context.lease,
+        media_type: context.media_type,
+        action: ArtifactTransferActionV2::Begin,
+        chunk_size: ARTIFACT_TRANSFER_CHUNK_BYTES,
+        chunk_index: None,
+        chunk_digest: None,
+        payload_size: 0,
+        challenge_nonce: context.challenge_nonce,
     };
     let (response, response_payload) =
-        artifact_request(endpoint, destination, &request, payload).await?;
+        artifact_request(endpoint, context.destination, &request, &[]).await?;
     anyhow::ensure!(response_payload.is_empty(), MeshError::ArtifactSizeMismatch);
     response
-        .artifact
+        .progress
         .ok_or_else(|| MeshError::InvalidArtifactHeader.into())
 }
 
-pub async fn artifact_get(
+pub async fn artifact_put_chunk(
     endpoint: &Endpoint,
-    destination: EndpointAddr,
-    lease: StorageLeaseV1,
-    media_type: String,
-) -> anyhow::Result<(ArtifactRefV1, Vec<u8>)> {
+    context: ArtifactTransferContext,
+    chunk_index: u32,
+    chunk_digest: String,
+    chunk: &[u8],
+) -> anyhow::Result<ArtifactTransferProgressV1> {
     anyhow::ensure!(
-        lease.operation == ArtifactTransferOperation::Get,
+        context.lease.operation == ArtifactTransferOperation::Put,
         MeshError::InvalidArtifactHeader
     );
-    let request = ArtifactTransferRequestV1 {
-        schema: ArtifactTransferRequestV1::SCHEMA.into(),
+    let request = ArtifactTransferRequestV2 {
+        schema: ArtifactTransferRequestV2::SCHEMA.into(),
         request_id: uuid::Uuid::now_v7(),
-        lease,
-        media_type,
+        session_id: context.session_id,
+        lease: context.lease,
+        media_type: context.media_type,
+        action: ArtifactTransferActionV2::PutChunk,
+        chunk_size: ARTIFACT_TRANSFER_CHUNK_BYTES,
+        chunk_index: Some(chunk_index),
+        chunk_digest: Some(chunk_digest),
+        payload_size: chunk.len() as u64,
+        challenge_nonce: context.challenge_nonce,
     };
-    let (response, payload) = artifact_request(endpoint, destination, &request, &[]).await?;
-    let artifact = response.artifact.ok_or(MeshError::InvalidArtifactHeader)?;
+    let (response, response_payload) =
+        artifact_request(endpoint, context.destination, &request, chunk).await?;
+    anyhow::ensure!(response_payload.is_empty(), MeshError::ArtifactSizeMismatch);
+    response
+        .progress
+        .ok_or_else(|| MeshError::InvalidArtifactHeader.into())
+}
+
+pub async fn artifact_commit(
+    endpoint: &Endpoint,
+    context: ArtifactTransferContext,
+) -> anyhow::Result<(ArtifactRefV1, ArtifactReplicaReceiptV1)> {
     anyhow::ensure!(
-        artifact.size_bytes == payload.len() as u64,
+        context.lease.operation == ArtifactTransferOperation::Put,
+        MeshError::InvalidArtifactHeader
+    );
+    let request = ArtifactTransferRequestV2 {
+        schema: ArtifactTransferRequestV2::SCHEMA.into(),
+        request_id: uuid::Uuid::now_v7(),
+        session_id: context.session_id,
+        lease: context.lease,
+        media_type: context.media_type,
+        action: ArtifactTransferActionV2::Commit,
+        chunk_size: ARTIFACT_TRANSFER_CHUNK_BYTES,
+        chunk_index: None,
+        chunk_digest: None,
+        payload_size: 0,
+        challenge_nonce: context.challenge_nonce,
+    };
+    let (response, payload) =
+        artifact_request(endpoint, context.destination, &request, &[]).await?;
+    anyhow::ensure!(payload.is_empty(), MeshError::ArtifactSizeMismatch);
+    Ok((
+        response.artifact.ok_or(MeshError::InvalidArtifactHeader)?,
+        response
+            .replica_receipt
+            .ok_or(MeshError::InvalidArtifactHeader)?,
+    ))
+}
+
+pub async fn artifact_get_chunk(
+    endpoint: &Endpoint,
+    context: ArtifactTransferContext,
+    chunk_index: u32,
+) -> anyhow::Result<(ArtifactRefV1, String, Vec<u8>)> {
+    anyhow::ensure!(
+        context.lease.operation == ArtifactTransferOperation::Get,
+        MeshError::InvalidArtifactHeader
+    );
+    let request = ArtifactTransferRequestV2 {
+        schema: ArtifactTransferRequestV2::SCHEMA.into(),
+        request_id: uuid::Uuid::now_v7(),
+        session_id: context.session_id,
+        lease: context.lease,
+        media_type: context.media_type,
+        action: ArtifactTransferActionV2::GetChunk,
+        chunk_size: ARTIFACT_TRANSFER_CHUNK_BYTES,
+        chunk_index: Some(chunk_index),
+        chunk_digest: None,
+        payload_size: 0,
+        challenge_nonce: context.challenge_nonce,
+    };
+    let (response, payload) =
+        artifact_request(endpoint, context.destination, &request, &[]).await?;
+    anyhow::ensure!(
+        response.chunk_index == Some(chunk_index)
+            && response.chunk_digest.is_some()
+            && response.payload_size == payload.len() as u64,
         MeshError::ArtifactSizeMismatch
     );
-    Ok((artifact, payload))
+    Ok((
+        response.artifact.ok_or(MeshError::InvalidArtifactHeader)?,
+        response
+            .chunk_digest
+            .ok_or(MeshError::InvalidArtifactHeader)?,
+        payload,
+    ))
+}
+
+pub async fn artifact_head(
+    endpoint: &Endpoint,
+    context: ArtifactTransferContext,
+) -> anyhow::Result<(ArtifactRefV1, ArtifactReplicaReceiptV1)> {
+    anyhow::ensure!(
+        context.lease.operation == ArtifactTransferOperation::Get,
+        MeshError::InvalidArtifactHeader
+    );
+    let request = ArtifactTransferRequestV2 {
+        schema: ArtifactTransferRequestV2::SCHEMA.into(),
+        request_id: uuid::Uuid::now_v7(),
+        session_id: context.session_id,
+        lease: context.lease,
+        media_type: context.media_type,
+        action: ArtifactTransferActionV2::Head,
+        chunk_size: ARTIFACT_TRANSFER_CHUNK_BYTES,
+        chunk_index: None,
+        chunk_digest: None,
+        payload_size: 0,
+        challenge_nonce: context.challenge_nonce,
+    };
+    let (response, payload) =
+        artifact_request(endpoint, context.destination, &request, &[]).await?;
+    anyhow::ensure!(payload.is_empty(), MeshError::ArtifactSizeMismatch);
+    Ok((
+        response.artifact.ok_or(MeshError::InvalidArtifactHeader)?,
+        response
+            .replica_receipt
+            .ok_or(MeshError::InvalidArtifactHeader)?,
+    ))
 }
 
 pub async fn bind_node(secret_bytes: [u8; 32], config: &MeshConfig) -> anyhow::Result<MeshNode> {

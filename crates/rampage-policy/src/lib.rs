@@ -3,13 +3,13 @@
 use chrono::{Duration, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rampage_protocol::{
-    ArtifactTransferOperation, CapabilityLeaseV1, DeviceKind, EnrollmentRequestV1,
-    ExecutionReceiptV1, InstalledModelV1, JobSpecV1, MAX_ARTIFACT_TRANSFER_BYTES,
-    MAX_MODEL_OUTPUT_TOKENS, MAX_MODEL_PROMPT_BYTES, MeshEndpointRecordV1, ModelBackend,
-    ModelExecutionReceiptV1, ModelParallelism, ModelRuntimeOfferV1, ModelRuntimeStatus,
-    ModelSessionLeaseV1, NodeIdentityV1, PromotionCanaryLeaseV1, PromotionCandidateV1,
-    PromotionRiskV1, RelayAccessManifestV1, ResourceClass, ResourceOfferV1, StorageClass,
-    StorageLeaseV1,
+    ArtifactReplicaReceiptV1, ArtifactTransferOperation, CapabilityLeaseV1, DeviceKind,
+    EnrollmentRequestV1, ExecutionReceiptV1, InstalledModelV1, JobSpecV1,
+    MAX_ARTIFACT_TRANSFER_BYTES, MAX_MODEL_OUTPUT_TOKENS, MAX_MODEL_PROMPT_BYTES,
+    MeshEndpointRecordV1, ModelBackend, ModelExecutionReceiptV1, ModelParallelism,
+    ModelRuntimeOfferV1, ModelRuntimeStatus, ModelSessionLeaseV1, NodeIdentityV1,
+    PromotionCanaryLeaseV1, PromotionCandidateV1, PromotionRiskV1, RelayAccessManifestV1,
+    ResourceClass, ResourceOfferV1, StorageClass, StorageLeaseV1,
 };
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -509,7 +509,10 @@ impl Governor {
             return Err(Denial::OfferExpired);
         }
         let valid_digest = digest.strip_prefix("sha256:").is_some_and(|value| {
-            value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         });
         if !valid_digest || size_bytes > MAX_ARTIFACT_TRANSFER_BYTES {
             return Err(Denial::InvalidArtifact);
@@ -687,6 +690,28 @@ pub fn verify_storage_lease_with_key(
     lease: &StorageLeaseV1,
 ) -> Result<(), Denial> {
     verify_contract_signature(public_key, &lease.signature, &storage_lease_message(lease))
+}
+
+pub fn sign_artifact_replica_receipt(
+    signing_key: &SigningKey,
+    receipt: &mut ArtifactReplicaReceiptV1,
+) {
+    receipt.signature.clear();
+    receipt.signature = hex::encode(signing_key.sign(&contract_message(receipt)).to_bytes());
+}
+
+pub fn verify_artifact_replica_receipt(
+    identity: &NodeIdentityV1,
+    receipt: &ArtifactReplicaReceiptV1,
+) -> Result<(), Denial> {
+    if identity.node_id != receipt.node_id || !receipt.is_valid_at(Utc::now()) {
+        return Err(Denial::InvalidArtifact);
+    }
+    verify_contract_signature(&identity.public_key, &receipt.signature, &{
+        let mut unsigned = receipt.clone();
+        unsigned.signature.clear();
+        contract_message(&unsigned)
+    })
 }
 
 pub fn verify_model_session_lease_with_key(
@@ -1314,6 +1339,18 @@ mod tests {
                 .unwrap_err(),
             Denial::StorageCapacityDenied
         );
+        assert_eq!(
+            governor
+                .authorize_storage(
+                    &offer,
+                    &format!("sha256:{}", "A".repeat(64)),
+                    1024,
+                    StorageClass::Cache,
+                    ArtifactTransferOperation::Put,
+                )
+                .unwrap_err(),
+            Denial::InvalidArtifact
+        );
     }
 
     #[test]
@@ -1373,6 +1410,45 @@ mod tests {
         manifest.allowed_endpoint_ids.insert("cd".repeat(32));
         assert_eq!(
             verify_relay_access_manifest_with_key(&public_key, &manifest),
+            Err(Denial::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn replica_receipt_is_node_signed_challenge_bound_and_short_lived() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let now = Utc::now();
+        let identity = NodeIdentityV1 {
+            schema: "rampage.node-identity.v1".into(),
+            node_id: Uuid::now_v7(),
+            owner_id: Uuid::now_v7(),
+            display_name: "storage-node".into(),
+            device_kind: DeviceKind::Desktop,
+            platform: "test".into(),
+            public_key: hex::encode(signing_key.verifying_key().to_bytes()),
+            enrolled_at: now,
+            fencing_epoch: 3,
+        };
+        let mut receipt = ArtifactReplicaReceiptV1 {
+            schema: ArtifactReplicaReceiptV1::SCHEMA.into(),
+            receipt_id: Uuid::now_v7(),
+            session_id: Uuid::now_v7(),
+            lease_id: Uuid::now_v7(),
+            node_id: identity.node_id,
+            digest: format!("sha256:{}", "c".repeat(64)),
+            size_bytes: 42,
+            storage_class: StorageClass::Protected,
+            challenge_nonce: "fresh-challenge".into(),
+            verified_at: now,
+            expires_at: now + Duration::minutes(10),
+            fencing_epoch: 3,
+            signature: String::new(),
+        };
+        sign_artifact_replica_receipt(&signing_key, &mut receipt);
+        assert!(verify_artifact_replica_receipt(&identity, &receipt).is_ok());
+        receipt.challenge_nonce = "substituted".into();
+        assert_eq!(
+            verify_artifact_replica_receipt(&identity, &receipt),
             Err(Denial::InvalidSignature)
         );
     }

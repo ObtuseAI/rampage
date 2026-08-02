@@ -51,7 +51,7 @@
         <div class="system-core"><span>R</span></div>
         <div class="satellite sat-a"><b>GPU</b><small>leased</small></div>
         <div class="satellite sat-b"><b>CPU</b><small>ready</small></div>
-        <div class="satellite sat-c"><b>CAS</b><small>sealed</small></div>
+        <div class="satellite sat-c"><b>CAS</b><small>resume · repair</small></div>
         <div class="satellite sat-d"><b>AI</b><small>propose</small></div>
       </div>
     </section>
@@ -83,7 +83,7 @@
       <div class="shift-grid">
         <article><span>01</span><h3>Pool useful work</h3><p>Move complete jobs to the right machine. Split independent evaluation, search, preprocessing, and rendering into atomic shard sets.</p></article>
         <article><span>02</span><h3>Lease exact resources</h3><p>CPU, VRAM, RAM, storage, runtime, thermal, and power capacity become scoped capabilities—not permanent ambient permission.</p></article>
-        <article><span>03</span><h3>Move sealed artifacts</h3><p>Donated drives become encrypted content-addressed capacity with signed transfer leases, bounded payloads, and verified digests.</p></article>
+        <article><span>03</span><h3>Move sealed artifacts</h3><p>Donated drives become encrypted content-addressed capacity with restart-resumable frames, signed possession challenges, and bounded autonomous repair.</p></article>
         <article><span>04</span><h3>Demand receipts</h3><p>Every accepted job returns a signed result. Every transition lands in a recoverable, hash-chained evidence ledger.</p></article>
       </div>
     </section>
@@ -114,7 +114,7 @@
           <div class="graph-node worker"><small>EDGE CLASS</small><strong>Small device</strong><span>bounded foreground work</span></div>
         </div>
         <div class="graph-row graph-foundation">
-          <div class="graph-node artifact"><small>DATA PLANE</small><strong>Encrypted artifact fabric</strong><span>CAS · replication · retrieval</span></div>
+          <div class="graph-node artifact"><small>DATA PLANE</small><strong>Encrypted artifact fabric</strong><span>resume · repair · receipt</span></div>
           <div class="graph-node ledger"><small>EVIDENCE SPINE</small><strong>Hash-chained ledger</strong><span>leases · receipts · recovery</span></div>
           <div class="graph-node stop"><small>OUT-OF-BAND</small><strong>Independent STOP</strong><span>no model · network · controller</span></div>
         </div>
@@ -162,7 +162,7 @@
       <div class="authority-card">
         <p>AI DIRECT AUTHORITY</p>
         <strong>0</strong>
-        <span>No keys · no leases · no enrollment · no self-expanded envelope · no STOP bypass</span>
+        <span>Separate token · no controller keys · no leases · no enrollment · no self-expanded envelope · no STOP bypass</span>
       </div>
     </section>
 
@@ -172,11 +172,11 @@
         <article><b>LEASE</b><h3>Exact durable authority</h3><p>The Governor signs only checked minimum resources. Workers persist consumed nonces and the highest authority epoch across restart.</p></article>
         <article><b>SHARD</b><h3>Atomic pooled work</h3><p>A complete set is planned against one reservation book and admitted all-or-nothing, with explicit success thresholds.</p></article>
         <article><b>MESH</b><h3>Direct first. Owner relayed.</h3><p>Signed peers use direct QUIC when possible. Hard NAT falls back only to the bundled owner relay, with a fresh Governor-signed allowlist and resource caps—never a silent public fleet.</p></article>
-        <article><b>CAS</b><h3>Encrypted donated storage</h3><p>One-shot signed transfer leases bind digest, direction, node, size, class, expiry, and fencing epoch.</p></article>
-        <article><b>RECEIPT</b><h3>Verifiable completion</h3><p>Workers sign the job result and artifact references; controller restart reconstructs durable status.</p></article>
-        <article><b>STOP</b><h3>Human-owned interruption</h3><p>Owner STOP advances the hash-chained epoch; old claims and receipts remain fenced after restart.</p></article>
+        <article><b>CAS</b><h3>Encrypted donated storage</h3><p>Flushed 4 MiB sessions resume after restart, quarantine objective corruption, and repair protected data to two independent workers.</p></article>
+        <article><b>RECEIPT</b><h3>Verifiable completion</h3><p>Workers sign job results and full-content possession challenges; rotating proof budgets keep autonomous verification bounded.</p></article>
+        <article><b>STOP</b><h3>Human-owned interruption</h3><p>Native STOP latches immediately and reconciles to a hash-chained epoch—even if a crash interrupts propagation.</p></article>
       </div>
-      <p class="pool-note">The relay proof turns off every direct IP transport on both test peers, leaving the owner service as the only possible route, then exchanges an authenticated QUIC payload. The honest boundary: public-WAN and every-NAT qualification still require a multi-network campaign.</p>
+      <p class="pool-note">The relay proof turns off every direct IP transport on both test peers, leaving the owner service as the only possible route. The storage proof interrupts a two-frame transfer, resumes it after a gateway and CAS restart, then repairs one protected artifact across two independently keyed workers. The honest boundary: public-WAN, every-NAT, and physical disk-loss qualification still require separate campaigns.</p>
     </section>
 
     <section class="section callout">

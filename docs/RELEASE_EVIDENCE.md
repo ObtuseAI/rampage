@@ -3,6 +3,12 @@
 Validated: **2026-08-01 04:37 America/Chicago**
 Status: **PASS as an unsigned Windows x64 release candidate**
 
+This is the immutable packaged 0.2 qualification record. Current source has since added the
+owner-operated relay and resumable protected-storage milestones; those are separately qualified in
+[owner-relay evidence](OWNER_RELAY_EVIDENCE.md) and
+[resumable-storage evidence](RESUMABLE_STORAGE_EVIDENCE.md), and are not retroactively claimed for
+the 0.2 installers below.
+
 ## Gates
 
 | Gate | Evidence | Result |
@@ -84,7 +90,7 @@ not described as a warning-free all-target audit.
   one contributor. Cross-host tensor/pipeline sharding is disabled until a topology/engine adapter
   passes dedicated evidence gates.
 - Edge: contract and Governor policy exist; native phone/tablet/console binaries are not in 0.2.
-- Storage: signed, bounded direct-QUIC artifact transfer is shipped for cache/scratch replicas,
-  automatic job-input staging, and receipt outputs. V1 transfers are capped at 64 MiB. Protected
-  storage still requires an explicit remote-replica durability workflow.
+- Packaged 0.2 storage: signed, bounded direct-QUIC artifact transfer is shipped for cache/scratch
+  replicas, automatic job-input staging, and receipt outputs. V1 transfers are capped at 64 MiB.
+  The later source-qualified v2 protected-replica workflow is not in these installers.
 - Publication: no installers or executables currently carry an Authenticode signature.

@@ -4574,6 +4574,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "subtle",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tower-http",
@@ -4586,6 +4587,8 @@ dependencies = [
 name = "rampage-desktop"
 version = "0.2.0"
 dependencies = [
+ "hex",
+ "rand 0.8.7",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

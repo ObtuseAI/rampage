@@ -5,7 +5,7 @@ binary release claim.
 
 | Platform | Installable 0.2 package | Controller | Worker | Intended donation profile | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| Windows 11 x64 | MSI and NSIS | Shipped | Shipped | CPU, RAM cache, NVIDIA GPU/VRAM, disk | Full local, direct-QUIC, artifact, Ollama, native tray lifecycle, desktop, and installer gates |
+| Windows 11 x64 | MSI and NSIS | Shipped | Shipped | CPU, RAM cache, NVIDIA GPU/VRAM, disk | Packaged 0.2 gates plus current-source direct QUIC, owner relay, restart-resumable storage, signed possession receipts, and two-node autonomous repair |
 | Windows 10 x64 | Not qualified | Source likely portable | Source likely portable | Same as Windows 11, hardware-dependent | Unexecuted |
 | macOS Apple Silicon | Not shipped | Rust source portable | Rust source portable | CPU/GPU whole jobs, RAM cache, disk | Unexecuted; native packaging and discovery adapters required |
 | Linux x64 | Not shipped | Rust source portable | Rust source portable | CPU, vendor GPU/VRAM, RAM cache, disk | Unexecuted; GTK dependency warning must be resolved or accepted before release |
@@ -13,6 +13,10 @@ binary release claim.
 | iPhone/iPad | Not shipped | No | Designed edge worker | Foreground, restart-tolerant microtasks; thermal/battery gated | Contract and Governor policy only |
 | Game consoles | Not shipped | No | Designed companion worker where platform policy permits | Foreground restart-tolerant microtasks | Contract and Governor policy only; store/platform approval required |
 | Browser/PWA | Not shipped | No | Designed constrained worker | WASM-compatible microtasks, no protected storage | Protocol extension point only |
+
+The installable column describes the published 0.2 artifacts. Later source-qualified capabilities
+do not become packaged or signed merely because they pass a source campaign; each evidence page
+states that boundary explicitly.
 
 ## Capability boundary
 

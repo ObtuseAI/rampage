@@ -96,6 +96,8 @@ enum Command {
         node_id: Uuid,
         output: PathBuf,
     },
+    /// Reconcile protected artifacts to the configured fresh-replica threshold.
+    ArtifactRepair,
     /// Stage an artifact to a worker, hash it there, and return a retrievable output artifact.
     ArtifactHash {
         digest: String,
@@ -337,6 +339,13 @@ async fn main() -> anyhow::Result<()> {
             write_artifact_payload(&response, &output)?;
             print_json(json!({"digest": digest, "node_id": node_id, "output": output}))
         }
+        Command::ArtifactRepair => print_json(
+            post_json(
+                &format!("{}/v1/artifacts/repair", cli.controller),
+                &json!({}),
+            )
+            .await?,
+        ),
         Command::ArtifactHash {
             digest,
             timeout_seconds,
