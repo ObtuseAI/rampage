@@ -12,7 +12,11 @@ $bundleRoot = Join-Path $root 'target/release/bundle'
 $sourceChanges = @(& git -C $root status --porcelain=v1 --untracked-files=all)
 if ($LASTEXITCODE -ne 0) { throw 'could not inspect source tree state' }
 if ($sourceChanges.Count -ne 0) {
-    throw "distribution staging requires a clean committed source tree; found $($sourceChanges.Count) changed paths"
+    $previewLimit = 50
+    $preview = @($sourceChanges | Select-Object -First $previewLimit)
+    $remainder = $sourceChanges.Count - $preview.Count
+    $suffix = if ($remainder -gt 0) { "`n... and $remainder more" } else { '' }
+    throw "distribution staging requires a clean committed source tree; found $($sourceChanges.Count) changed paths:`n$($preview -join "`n")$suffix"
 }
 $appVersion = (Get-Content -LiteralPath (Join-Path $root 'apps/desktop/src-tauri/tauri.conf.json') -Raw |
     ConvertFrom-Json).version
