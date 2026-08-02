@@ -1,6 +1,6 @@
 # Rampage 0.2.1 pairing-candidate evidence
 
-Validated: **2026-08-02 15:04 America/Chicago**
+Validated: **2026-08-02 16:07 America/Chicago**
 Status: **PASS as an unsigned Windows 11 x64 prerelease candidate**
 Release channel: **`v0.2.1-pairing.1`**
 
@@ -20,9 +20,9 @@ Release channel: **`v0.2.1-pairing.1`**
 | Controller campaign | Signed leases/receipts, three-shard threshold and restart recovery, local STOP/resume, durable fencing, stale authority and tokenless request denied | PASS |
 | Mesh/storage campaign | Authenticated direct QUIC, measured topology, encrypted-at-rest round trip, resumable chunks, independent replicas, signed possession, autonomous repair | PASS |
 | Universal model gateway | OpenAI non-streaming/SSE, Anthropic Messages, OpenRouter paths, exact capability discovery, signed receipt, tokenless denial | PASS |
-| NSIS lifecycle | Six payloads; install/uninstall exit 0; desktop + shell shortcuts; controller/intelligence/node/offer ready; no sidecar leak | PASS |
-| MSI structure | Administrative extraction exit 0; six payloads; generated `ApplicationShortcutDesktop` | PASS |
-| Installed main PC | Product version 0.2.1; controller/intelligence ready; one node and one signed offer; desktop shortcut present | PASS |
+| NSIS lifecycle | Exact tagged GitHub asset downloaded by digest; six payloads; install/uninstall exit 0; desktop + shell shortcuts; controller/intelligence/node/offer ready; no sidecar leak | PASS |
+| MSI structure | Exact tagged GitHub asset; administrative extraction exit 0; six payloads; generated `ApplicationDesktopShortcut` | PASS |
+| Installed main PC | Exact tagged GitHub NSIS asset; product version 0.2.1; controller/intelligence ready; one node and one signed offer | PASS |
 
 Process evidence produced during the final source campaign includes:
 
@@ -40,8 +40,8 @@ claim is made.
 
 | Artifact | Bytes | SHA-256 | Authenticode |
 | --- | ---: | --- | --- |
-| `Rampage_0.2.1_x64-setup.exe` | 69,066,549 | `d81ae34fecd7c2b7faeeb3542cc0e3d5092852fa5f3765c127f160ee2a3c7a2b` | Not signed |
-| `Rampage_0.2.1_x64_en-US.msi` | 78,864,384 | `af2ae59db323dec6c8ae9dfb3aec1b8f8eeb873e2e42da62db3311822732df95` | Not signed |
+| `Rampage_0.2.1_x64-setup.exe` | 68,793,034 | `f03b34f55379a485e63a76c804ac4cb2b764b5edd8be3d1558515f54a4c75907` | Not signed |
+| `Rampage_0.2.1_x64_en-US.msi` | 78,548,992 | `dd4cb459711727e74c1e0a4632c7caebe2287be4bd18e01fd1642f07da393b72` | Not signed |
 
 The checksums are duplicated in [`SHA256SUMS-0.2.1.txt`](SHA256SUMS-0.2.1.txt) and must match the
 assets attached to the GitHub prerelease.
