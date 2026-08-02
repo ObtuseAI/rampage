@@ -361,6 +361,11 @@ uv run --project services/intelligence pytest services/intelligence/tests
 `ollama-e2e.ps1` can additionally exercise a real installed model. Generated outputs, installers,
 sidecar binaries, databases, keys, and logs are excluded from source control.
 
+Rust dependencies are checked against a fail-closed, target-qualified
+[RustSec baseline](docs/RUSTSEC_DEPENDENCY_BOUNDARY.md): new vulnerabilities, warning drift, target
+scope drift, and expired reviews fail CI. Linux packages remain candidate-only while the GTK3
+`glib` unsoundness advisory is reachable.
+
 ## Read deeper
 
 [Architecture](docs/ARCHITECTURE.md) ·
@@ -368,6 +373,7 @@ sidecar binaries, databases, keys, and logs are excluded from source control.
 [Edge policy](docs/EDGE_DEVICES.md) ·
 [Operations](docs/OPERATIONS.md) ·
 [Backend admission gates](docs/BACKEND_GATES.md) ·
+[RustSec boundary](docs/RUSTSEC_DEPENDENCY_BOUNDARY.md) ·
 [Model Fabric](docs/MODEL_FABRIC.md) ·
 [Owner relay](docs/OWNER_RELAY.md) ·
 [Native distribution](docs/DISTRIBUTION.md) ·

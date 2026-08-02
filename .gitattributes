@@ -1,0 +1,2 @@
+# Tauri reserializes its managed desktop manifest with LF during packaging.
+apps/desktop/src-tauri/Cargo.toml text eol=lf

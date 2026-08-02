@@ -13,7 +13,7 @@ use rampage_protocol::{
     ModelInvocationFrameV1, ModelInvocationRequestV1, ModelUsageV1, NodeIdentityV1,
     ResourceOfferV1, StorageClass, WorkClaimV1,
 };
-use rand::{RngCore, rngs::OsRng};
+use rand::{TryRng as _, rngs::SysRng};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1397,7 +1397,7 @@ fn load_or_create_secret_bytes(path: &std::path::Path, label: &str) -> anyhow::R
         Err(error) => return Err(error.into()),
     }
     let mut bytes = [0_u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng.try_fill_bytes(&mut bytes)?;
     let encoded = hex::encode(bytes);
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);

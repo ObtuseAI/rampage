@@ -11,7 +11,7 @@ use rampage_protocol::{
     PromotionCanaryLeaseV1, PromotionCandidateV1, PromotionRiskV1, RelayAccessManifestV1,
     ResourceClass, ResourceOfferV1, StorageClass, StorageLeaseV1,
 };
-use rand::rngs::OsRng;
+use rand::{TryRng as _, rngs::SysRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -133,11 +133,19 @@ pub struct Governor {
     signing_key: SigningKey,
 }
 
+fn system_signing_key() -> SigningKey {
+    let mut secret = [0_u8; 32];
+    SysRng
+        .try_fill_bytes(&mut secret)
+        .expect("system randomness is required for signing identities");
+    SigningKey::from_bytes(&secret)
+}
+
 impl Governor {
     pub fn ephemeral(config: GovernorConfig) -> Self {
         Self {
             config,
-            signing_key: SigningKey::generate(&mut OsRng),
+            signing_key: system_signing_key(),
         }
     }
 
@@ -1289,7 +1297,7 @@ mod tests {
 
     #[test]
     fn signed_offer_detects_tampering() {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = system_signing_key();
         let (_, mut offer) = fixtures("desktop", true);
         let identity = NodeIdentityV1 {
             schema: "rampage.node-identity.v1".into(),
@@ -1313,7 +1321,7 @@ mod tests {
 
     #[test]
     fn enrollment_rejects_malformed_secrets_and_invalid_native_identities() {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = system_signing_key();
         let identity = NodeIdentityV1 {
             schema: NodeIdentityV1::SCHEMA.into(),
             node_id: Uuid::now_v7(),
@@ -1507,7 +1515,7 @@ mod tests {
 
     #[test]
     fn replica_receipt_is_node_signed_challenge_bound_and_short_lived() {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = system_signing_key();
         let now = Utc::now();
         let identity = NodeIdentityV1 {
             schema: "rampage.node-identity.v1".into(),

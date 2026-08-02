@@ -27,7 +27,7 @@ repository = "https://github.com/obtuseai/rampage"
 license = "LicenseRef-Proprietary"
 
 [workspace.dependencies]
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 anyhow = "1.0"
 axum = "0.8"
 base64 = "0.22"
@@ -37,7 +37,7 @@ ed25519-dalek = { version = "2.2", features = ["rand_core", "serde"] }
 hex = "0.4"
 iroh = { version = "=1.0.3", default-features = false, features = ["tls-ring"] }
 iroh-relay = { version = "=1.0.3", default-features = false, features = ["server", "tls-ring"] }
-rand = "0.8"
+rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rustls = { version = "0.23.33", default-features = false, features = ["ring", "std"] }
 rusqlite = { version = "0.37", features = ["bundled", "chrono", "uuid"] }
@@ -50,11 +50,11 @@ tempfile = "3.23"
 thiserror = "2.0"
 tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = "0.1"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1.18", features = ["v4", "v7", "serde"] }
 webpki-types = { package = "rustls-pki-types", version = "1.12" }
-windows = "=0.61.3"
-windows-core = "=0.61.2"
+windows = "=0.62.2"
+windows-core = "=0.62.2"
 walkdir = "2.5"

@@ -1,0 +1,24 @@
+{
+  "schema": "rampage.rustsec-baseline.v1",
+  "reviewBy": "2026-10-31",
+  "warnings": [
+    { "id": "RUSTSEC-2024-0413", "kind": "unmaintained", "package": "atk", "targets": ["linux"], "path": "Tauri 2 Linux GTK3 runtime", "disposition": "Candidate-only on Linux; stable Linux publication is blocked until the GTK3 runtime path is removed." },
+    { "id": "RUSTSEC-2024-0416", "kind": "unmaintained", "package": "atk-sys", "targets": ["linux"], "path": "Tauri 2 Linux GTK3 runtime", "disposition": "Candidate-only on Linux; stable Linux publication is blocked until the GTK3 runtime path is removed." },
+    { "id": "RUSTSEC-2024-0412", "kind": "unmaintained", "package": "gdk", "targets": ["linux"], "path": "Tauri 2 Linux GTK3 runtime", "disposition": "Candidate-only on Linux; stable Linux publication is blocked until the GTK3 runtime path is removed." },
+    { "id": "RUSTSEC-2024-0418", "kind": "unmaintained", "package": "gdk-sys", "targets": ["linux"], "path": "Tauri 2 Linux GTK3 runtime", "disposition": "Candidate-only on Linux; stable Linux publication is blocked until the GTK3 runtime path is removed." },
+    { "id": "RUSTSEC-2024-0411", "kind": "unmaintained", "package": "gdkwayland-sys", "targets": ["linux"], "path": "Tauri 2 Linux GTK3 runtime", "disposition": "Candidate-only on Linux; stable Linux publication is blocked until the GTK3 runtime path is removed." },
+    { "id": "RUSTSEC-2024-0417", "kind": "unmaintained", "package": "gdkx11", "targets": ["linux"], "path": "Tauri 2 Linux GTK3 runtime", "disposition": "Candidate-only on Linux; stable Linux publication is blocked until the GTK3 runtime path is removed." },
+    { "id": "RUSTSEC-2024-0414", "kind": "unmaintained", "package": "gdkx11-sys", "targets": ["linux"], "path": "Tauri 2 Linux GTK3 runtime", "disposition": "Candidate-only on Linux; stable Linux publication is blocked until the GTK3 runtime path is removed." },
+    { "id": "RUSTSEC-2024-0415", "kind": "unmaintained", "package": "gtk", "targets": ["linux"], "path": "Tauri 2 Linux GTK3 runtime", "disposition": "Candidate-only on Linux; stable Linux publication is blocked until the GTK3 runtime path is removed." },
+    { "id": "RUSTSEC-2024-0420", "kind": "unmaintained", "package": "gtk-sys", "targets": ["linux"], "path": "Tauri 2 Linux GTK3 runtime", "disposition": "Candidate-only on Linux; stable Linux publication is blocked until the GTK3 runtime path is removed." },
+    { "id": "RUSTSEC-2024-0419", "kind": "unmaintained", "package": "gtk3-macros", "targets": ["linux"], "path": "Tauri 2 Linux GTK3 runtime", "disposition": "Candidate-only on Linux; stable Linux publication is blocked until the GTK3 runtime path is removed." },
+    { "id": "RUSTSEC-2024-0429", "kind": "unsound", "package": "glib", "targets": ["linux"], "path": "Tauri 2 Linux GTK3 runtime", "disposition": "Release-blocking for stable Linux packages; the affected GTK3 graph is absent from Windows and macOS." },
+    { "id": "RUSTSEC-2024-0370", "kind": "unmaintained", "package": "proc-macro-error", "targets": ["linux"], "path": "Tauri 2 Linux GTK3 macros", "disposition": "Build-time Linux-only path; remove with the GTK3 runtime transition." },
+    { "id": "RUSTSEC-2024-0436", "kind": "unmaintained", "package": "paste", "targets": ["linux"], "path": "Iroh Linux netwatch dependency", "disposition": "Track upstream Iroh and netwatch replacement; absent from the qualified Windows and macOS graphs." },
+    { "id": "RUSTSEC-2025-0081", "kind": "unmaintained", "package": "unic-char-property", "targets": ["linux", "macos", "windows"], "path": "Tauri URLPattern parser", "disposition": "No published vulnerability; replace when Tauri moves its URLPattern parser off rust-unic." },
+    { "id": "RUSTSEC-2025-0075", "kind": "unmaintained", "package": "unic-char-range", "targets": ["linux", "macos", "windows"], "path": "Tauri URLPattern parser", "disposition": "No published vulnerability; replace when Tauri moves its URLPattern parser off rust-unic." },
+    { "id": "RUSTSEC-2025-0080", "kind": "unmaintained", "package": "unic-common", "targets": ["linux", "macos", "windows"], "path": "Tauri URLPattern parser", "disposition": "No published vulnerability; replace when Tauri moves its URLPattern parser off rust-unic." },
+    { "id": "RUSTSEC-2025-0100", "kind": "unmaintained", "package": "unic-ucd-ident", "targets": ["linux", "macos", "windows"], "path": "Tauri URLPattern parser", "disposition": "No published vulnerability; replace when Tauri moves its URLPattern parser off rust-unic." },
+    { "id": "RUSTSEC-2025-0098", "kind": "unmaintained", "package": "unic-ucd-version", "targets": ["linux", "macos", "windows"], "path": "Tauri URLPattern parser", "disposition": "No published vulnerability; replace when Tauri moves its URLPattern parser off rust-unic." }
+  ]
+}

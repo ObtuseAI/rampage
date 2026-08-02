@@ -7,8 +7,9 @@
     "desktop:build": "pnpm --dir apps/desktop build",
     "desktop:test": "pnpm --dir apps/desktop test",
     "edge:build": "pnpm --dir apps/edge build",
+    "edge:test": "pnpm --dir apps/edge test",
     "sdk:build": "pnpm --dir packages/sdk-ts build",
     "sdk:test": "pnpm --dir packages/sdk-ts test",
-    "check": "pnpm desktop:test && pnpm desktop:build && pnpm edge:build && pnpm sdk:test && pnpm sdk:build"
+    "check": "pnpm desktop:test && pnpm desktop:build && pnpm edge:test && pnpm edge:build && pnpm sdk:test && pnpm sdk:build"
   }
 }

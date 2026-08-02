@@ -12,7 +12,7 @@ use rampage_protocol::{
     ResourceOfferV1, ResourceQuantityV1, WorkClaimV1, WorkloadCapabilityStatus,
     WorkloadCapabilityV1, WorkloadDomain, WorkloadIsolation,
 };
-use rand::{RngCore, rngs::OsRng};
+use rand::{TryRng as _, rngs::SysRng};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -574,7 +574,7 @@ fn load_or_create_secret(path: &Path) -> anyhow::Result<[u8; 32]> {
             .map_err(|_| anyhow::anyhow!("edge secret must contain exactly 32 bytes"));
     }
     let mut bytes = [0_u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng.try_fill_bytes(&mut bytes)?;
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
     #[cfg(unix)]
