@@ -4767,7 +4767,7 @@ fn load_or_create_governor(
 }
 
 fn load_or_create_secret(path: &std::path::Path) -> anyhow::Result<[u8; 32]> {
-    use rand::RngCore;
+    use rand::{TryRng as _, rngs::SysRng};
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -4777,7 +4777,7 @@ fn load_or_create_secret(path: &std::path::Path) -> anyhow::Result<[u8; 32]> {
         Err(error) => return Err(error.into()),
     }
     let mut bytes = [0_u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    SysRng.try_fill_bytes(&mut bytes)?;
     let encoded = hex::encode(bytes);
     let mut options = std::fs::OpenOptions::new();
     options.create_new(true).write(true);

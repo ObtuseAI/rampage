@@ -9,6 +9,15 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $bundleRoot = Join-Path $root 'target/release/bundle'
+$sourceChanges = @(& git -C $root status --porcelain=v1 --untracked-files=all)
+if ($LASTEXITCODE -ne 0) { throw 'could not inspect source tree state' }
+if ($sourceChanges.Count -ne 0) {
+    throw "distribution staging requires a clean committed source tree; found $($sourceChanges.Count) changed paths"
+}
+$appVersion = (Get-Content -LiteralPath (Join-Path $root 'apps/desktop/src-tauri/tauri.conf.json') -Raw |
+    ConvertFrom-Json).version
+if ($appVersion -notmatch '^\d+\.\d+\.\d+$') { throw "invalid desktop package version: $appVersion" }
+$versionPattern = "(?:^|[_-])$([regex]::Escape($appVersion))(?:$|[_\-.])"
 $resolvedOutputRoot = [IO.Path]::GetFullPath((Join-Path $root $OutputRoot))
 $allowedOutputRoot = [IO.Path]::GetFullPath((Join-Path $root 'output/distribution'))
 $allowedPrefix = $allowedOutputRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) +
@@ -22,9 +31,18 @@ if (-not (Test-Path -LiteralPath $bundleRoot -PathType Container)) {
 }
 
 $stageRoot = Join-Path $resolvedOutputRoot $Platform
-New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
+if (Test-Path -LiteralPath $stageRoot -PathType Container) {
+    $unexpectedDirectories = @(Get-ChildItem -LiteralPath $stageRoot -Directory)
+    if ($unexpectedDirectories.Count -ne 0) {
+        throw "distribution stage contains unexpected directories: $($unexpectedDirectories.Name -join ', ')"
+    }
+    Get-ChildItem -LiteralPath $stageRoot -File | Remove-Item -Force
+} else {
+    New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
+}
 
-$bundleFiles = Get-ChildItem -LiteralPath $bundleRoot -File -Recurse
+$bundleFiles = Get-ChildItem -LiteralPath $bundleRoot -File -Recurse |
+    Where-Object { $_.Name -match $versionPattern }
 $selected = switch ($Platform) {
     'windows-x64' { $bundleFiles | Where-Object { $_.Extension -eq '.msi' -or $_.Name -like '*-setup.exe' } }
     'linux-x64' { $bundleFiles | Where-Object { $_.Extension -eq '.deb' -or $_.Name -like '*.AppImage' } }
@@ -97,6 +115,7 @@ $sourceCommit = (& git -C $root rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'could not resolve source commit' }
 $manifest = [ordered]@{
     schema = 'rampage.distribution-manifest.v1'
+    version = $appVersion
     platform = $Platform
     source_commit = $sourceCommit
     generated_at = (Get-Date).ToUniversalTime().ToString('o')

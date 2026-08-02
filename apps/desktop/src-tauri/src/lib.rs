@@ -1,4 +1,4 @@
-use rand::RngCore;
+use rand::{TryRng as _, rngs::SysRng};
 use std::{
     io::{Read, Write},
     path::PathBuf,
@@ -33,7 +33,9 @@ const AUTOSTART_APPROVAL_KEY: &str =
 
 fn fresh_intelligence_token() -> String {
     let mut token = [0_u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut token);
+    SysRng
+        .try_fill_bytes(&mut token)
+        .expect("system randomness is required for intelligence API tokens");
     hex::encode(token)
 }
 

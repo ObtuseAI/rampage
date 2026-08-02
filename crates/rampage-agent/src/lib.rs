@@ -310,6 +310,15 @@ fn run_ollama(claim: &WorkClaimV1) -> Result<String, ExecutionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{TryRng as _, rngs::SysRng};
+
+    fn system_signing_key() -> SigningKey {
+        let mut secret = [0_u8; 32];
+        SysRng
+            .try_fill_bytes(&mut secret)
+            .expect("system randomness is required for test identities");
+        SigningKey::from_bytes(&secret)
+    }
     use chrono::Duration;
     use rampage_policy::{Governor, GovernorConfig};
     use rampage_protocol::{
@@ -370,7 +379,7 @@ mod tests {
 
     #[test]
     fn executes_only_a_signed_scoped_claim() {
-        let key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let key = system_signing_key();
         let node_id = Uuid::now_v7();
         let claim = claim(&key, node_id);
         let receipt = execute_claim(&claim, node_id, 0, &key).unwrap();
@@ -380,7 +389,7 @@ mod tests {
 
     #[test]
     fn rejects_tampered_claim() {
-        let key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let key = system_signing_key();
         let node_id = Uuid::now_v7();
         let mut claim = claim(&key, node_id);
         claim.lease.operation = "different".into();
@@ -392,7 +401,7 @@ mod tests {
 
     #[test]
     fn durable_worker_authority_rejects_lease_replay() {
-        let key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let key = system_signing_key();
         let node_id = Uuid::now_v7();
         let claim = claim(&key, node_id);
         let temp = tempfile::tempdir().unwrap();

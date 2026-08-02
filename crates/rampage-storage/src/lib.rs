@@ -1,11 +1,9 @@
 //! Encrypted, chunked content-addressed storage with explicit durability classes.
 
-use aes_gcm::{
-    Aes256Gcm, KeyInit,
-    aead::{Aead, OsRng, rand_core::RngCore},
-};
+use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
 use chrono::{DateTime, Utc};
 use rampage_protocol::{ArtifactRefV1, MAX_ARTIFACT_TRANSFER_BYTES, StorageClass};
+use rand::{TryRng as _, rngs::SysRng};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -301,7 +299,9 @@ impl CasStore {
         let mut records = Vec::new();
         for (index, chunk) in plaintext.chunks(self.chunk_size).enumerate() {
             let mut nonce = [0_u8; 12];
-            OsRng.fill_bytes(&mut nonce);
+            SysRng
+                .try_fill_bytes(&mut nonce)
+                .map_err(|_| StorageError::Crypto)?;
             let ciphertext = self
                 .cipher
                 .encrypt((&nonce).into(), chunk)
@@ -381,10 +381,10 @@ impl CasStore {
             if hex::encode(Sha256::digest(&ciphertext)) != record.ciphertext_digest {
                 return Err(StorageError::DigestMismatch);
             }
-            let nonce = hex::decode(&record.nonce).map_err(|_| StorageError::Crypto)?;
+            let nonce = decode_nonce(&record.nonce)?;
             let chunk = self
                 .cipher
-                .decrypt(nonce.as_slice().into(), ciphertext.as_ref())
+                .decrypt((&nonce).into(), ciphertext.as_ref())
                 .map_err(|_| StorageError::Crypto)?;
             if chunk.len() as u64 != record.plaintext_size {
                 return Err(StorageError::DigestMismatch);
@@ -632,7 +632,9 @@ impl CasStore {
         }
         fs::create_dir_all(&transfer_dir)?;
         let mut nonce = [0_u8; 12];
-        OsRng.fill_bytes(&mut nonce);
+        SysRng
+            .try_fill_bytes(&mut nonce)
+            .map_err(|_| StorageError::Crypto)?;
         let ciphertext = self
             .cipher
             .encrypt((&nonce).into(), plaintext)
@@ -829,10 +831,10 @@ impl CasStore {
             if sha256_hex(&ciphertext) != record.4 {
                 return Err(StorageError::DigestMismatch);
             }
-            let nonce = hex::decode(&record.3).map_err(|_| StorageError::Crypto)?;
+            let nonce = decode_nonce(&record.3)?;
             let plaintext = self
                 .cipher
-                .decrypt(nonce.as_slice().into(), ciphertext.as_ref())
+                .decrypt((&nonce).into(), ciphertext.as_ref())
                 .map_err(|_| StorageError::Crypto)?;
             if plaintext.len() as u64 != record.1 || sha256_digest(&plaintext) != record.2 {
                 return Err(StorageError::DigestMismatch);
@@ -946,10 +948,10 @@ impl CasStore {
         if sha256_hex(&ciphertext) != record.ciphertext_digest {
             return Err(StorageError::DigestMismatch);
         }
-        let nonce = hex::decode(&record.nonce).map_err(|_| StorageError::Crypto)?;
+        let nonce = decode_nonce(&record.nonce)?;
         let plaintext = self
             .cipher
-            .decrypt(nonce.as_slice().into(), ciphertext.as_ref())
+            .decrypt((&nonce).into(), ciphertext.as_ref())
             .map_err(|_| StorageError::Crypto)?;
         if plaintext.len() as u64 != record.plaintext_size {
             return Err(StorageError::DigestMismatch);
@@ -1028,10 +1030,10 @@ impl CasStore {
             if sha256_hex(&ciphertext) != record.ciphertext_digest {
                 return Err(StorageError::DigestMismatch);
             }
-            let nonce = hex::decode(&record.nonce).map_err(|_| StorageError::Crypto)?;
+            let nonce = decode_nonce(&record.nonce)?;
             let plaintext = self
                 .cipher
-                .decrypt(nonce.as_slice().into(), ciphertext.as_ref())
+                .decrypt((&nonce).into(), ciphertext.as_ref())
                 .map_err(|_| StorageError::Crypto)?;
             if plaintext.len() as u64 != record.plaintext_size {
                 return Err(StorageError::DigestMismatch);
@@ -1538,9 +1540,18 @@ fn storage_class_name(class: StorageClass) -> &'static str {
     }
 }
 
+fn decode_nonce(encoded: &str) -> Result<[u8; 12], StorageError> {
+    hex::decode(encoded)
+        .map_err(|_| StorageError::Crypto)?
+        .try_into()
+        .map_err(|_| StorageError::Crypto)
+}
+
 fn uuid_like_nonce() -> String {
     let mut bytes = [0_u8; 16];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("system randomness is required for storage staging names");
     hex::encode(bytes)
 }
 
