@@ -28,6 +28,9 @@
     "category": "Utility",
     "shortDescription": "Foreground-safe Rampage compute contributor.",
     "android": { "minSdkVersion": 26 },
-    "iOS": { "minimumSystemVersion": "15.0" }
+    "iOS": {
+      "minimumSystemVersion": "15.0",
+      "frameworks": ["SystemConfiguration"]
+    }
   }
 }
