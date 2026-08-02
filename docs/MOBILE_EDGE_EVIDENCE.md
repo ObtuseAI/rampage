@@ -1,6 +1,6 @@
 # Rampage Edge mobile candidate evidence
 
-Validated: **2026-08-02 00:53 America/Chicago**  
+Validated: **2026-08-02 00:53 America/Chicago**
 Status: **PASS as unsigned Android ARM64 and Apple-silicon iOS simulator source candidates**
 
 This record qualifies the native mobile source at commit
