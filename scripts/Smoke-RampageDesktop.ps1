@@ -43,11 +43,14 @@ $oldControllerBind = $env:RAMPAGE_BIND
 $oldIntelligencePort = $env:RAMPAGE_INTELLIGENCE_PORT
 $oldMeshPort = $env:RAMPAGE_MESH_PORT
 $env:RAMPAGE_DATA_DIR = $smokeRoot
-$env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = '30000'
+$env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = '90000'
 $env:RAMPAGE_BIND = "127.0.0.1:$controllerPort"
 $env:RAMPAGE_INTELLIGENCE_PORT = $intelligencePort.ToString()
 $env:RAMPAGE_MESH_PORT = $meshPort.ToString()
-$desktop = Start-Process -FilePath $resolvedExecutable -PassThru
+$desktopStdout = Join-Path $smokeRoot 'desktop.stdout.log'
+$desktopStderr = Join-Path $smokeRoot 'desktop.stderr.log'
+$desktop = Start-Process -FilePath $resolvedExecutable -PassThru `
+    -RedirectStandardOutput $desktopStdout -RedirectStandardError $desktopStderr
 $env:RAMPAGE_DATA_DIR = $oldData
 $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = $oldDiagnosticExit
 $env:RAMPAGE_BIND = $oldControllerBind
@@ -66,7 +69,8 @@ try {
     # machines. Keep the gate bounded while allowing the packaged intelligence service to unpack.
     for ($attempt = 0; $attempt -lt 600; $attempt++) {
         if ($desktop.HasExited) {
-            throw "desktop exited before its local fabric became ready (exit=$($desktop.ExitCode))"
+            $desktopError = Get-Content -Raw $desktopStderr -ErrorAction SilentlyContinue
+            throw "desktop exited before its local fabric became ready (exit=$($desktop.ExitCode)): $desktopError"
         }
         try {
             $health = Invoke-RestMethod "$controllerBase/health"
@@ -75,12 +79,14 @@ try {
             $headers = @{ 'x-rampage-token' = $token }
             $nodes = Invoke-RestMethod "$controllerBase/v1/nodes" -Headers $headers
             $offers = Invoke-RestMethod "$controllerBase/v1/offers" -Headers $headers
-            if ($nodes.Count -ge 1 -and $offers.Count -ge 1 -and $intelligence.status -eq 'ready') { break }
+            $ownerOffer = @($offers | Where-Object { $_.mesh_endpoint.signature } | Select-Object -First 1)
+            if ($nodes.Count -ge 1 -and $offers.Count -ge 1 -and $ownerOffer.Count -eq 1 -and
+                $intelligence.status -eq 'ready') { break }
         } catch {
             Start-Sleep -Milliseconds 100
         }
     }
-    if (-not $health -or $nodes.Count -lt 1 -or $offers.Count -lt 1 -or
+    if (-not $health -or $nodes.Count -lt 1 -or $offers.Count -lt 1 -or $ownerOffer.Count -ne 1 -or
         $intelligence.authority -ne 'proposal_only' -or
         $intelligence.capability -ne 'deterministic_only') {
         throw 'desktop did not autonomously start and enroll its local fabric'
@@ -88,7 +94,7 @@ try {
     $null = $desktop.CloseMainWindow()
     Start-Sleep -Milliseconds 750
     if ($desktop.HasExited) { throw 'closing the desktop window exited instead of keeping the fabric in the tray' }
-    if (-not $desktop.WaitForExit(32000)) { throw 'desktop diagnostic exit did not complete' }
+    if (-not $desktop.WaitForExit(92000)) { throw 'desktop diagnostic exit did not complete' }
     Start-Sleep -Milliseconds 500
     $leaked = @(Get-Process | Where-Object {
         $_.Path -and $_.Path.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) -and
@@ -109,6 +115,7 @@ try {
         mesh_endpoint_id = $health.mesh_endpoint_id
         nodes = $nodes.Count
         offers = $offers.Count
+        owner_mesh_endpoint = $true
         close_to_tray = $true
         clean_explicit_exit = $true
         data_dir = $smokeRoot

@@ -27,19 +27,42 @@ $inviteTwoFile = Join-Path $runRoot 'invite-two.json'
 $agentKey = Join-Path $agentData 'agent.key'
 $agentTwoKey = Join-Path $agentTwoData 'agent.key'
 
+function Get-FreeTcpPort {
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    try {
+        $listener.Start()
+        return ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+    } finally {
+        $listener.Stop()
+    }
+}
+
+$controllerPort = Get-FreeTcpPort
+$controllerBase = "http://127.0.0.1:$controllerPort"
+
 $oldData = $env:RAMPAGE_DATA_DIR
+$oldBind = $env:RAMPAGE_BIND
 $oldProtectedStorage = $env:RAMPAGE_ALLOW_PROTECTED_STORAGE
 $agent = $null
 $agentTwo = $null
 $env:RAMPAGE_DATA_DIR = $controllerData
-$controller = Start-Process -FilePath $controllerExe -PassThru -WindowStyle Hidden
+$env:RAMPAGE_BIND = "127.0.0.1:$controllerPort"
+$controller = Start-Process -FilePath $controllerExe -PassThru -WindowStyle Hidden `
+    -RedirectStandardOutput (Join-Path $controllerData 'controller.stdout.log') `
+    -RedirectStandardError (Join-Path $controllerData 'controller.stderr.log')
 $env:RAMPAGE_DATA_DIR = $oldData
+$env:RAMPAGE_BIND = $oldBind
 
 try {
     $health = $null
     for ($attempt = 0; $attempt -lt 150; $attempt++) {
+        if ($controller.HasExited) {
+            $controllerError = Get-Content -Raw (Join-Path $controllerData 'controller.stderr.log') `
+                -ErrorAction SilentlyContinue
+            throw "controller exited before readiness (exit=$($controller.ExitCode)): $controllerError"
+        }
         try {
-            $health = Invoke-RestMethod 'http://127.0.0.1:47831/health'
+            $health = Invoke-RestMethod "$controllerBase/health"
             break
         } catch {
             Start-Sleep -Milliseconds 100
@@ -48,7 +71,7 @@ try {
     if (-not $health) { throw 'controller did not become ready' }
     $token = (Get-Content -Raw (Join-Path $controllerData 'controller.token')).Trim()
     $headers = @{ 'x-rampage-token' = $token }
-    $invite = Invoke-RestMethod 'http://127.0.0.1:47831/v1/enrollment/invites' `
+    $invite = Invoke-RestMethod "$controllerBase/v1/enrollment/invites" `
         -Method Post -ContentType 'application/json' -Headers $headers -Body '{}'
     if (-not $invite.controller_mesh.signature) { throw 'invite lacks signed mesh endpoint' }
     if ($invite.controller_mesh.direct_addresses.Count -lt 1 -and
@@ -74,8 +97,8 @@ try {
     $node = $null
     $nodeOffer = $null
     for ($attempt = 0; $attempt -lt 150; $attempt++) {
-        $nodes = @(foreach ($item in (Invoke-RestMethod 'http://127.0.0.1:47831/v1/nodes' -Headers $headers)) { $item })
-        $offers = @(foreach ($item in (Invoke-RestMethod 'http://127.0.0.1:47831/v1/offers' -Headers $headers)) { $item })
+        $nodes = @(foreach ($item in (Invoke-RestMethod "$controllerBase/v1/nodes" -Headers $headers)) { $item })
+        $offers = @(foreach ($item in (Invoke-RestMethod "$controllerBase/v1/offers" -Headers $headers)) { $item })
         $node = $nodes | Select-Object -First 1
         $nodeOffer = $offers | Where-Object {
             "$($_.node_id)" -eq "$($node.node_id)"
@@ -97,7 +120,7 @@ try {
         throw 'worker offer omitted a valid authenticated link benchmark'
     }
 
-    $inviteTwo = Invoke-RestMethod 'http://127.0.0.1:47831/v1/enrollment/invites' `
+    $inviteTwo = Invoke-RestMethod "$controllerBase/v1/enrollment/invites" `
         -Method Post -ContentType 'application/json' -Headers $headers -Body '{}'
     $inviteTwo | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 $inviteTwoFile
     $agentTwoArguments = @(
@@ -116,8 +139,8 @@ try {
     $env:RAMPAGE_ALLOW_PROTECTED_STORAGE = $oldProtectedStorage
     $nodeTwo = $null
     for ($attempt = 0; $attempt -lt 150; $attempt++) {
-        $nodes = @(foreach ($item in (Invoke-RestMethod 'http://127.0.0.1:47831/v1/nodes' -Headers $headers)) { $item })
-        $offers = @(foreach ($item in (Invoke-RestMethod 'http://127.0.0.1:47831/v1/offers' -Headers $headers)) { $item })
+        $nodes = @(foreach ($item in (Invoke-RestMethod "$controllerBase/v1/nodes" -Headers $headers)) { $item })
+        $offers = @(foreach ($item in (Invoke-RestMethod "$controllerBase/v1/offers" -Headers $headers)) { $item })
         $nodeTwo = $nodes | Where-Object { "$($_.node_id)" -ne "$($node.node_id)" } |
             Select-Object -First 1
         $nodeTwoOffer = $offers | Where-Object {
@@ -144,7 +167,7 @@ try {
         media_type = 'text/plain'
         storage_class = 'cache'
     } | ConvertTo-Json
-    $stored = Invoke-RestMethod 'http://127.0.0.1:47831/v1/artifacts/put' `
+    $stored = Invoke-RestMethod "$controllerBase/v1/artifacts/put" `
         -Method Post -ContentType 'application/json' -Headers $headers -Body $putBody
     $replicateBody = @{
         digest = $stored.digest
@@ -152,7 +175,7 @@ try {
         media_type = 'text/plain'
         storage_class = 'protected'
     } | ConvertTo-Json
-    $replica = Invoke-RestMethod 'http://127.0.0.1:47831/v1/artifacts/replicate' `
+    $replica = Invoke-RestMethod "$controllerBase/v1/artifacts/replicate" `
         -Method Post -ContentType 'application/json' -Headers $headers -Body $replicateBody
     if ($replica.artifact.digest -ne $stored.digest) { throw 'remote replica digest changed' }
     if (-not $replica.transfer_session_id -or $replica.resumed_chunks -ne 0 -or
@@ -161,13 +184,13 @@ try {
         $replica.replica_receipt.challenge_nonce.Length -lt 1) {
         throw 'replica omitted restart-safe session or signed challenge evidence'
     }
-    $repair = Invoke-RestMethod 'http://127.0.0.1:47831/v1/artifacts/repair' `
+    $repair = Invoke-RestMethod "$controllerBase/v1/artifacts/repair" `
         -Method Post -ContentType 'application/json' -Headers $headers -Body '{}'
     if ($repair.per_change_approval_required -or $repair.authority_expansion -ne 'denied' -or
         $repair.fresh_replica_receipts -lt 2) {
         throw 'autonomous protected-storage reconciliation violated its authority envelope'
     }
-    $diagnostics = Invoke-RestMethod 'http://127.0.0.1:47831/v1/diagnostics/self-scan' `
+    $diagnostics = Invoke-RestMethod "$controllerBase/v1/diagnostics/self-scan" `
         -Headers $headers
     if ($diagnostics.metrics.under_replicated_protected_artifacts -ne 0) {
         throw 'autonomous repair did not establish two fresh independent replica receipts'
@@ -187,7 +210,7 @@ try {
         digest = $stored.digest
         node_id = $node.node_id
     } | ConvertTo-Json
-    $retrieved = Invoke-RestMethod 'http://127.0.0.1:47831/v1/artifacts/retrieve' `
+    $retrieved = Invoke-RestMethod "$controllerBase/v1/artifacts/retrieve" `
         -Method Post -ContentType 'application/json' -Headers $headers -Body $retrieveBody
     if (-not $retrieved.transfer_session_id) {
         throw 'retrieval omitted its restart-safe transfer session'
@@ -204,7 +227,7 @@ try {
         media_type = 'text/plain'
         storage_class = 'cache'
     } | ConvertTo-Json
-    $jobStored = Invoke-RestMethod 'http://127.0.0.1:47831/v1/artifacts/put' `
+    $jobStored = Invoke-RestMethod "$controllerBase/v1/artifacts/put" `
         -Method Post -ContentType 'application/json' -Headers $headers -Body $jobPutBody
     $jobId = [guid]::NewGuid().ToString()
     $job = @{
@@ -232,7 +255,7 @@ try {
         deadline = (Get-Date).ToUniversalTime().AddMinutes(5).ToString('o')
         idempotency_key = [guid]::NewGuid().ToString()
     } | ConvertTo-Json -Depth 20
-    $plan = Invoke-RestMethod 'http://127.0.0.1:47831/v1/jobs/plan' `
+    $plan = Invoke-RestMethod "$controllerBase/v1/jobs/plan" `
         -Method Post -ContentType 'application/json' -Headers $headers -Body $job
     $nodeScore = @($plan.scores) | Where-Object { "$($_.node_id)" -eq "$($node.node_id)" } |
         Select-Object -First 1
@@ -240,7 +263,7 @@ try {
         $nodeScore.link_downlink_bps -le 0 -or $nodeScore.estimated_transfer_millis -le 0) {
         throw "placement plan did not use signed topology evidence: $($nodeScore | ConvertTo-Json -Compress)"
     }
-    $lease = Invoke-RestMethod 'http://127.0.0.1:47831/v1/jobs' `
+    $lease = Invoke-RestMethod "$controllerBase/v1/jobs" `
         -Method Post -ContentType 'application/json' -Headers $headers -Body $job
     if ("$($lease.node_id)" -ne "$($node.node_id)" -and
         "$($lease.node_id)" -ne "$($nodeTwo.node_id)") {
@@ -249,7 +272,7 @@ try {
 
     $receipted = $null
     for ($attempt = 0; $attempt -lt 200; $attempt++) {
-        $events = @(Invoke-RestMethod 'http://127.0.0.1:47831/v1/events?after=0&limit=1000' -Headers $headers)
+        $events = @(Invoke-RestMethod "$controllerBase/v1/events?after=0&limit=1000" -Headers $headers)
         $receipted = $events | Where-Object {
             $_.event_type -eq 'job.receipted' -and $_.subject_id -eq $jobId
         }
@@ -263,7 +286,7 @@ try {
         digest = $outputArtifact.digest
         node_id = $lease.node_id
     } | ConvertTo-Json
-    $outputRetrieved = Invoke-RestMethod 'http://127.0.0.1:47831/v1/artifacts/retrieve' `
+    $outputRetrieved = Invoke-RestMethod "$controllerBase/v1/artifacts/retrieve" `
         -Method Post -ContentType 'application/json' -Headers $headers -Body $outputRetrieveBody
     $outputReport = [System.Text.Encoding]::UTF8.GetString(
         [Convert]::FromBase64String($outputRetrieved.data_base64)
@@ -276,7 +299,7 @@ try {
     # complete evidence set instead of reusing the receipt snapshot and racing the next append.
     $artifactEvidence = $false
     for ($attempt = 0; $attempt -lt 100; $attempt++) {
-        $events = @(Invoke-RestMethod 'http://127.0.0.1:47831/v1/events?after=0&limit=1000' -Headers $headers)
+        $events = @(Invoke-RestMethod "$controllerBase/v1/events?after=0&limit=1000" -Headers $headers)
         # Fresh signed PUT/repair receipts already prove possession; the budgeted reconciler must
         # not immediately reread the same multi-MiB objects merely to add a duplicate event.
         $artifactEvidence = ($events.event_type -contains 'artifact.replicated') -and
@@ -318,6 +341,7 @@ try {
     } | ConvertTo-Json
 } finally {
     $env:RAMPAGE_DATA_DIR = $oldData
+    $env:RAMPAGE_BIND = $oldBind
     $env:RAMPAGE_ALLOW_PROTECTED_STORAGE = $oldProtectedStorage
     if ($controller -and -not $controller.HasExited) {
         Stop-Process -Id $controller.Id -Force

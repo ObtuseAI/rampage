@@ -21,19 +21,42 @@ $controllerExe = Join-Path $root 'target\debug\rampage-controller.exe'
 $agentExe = Join-Path $root 'target\debug\rampage-agent.exe'
 $inviteFile = Join-Path $runRoot 'invite.json'
 
+function Get-FreeTcpPort {
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    try {
+        $listener.Start()
+        return ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+    } finally {
+        $listener.Stop()
+    }
+}
+
+$controllerPort = Get-FreeTcpPort
+$controllerBase = "http://127.0.0.1:$controllerPort"
+
 $oldData = $env:RAMPAGE_DATA_DIR
+$oldBind = $env:RAMPAGE_BIND
 $oldToken = $env:RAMPAGE_TOKEN
 $oldOllamaUrl = $env:RAMPAGE_OLLAMA_URL
 $env:RAMPAGE_DATA_DIR = $controllerData
-$controller = Start-Process -FilePath $controllerExe -PassThru -WindowStyle Hidden
+$env:RAMPAGE_BIND = "127.0.0.1:$controllerPort"
+$controller = Start-Process -FilePath $controllerExe -PassThru -WindowStyle Hidden `
+    -RedirectStandardOutput (Join-Path $controllerData 'controller.stdout.log') `
+    -RedirectStandardError (Join-Path $controllerData 'controller.stderr.log')
 $env:RAMPAGE_DATA_DIR = $oldData
+$env:RAMPAGE_BIND = $oldBind
 $agent = $null
 
 try {
     $health = $null
     for ($attempt = 0; $attempt -lt 150; $attempt++) {
+        if ($controller.HasExited) {
+            $controllerError = Get-Content -Raw (Join-Path $controllerData 'controller.stderr.log') `
+                -ErrorAction SilentlyContinue
+            throw "controller exited before readiness (exit=$($controller.ExitCode)): $controllerError"
+        }
         try {
-            $health = Invoke-RestMethod 'http://127.0.0.1:47831/health'
+            $health = Invoke-RestMethod "$controllerBase/health"
             break
         } catch {
             Start-Sleep -Milliseconds 100
@@ -47,7 +70,7 @@ try {
         -not (($tags.models | ForEach-Object { $_.name }) -contains $Model)) {
         throw "Ollama model is not installed: $Model"
     }
-    $invite = Invoke-RestMethod 'http://127.0.0.1:47831/v1/enrollment/invites' `
+    $invite = Invoke-RestMethod "$controllerBase/v1/enrollment/invites" `
         -Method Post -ContentType 'application/json' -Headers $headers -Body '{}'
     $invite | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 $inviteFile
     $agentArgs = @(
@@ -66,7 +89,7 @@ try {
     $env:RAMPAGE_OLLAMA_URL = $oldOllamaUrl
     $offer = $null
     for ($attempt = 0; $attempt -lt 200; $attempt++) {
-        $offers = @(Invoke-RestMethod 'http://127.0.0.1:47831/v1/offers' -Headers $headers)
+        $offers = @(Invoke-RestMethod "$controllerBase/v1/offers" -Headers $headers)
         if ($agent.HasExited) {
             throw "worker exited early with code $($agent.ExitCode): $(Get-Content -Raw (Join-Path $runRoot 'agent.stderr.log'))"
         }
@@ -81,23 +104,23 @@ try {
     if (-not $offer) {
         throw "worker did not advertise the Ollama adapter: $($offers | ConvertTo-Json -Depth 8 -Compress)"
     }
-    $unauthorized = Invoke-WebRequest 'http://127.0.0.1:47831/v1/models' -SkipHttpErrorCheck
+    $unauthorized = Invoke-WebRequest "$controllerBase/v1/models" -SkipHttpErrorCheck
     if ($unauthorized.StatusCode -ne 401) { throw 'OpenAI gateway accepted a tokenless request' }
     $openAiHeaders = @{ Authorization = "Bearer $($env:RAMPAGE_TOKEN)" }
-    $models = Invoke-RestMethod 'http://127.0.0.1:47831/v1/models' -Headers $openAiHeaders
+    $models = Invoke-RestMethod "$controllerBase/v1/models" -Headers $openAiHeaders
     if (-not (@($models.data.id) -contains $Model)) {
         throw "OpenAI gateway did not expose the consistent installed model: $($models | ConvertTo-Json -Depth 8 -Compress)"
     }
-    $openRouterModels = Invoke-RestMethod 'http://127.0.0.1:47831/api/v1/models' -Headers $openAiHeaders
+    $openRouterModels = Invoke-RestMethod "$controllerBase/api/v1/models" -Headers $openAiHeaders
     if (-not (@($openRouterModels.data.id) -contains $Model)) {
         throw 'OpenRouter-compatible model alias did not expose the installed model'
     }
-    $capabilities = Invoke-RestMethod 'http://127.0.0.1:47831/v1/capabilities' -Headers $openAiHeaders
+    $capabilities = Invoke-RestMethod "$controllerBase/v1/capabilities" -Headers $openAiHeaders
     if ($capabilities.schema -ne 'rampage.gateway-capabilities.v1' -or
         -not (@($capabilities.protocols.id) -contains 'anthropic.messages')) {
         throw 'gateway capability discovery is missing the Anthropic protocol'
     }
-    $workloads = Invoke-RestMethod 'http://127.0.0.1:47831/v1/workload-capabilities' -Headers $headers
+    $workloads = Invoke-RestMethod "$controllerBase/v1/workload-capabilities" -Headers $headers
     $ollamaCapability = @($workloads.nodes.capabilities) | Where-Object {
         $_.adapter -eq 'rampage.ollama.v1' -and @($_.operations) -contains 'chat'
     } | Select-Object -First 1
@@ -105,13 +128,13 @@ try {
         -not $ollamaCapability -or $workloads.candidate_authority -ne $false) {
         throw 'signed workload capability discovery did not expose the exact Ollama chat operation'
     }
-    $selfScan = Invoke-RestMethod 'http://127.0.0.1:47831/v1/diagnostics/self-scan' -Headers $headers
+    $selfScan = Invoke-RestMethod "$controllerBase/v1/diagnostics/self-scan" -Headers $headers
     if ($selfScan.schema -ne 'rampage.fabric-diagnostic-report.v1' -or
         $selfScan.autonomy.per_change_approval_required -ne $false -or
         $selfScan.evidence_digest -notmatch '^sha256:[0-9a-f]{64}$') {
         throw 'autonomously thresholded self-scan did not return stable evidence'
     }
-    $relayAccess = Invoke-RestMethod 'http://127.0.0.1:47831/v1/mesh/relay-access' -Headers $headers
+    $relayAccess = Invoke-RestMethod "$controllerBase/v1/mesh/relay-access" -Headers $headers
     if ($relayAccess.schema -ne 'rampage.relay-access-manifest.v1' -or
         $relayAccess.fabric_id -notmatch '^sha256:[0-9a-f]{64}$' -or
         $relayAccess.generation -lt 1 -or
@@ -149,9 +172,9 @@ try {
         requested_at = [DateTimeOffset]::UtcNow.ToString('o')
         expires_at = [DateTimeOffset]::UtcNow.AddMinutes(5).ToString('o')
     } | ConvertTo-Json -Depth 10
-    $canary = Invoke-RestMethod 'http://127.0.0.1:47831/v1/improvements/canary' `
+    $canary = Invoke-RestMethod "$controllerBase/v1/improvements/canary" `
         -Method Post -ContentType 'application/json' -Headers $headers -Body $promotionCandidate
-    $canaryRepeat = Invoke-RestMethod 'http://127.0.0.1:47831/v1/improvements/canary' `
+    $canaryRepeat = Invoke-RestMethod "$controllerBase/v1/improvements/canary" `
         -Method Post -ContentType 'application/json' -Headers $headers -Body $promotionCandidate
     if ($canary.schema -ne 'rampage.promotion-canary-lease.v1' -or
         [string]::IsNullOrWhiteSpace($canary.signature) -or
@@ -165,7 +188,7 @@ try {
         max_completion_tokens = 16
         stream = $false
     } | ConvertTo-Json -Depth 10
-    $completion = Invoke-RestMethod 'http://127.0.0.1:47831/v1/chat/completions' `
+    $completion = Invoke-RestMethod "$controllerBase/v1/chat/completions" `
         -Method Post -ContentType 'application/json' -Headers $openAiHeaders -Body $request
     if ($completion.object -ne 'chat.completion' -or
         [string]::IsNullOrWhiteSpace($completion.choices[0].message.content)) {
@@ -177,13 +200,13 @@ try {
         max_completion_tokens = 16
         stream = $true
     } | ConvertTo-Json -Depth 10
-    $stream = Invoke-WebRequest 'http://127.0.0.1:47831/v1/chat/completions' `
+    $stream = Invoke-WebRequest "$controllerBase/v1/chat/completions" `
         -Method Post -ContentType 'application/json' -Headers $openAiHeaders -Body $streamRequest
     if ($stream.StatusCode -ne 200 -or $stream.Content -notmatch 'data: \[DONE\]' -or
         $stream.Content -notmatch 'chat.completion.chunk') {
         throw "OpenAI-compatible streaming response was malformed: $($stream.Content)"
     }
-    $openRouterCompletion = Invoke-RestMethod 'http://127.0.0.1:47831/api/v1/chat/completions' `
+    $openRouterCompletion = Invoke-RestMethod "$controllerBase/api/v1/chat/completions" `
         -Method Post -ContentType 'application/json' -Headers $openAiHeaders -Body $request
     if ($openRouterCompletion.choices[0].message.content -ne 'RAMPAGE_OK') {
         throw 'OpenRouter-compatible path did not return the expected completion'
@@ -199,7 +222,7 @@ try {
         messages = @(@{ role = 'user'; content = 'Reply with exactly RAMPAGE_OK.' })
         stream = $false
     } | ConvertTo-Json -Depth 10
-    $anthropic = Invoke-RestMethod 'http://127.0.0.1:47831/v1/messages' `
+    $anthropic = Invoke-RestMethod "$controllerBase/v1/messages" `
         -Method Post -ContentType 'application/json' -Headers $anthropicHeaders -Body $anthropicRequest
     if ($anthropic.type -ne 'message' -or $anthropic.role -ne 'assistant' -or
         $anthropic.content[0].type -ne 'text' -or $anthropic.content[0].text -ne 'RAMPAGE_OK' -or
@@ -215,7 +238,7 @@ try {
         })
         stream = $true
     } | ConvertTo-Json -Depth 10
-    $anthropicStream = Invoke-WebRequest 'http://127.0.0.1:47831/v1/messages' `
+    $anthropicStream = Invoke-WebRequest "$controllerBase/v1/messages" `
         -Method Post -ContentType 'application/json' -Headers $anthropicHeaders -Body $anthropicStreamRequest
     if ($anthropicStream.StatusCode -ne 200 -or
         $anthropicStream.Content -notmatch 'event: message_start' -or
@@ -223,7 +246,7 @@ try {
         $anthropicStream.Content -notmatch 'event: message_stop') {
         throw "Anthropic-compatible streaming response was malformed: $($anthropicStream.Content)"
     }
-    $events = @(Invoke-RestMethod 'http://127.0.0.1:47831/v1/events?after=0&limit=1000' -Headers $headers)
+    $events = @(Invoke-RestMethod "$controllerBase/v1/events?after=0&limit=1000" -Headers $headers)
     if (-not ($events.event_type -contains 'model.session.lease.issued') -or
         -not ($events.event_type -contains 'model.session.receipted')) {
         throw 'model lease or signed terminal receipt evidence is missing'
@@ -251,6 +274,7 @@ try {
     } | ConvertTo-Json
 } finally {
     $env:RAMPAGE_DATA_DIR = $oldData
+    $env:RAMPAGE_BIND = $oldBind
     $env:RAMPAGE_TOKEN = $oldToken
     $env:RAMPAGE_OLLAMA_URL = $oldOllamaUrl
     if ($agent -and -not $agent.HasExited) { Stop-Process -Id $agent.Id -Force }

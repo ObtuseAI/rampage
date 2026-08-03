@@ -1,5 +1,5 @@
 param(
-    [string]$Installer = 'target\release\bundle\nsis\Rampage_0.2.2_x64-setup.exe'
+    [string]$Installer = 'target\release\bundle\nsis\Rampage_0.2.3_x64-setup.exe'
 )
 
 $ErrorActionPreference = 'Stop'

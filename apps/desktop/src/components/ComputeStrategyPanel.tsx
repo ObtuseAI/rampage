@@ -1,4 +1,4 @@
-import { BatteryCharging, Gauge, Layers3, Network, Sparkles, Zap } from "lucide-react";
+import { Activity, BatteryCharging, Bot, Gauge, Layers3, Network, Sparkles, Zap } from "lucide-react";
 import { useRampage } from "../store";
 import type { ComputeStrategy } from "../types";
 
@@ -115,6 +115,28 @@ export function ComputeStrategyPanel() {
       </div>
       {(plan?.blockers[0] || plan?.warnings[0]) && (
         <div className="strategy-gate"><strong>{plan.blockers.length ? "FENCED" : "NOTE"}</strong><span>{plan.blockers[0] ?? plan.warnings[0]}</span></div>
+      )}
+      <div className={`local-ai-autopilot ${state.localAiRuntime.state}`} aria-live="polite">
+        <Bot size={14} />
+        <span>
+          <strong>LOCAL AI AUTOPILOT · {state.localAiRuntime.state.replaceAll("_", " ")}</strong>
+          {state.localAiRuntime.message}
+        </span>
+        <small>{state.localAiRuntime.runtimeVersion ? `OLLAMA ${state.localAiRuntime.runtimeVersion}` : state.localAiRuntime.modelId}</small>
+      </div>
+      {state.fabricRole === "owner" && (
+        <div className={`fabric-proof ${state.fabricBenchmark ? "complete" : ""}`} aria-live="polite">
+          <Activity size={14} />
+          <span>
+            <strong>SUSTAINED FABRIC PROOF</strong>
+            {state.fabricBenchmark
+              ? `${state.fabricBenchmark.nodes.length} signed machine receipt${state.fabricBenchmark.nodes.length === 1 ? "" : "s"} · ${(state.fabricBenchmark.fabric_hashes_per_second / 1_000_000).toFixed(2)} MH/s · ${state.fabricBenchmark.effective_scale_over_fastest_node.toFixed(2)}× fastest node`
+              : "Run real bounded CPU work on every connected machine and compare their combined measured rate."}
+          </span>
+          <button onClick={() => void state.runFabricBenchmark()} disabled={state.fabricBenchmarkPending || !state.connected}>
+            {state.fabricBenchmarkPending ? "Working…" : state.fabricBenchmark ? "Run again" : "Prove the fabric"}
+          </button>
+        </div>
       )}
       <div className={`gateway-ready ${state.gatewayModels.length ? "online" : ""}`}>
         <span><strong>UNIVERSAL AI GATEWAY</strong>{state.gatewayModels.length ? `${state.gatewayModels.length} consistent installed model${state.gatewayModels.length === 1 ? "" : "s"} · OpenAI · Anthropic · OpenRouter ready` : "No eligible whole-model worker"}</span>

@@ -18,17 +18,17 @@ the authority to run wild.
 [![Rust 1.91](https://img.shields.io/badge/Rust-1.91%2B-0b0f17?logo=rust&logoColor=67f5c5)](Cargo.toml)
 [![AI authority](https://img.shields.io/badge/AI%20authority-proposals%20only-0b0f17?logo=probot&logoColor=67f5c5)](docs/ARCHITECTURE.md#recursive-improvement)
 
-## [⬇ Download Rampage 0.2.2 for Windows](https://obtuseai.github.io/rampage/download/)
+## [⬇ Download Rampage 0.2.3 for Windows](https://obtuseai.github.io/rampage/download/)
 
 **One installer. Desktop shortcut included.**
-[Release notes and SHA-256](https://github.com/ObtuseAI/rampage/releases/tag/v0.2.2-pairing.2) ·
+[Release notes and SHA-256](https://github.com/ObtuseAI/rampage/releases/tag/v0.2.3-fabric-proof.1) ·
 [All releases](https://github.com/ObtuseAI/rampage/releases)
 
 [**Launch the showcase**](https://obtuseai.github.io/rampage/) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Easy pairing](docs/PAIRING.md) ·
 [Security](SECURITY.md) ·
-[0.2.2 release evidence](docs/RELEASE_EVIDENCE_0.2.2.md) ·
+[0.2.3 release evidence](docs/RELEASE_EVIDENCE_0.2.3.md) ·
 [Owner-relay evidence](docs/OWNER_RELAY_EVIDENCE.md) ·
 [Resumable-storage evidence](docs/RESUMABLE_STORAGE_EVIDENCE.md) ·
 [Native distribution](docs/DISTRIBUTION.md) ·
@@ -61,10 +61,12 @@ machine that can actually perform it.
 
 ## Built—not imagined
 
-Rampage 0.2.2 is the current Windows x64 pairing candidate. It combines the established compute,
-mesh, storage, and gateway foundations with zero-copy nearby enrollment, durable worker identity,
-private-network firewall setup, and a self-contained packaged 3D Arena. Evidence links distinguish
-automated and packaged proof from the still-pending physical laptop and phone gates.
+Rampage 0.2.3 is the current Windows x64 fabric-proof candidate. It adds automatic local-AI
+qualification, a signed sustained-compute benchmark, bounded clock-skew tolerance for real machines,
+owner-local authenticated QUIC enrollment, and autonomous worker recovery after the owner controller
+restarts. The installer can qualify Ollama 0.32.5 and the exact `qwen3:4b` artifact without turning a
+model server into controller authority. Evidence links distinguish packaged and live proof from the
+still-pending exact-0.2.3 laptop upgrade and phone gate.
 
 | Proof surface | Validated result |
 | --- | --- |
@@ -73,15 +75,19 @@ automated and packaged proof from the still-pending physical laptop and phone ga
 | Private mesh | Authenticated direct QUIC plus a forced-relay proof through the bundled owner-operated relay; no third-party overlay account or silent public relay |
 | Storage fabric | Encrypted chunked CAS, flushed restart-resumable QUIC frames, full-content possession proofs, corruption quarantine, budgeted independent repair, staging, and retrieval |
 | Real AI workload | OpenAI, Anthropic Messages, and OpenRouter-style text requests crossed authenticated QUIC to a worker's loopback Ollama, streamed back, and ended in a transcript-matched signed receipt |
+| Automatic local AI | Windows bootstrap detects or installs the pinned Ollama runtime, pulls the exact 2.5 GB `qwen3:4b` artifact, verifies its complete SHA-256 digest, and advertises it without an agent restart |
+| Signed fabric benchmark | One bounded CPU grant per capable live node; deterministic SHA-256 chains; node-pinned placement; signed receipts; aggregate and scale-over-fastest results in the desktop |
 | Universal capability contract | Signed offers advertise exact workload domain, adapter, operation, execution pattern, isolation, runtime digest, and qualification status; candidate profiles grant no authority |
 | Autonomous self-scan | Stable evidence digests cover routes, links, failures, denials, thermal/battery pressure, capability gaps, idle capacity, and protected-artifact replication |
 | Compute Strategy | Read-only Maximum Model, Speed Boost, Throughput, Efficiency, and Autonomous placement previews with exact capacity and qualification blockers |
-| Packaged product | Native Tauri shell, role-aware system tray, close-to-tray, start-at-login, governed sidecars, clean explicit shutdown, installer, and automatic desktop launcher |
+| Packaged product | Native Tauri shell, role-aware system tray, close-to-tray, start-at-login, governed sidecars, cold-start tolerance, controller-restart recovery, clean explicit shutdown, installer, and automatic desktop launcher |
 | Verification | Rust, desktop, TypeScript SDK, Python intelligence, Python SDK, deterministic universal-gateway, forced-relay mesh, packaging, and lifecycle gates |
 
-The packaged 0.2.2 qualification record—including artifact hashes and the unsigned-release
-boundary—is in [the current release evidence](docs/RELEASE_EVIDENCE_0.2.2.md). The original 0.2
-record remains in [its immutable evidence page](docs/RELEASE_EVIDENCE.md). The newer API,
+The packaged 0.2.3 qualification record—including artifact hashes, live Qwen proof, and the
+unsigned-release boundary—is in [the current release evidence](docs/RELEASE_EVIDENCE_0.2.3.md).
+The 0.2.2 pairing record remains in
+[its immutable evidence page](docs/RELEASE_EVIDENCE_0.2.2.md). The original 0.2 record remains in
+[the original qualification page](docs/RELEASE_EVIDENCE.md). The newer API,
 workload-contract, self-scan,
 and signed-canary campaign is recorded separately in
 [universal-compute evidence](docs/UNIVERSAL_COMPUTE_EVIDENCE.md). The self-hosted hard-NAT fallback
@@ -174,6 +180,11 @@ The desktop now defaults to **Maximum Model** and exposes five explicit ways to 
 | Efficiency | Smallest qualified placement that fits |
 | Autonomous | Proposal-only strategy adaptation behind Governor gates |
 
+On Windows, Local AI Autopilot now qualifies a pinned Ollama runtime and exact starter model in the
+background. **Prove my speed** runs sustained, lease-bounded work on every capable live 0.2.3 node
+and accepts a node only after its signed execution receipt arrives. This measures useful distributed
+work; it does not turn network latency into fictional local VRAM.
+
 The planner reports visible versus compatible memory, requested weights plus KV cache, selected
 ranks, parallelism, predicted speedup, and the exact missing qualification. Planning remains
 read-only. Separately, the shipped whole-model lane can select an exact installed Ollama model on
@@ -222,7 +233,7 @@ never displayed or copied. Capability discovery does the rest.
 
 | Platform lane | Native deliverables | Current qualification boundary |
 | --- | --- | --- |
-| Windows x64 | MSI and NSIS installers; automatic desktop shortcut; Start-menu entry; role-aware tray; bundled sidecars | Packaged 0.2 was qualified on Windows 11 x64 but remains unsigned; fresh Windows Server 2022 candidate builds do not substitute for Windows 10 evidence |
+| Windows x64 | MSI and NSIS installers; automatic desktop shortcut; Start-menu entry; role-aware tray; bundled sidecars | Packaged 0.2.3 was qualified on Windows 11 x64 but remains unsigned; fresh Windows Server 2022 candidate builds do not substitute for Windows 10 evidence |
 | Linux x64 | Debian package and AppImage with the same Tauri shell and native sidecars | Fresh Ubuntu 24.04 candidate gate; stable repository/AppImage signing remains channel-specific |
 | macOS Apple Silicon | Native app bundle and DMG | Fresh macOS 15/M1 candidate gate; stable publication requires Developer ID signing, Gatekeeper acceptance, notarization, and a stapled ticket |
 | Windows 10 x64 | MSI/NSIS lifecycle, desktop shortcut, tray, sidecars, restart, STOP, and uninstall campaign | Deliberately unqualified until a real self-hosted Windows 10 runner completes the fail-closed workflow |
@@ -294,7 +305,7 @@ boundary.
 For a real local-model workload:
 
 ```powershell
-rampage generate llama3.2:latest "Reply with RAMPAGE_OK" --gpu-memory-gb 4
+rampage generate qwen3:4b "Reply with RAMPAGE_OK" --gpu-memory-gb 4
 ```
 
 Or point an OpenAI, Anthropic, or OpenRouter-compatible client at the owner PC's loopback gateway.
@@ -306,7 +317,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:47831/v1", api_key="RAMPAGE_TOKEN")
 reply = client.chat.completions.create(
-    model="llama3.2:latest",
+    model="qwen3:4b",
     messages=[{"role": "user", "content": "Reply with RAMPAGE_OK"}],
 )
 print(reply.choices[0].message.content)
@@ -331,6 +342,16 @@ rampage shard-status SET_ID
 
 Each argument is independently retryable. Rampage previews placement without mutation, admits the
 entire set or none of it, and reports every selected node, signed receipt, result, and threshold.
+
+To prove sustained capacity rather than trusting an idle-core count:
+
+```powershell
+rampage benchmark --cores-per-node 4 --iterations-per-core 5000000
+```
+
+The result names every contributing node, its measured rate, signed receipt ID, aggregate rate,
+and effective scale over the fastest node. Older workers stay excluded until upgraded because they
+do not advertise the benchmark adapter.
 
 Donated drives become explicit artifact capacity:
 

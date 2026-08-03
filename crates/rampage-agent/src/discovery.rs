@@ -168,6 +168,18 @@ pub fn discover_workload_capabilities(
                         shipped_runtime.clone(),
                         true,
                     ),
+                    "rampage.benchmark.v1" => (
+                        WorkloadDomain::DataProcessing,
+                        BTreeSet::from(["sha256_chain".into()]),
+                        BTreeSet::from([
+                            ExecutionPattern::WholeWorkload,
+                            ExecutionPattern::IndependentShard,
+                        ]),
+                        BTreeSet::from([ResourceClass::CpuCompute]),
+                        WorkloadIsolation::AllowlistedInProcess,
+                        shipped_runtime.clone(),
+                        true,
+                    ),
                     "rampage.artifact-hash.v1" => (
                         WorkloadDomain::Storage,
                         BTreeSet::from(["hash_artifact".into()]),

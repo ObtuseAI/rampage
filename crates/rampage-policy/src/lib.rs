@@ -49,6 +49,7 @@ impl Default for GovernorConfig {
                 "rampage.echo.v1".to_string(),
                 "rampage.hash.v1".to_string(),
                 "rampage.eval-shard.v1".to_string(),
+                "rampage.benchmark.v1".to_string(),
                 "rampage.ollama.v1".to_string(),
                 "rampage.artifact-hash.v1".to_string(),
             ]),
@@ -596,6 +597,7 @@ fn adapter_allows_resource(adapter: &str, class: rampage_protocol::ResourceClass
             class,
             ResourceClass::CpuCompute | ResourceClass::RamWorkingSet | ResourceClass::RamCache
         ),
+        "rampage.benchmark.v1" => class == ResourceClass::CpuCompute,
         "rampage.ollama.v1" => matches!(
             class,
             ResourceClass::CpuCompute
@@ -1013,6 +1015,22 @@ mod tests {
         assert_eq!(lease.granted[0].capacity, 1);
         assert_eq!(lease.granted[0].available, 1);
         assert!(governor.verify_lease(&lease).is_ok());
+    }
+
+    #[test]
+    fn sustained_benchmark_is_allowlisted_for_cpu_only() {
+        let governor = Governor::ephemeral(GovernorConfig::default());
+        let (mut job, mut offer) = fixtures("desktop", true);
+        job.adapter = "rampage.benchmark.v1".into();
+        job.operation = "sha256_chain".into();
+        offer.adapters = BTreeSet::from([job.adapter.clone()]);
+        assert!(governor.check_job(&job, &offer, offer.node_id).is_ok());
+        job.requests[0].class = ResourceClass::RamWorkingSet;
+        job.requests[0].unit = "byte".into();
+        assert_eq!(
+            governor.check_job(&job, &offer, offer.node_id),
+            Err(Denial::AdapterResourceDenied)
+        );
     }
 
     #[test]

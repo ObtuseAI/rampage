@@ -38,6 +38,12 @@ code path that mints a capability lease or launches a process.
 
 ## Runtime profiles
 
+On Windows, the desktop's Local AI Autopilot detects or installs the exact Ollama 0.32.5 package,
+waits for its loopback API, pulls `qwen3:4b`, and verifies the model's complete artifact digest
+before marking the runtime ready. The bootstrap is bounded, idempotent, disabled in diagnostic
+builds, and never receives controller credentials. The worker refreshes runtime inventory while it
+is running, so qualification does not require an agent restart.
+
 The shipped local Ollama adapter advertises a `shipped_local` whole-model profile automatically,
 including a bounded inventory of locally installed model identifiers, artifact sizes, and content
 digests from `/api/tags`. A machine with separate system RAM and VRAM advertises `hybrid` capacity;
@@ -119,8 +125,22 @@ configured loopback Ollama origin. The terminal receipt signs the exact output S
 state, timestamps, and Ollama-reported usage. The controller verifies the signer and transcript
 before returning non-streaming success or the final streaming completion frame.
 
+Thinking-capable models remain in Ollama's structured thinking mode. Rampage ignores the private
+`message.thinking` field and signs only the answer transcript emitted through `message.content`.
+This prevents reasoning text from being relabeled as an ordinary OpenAI or Anthropic response.
+
 This is real remote whole-model execution. It can let a smaller owner PC use a model that fits a
 single stronger contributor. It does not combine memory from multiple hosts for one inference.
+
+## Signed capacity proof
+
+`rampage benchmark` and the desktop's **Prove my speed** action run deterministic SHA-256 chains
+under a CPU-only capability lease. The controller creates one node-pinned job per live contributor
+that advertises `rampage.benchmark.v1`, admits the complete set atomically, and reports a node only
+after its signed receipt exists. Output includes each node's lanes, total hashes, elapsed time,
+result digest, receipt ID, hashes/second, aggregate fabric rate, and effective scale over the
+fastest node. It is deliberately sustained work—not a hardware-name estimate or a network-speed
+claim.
 
 ## Next distributed executable gate
 
