@@ -47,16 +47,18 @@ inferring performance from hardware names.
 - The packaged worker passed enrollment, encrypted artifact round trip, signed benchmark,
   controller restart recovery, consumed-secret removal, pinned restart, close-to-tray, explicit
   exit, and no-sidecar-leak checks.
-- The NSIS candidate installed all six payloads, created the desktop and Rampage Shell shortcuts,
-  started the owner fabric, and removed the test installation cleanly.
+- The exact tagged CI-built NSIS matched its generated checksum manifest, installed all six
+  payloads, created the desktop and Rampage Shell shortcuts, started the owner fabric, and removed
+  the test installation cleanly with no leaked sidecars.
 
 ## Honest boundary
 
 This is an **unsigned Windows 11 x64 prerelease candidate**. Verify its published SHA-256 before
-running it. The main PC is on the exact 0.2.3 package; the already-enrolled physical laptop must be
-upgraded to this same build before its benchmark adapter, clock-skew fix, automatic local AI, and
-controller-restart recovery can be measured together. Phone qualification remains the next native
-device gate.
+running it. The main PC is on a source-identical local 0.2.3 proof package; the exact public CI NSIS
+separately passed its install, packaged-owner, shortcut, shutdown, uninstall, and no-leak campaign.
+The already-enrolled physical laptop must be upgraded to the public build before its benchmark
+adapter, clock-skew fix, automatic local AI, and controller-restart recovery can be measured
+together. Phone qualification remains the next native device gate.
 
 Rampage pools work, services, replicas, and encrypted artifacts. It does not make commodity network
 RAM or VRAM locally addressable, and unsafe llama.cpp RPC remains blocked.
