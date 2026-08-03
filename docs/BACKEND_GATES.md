@@ -9,7 +9,7 @@ runtime boundary, topology, failure behavior, and measured benefit have passed t
 | Backend | State | Decision |
 | --- | --- | --- |
 | Rampage native whole-job adapters | Shipped | Preferred for heterogeneous consumer machines and independent work |
-| Local Ollama | Shipped | Loopback-only, model must already exist, signed lease and receipt required |
+| Local Ollama | Shipped | Windows desktop can qualify pinned Ollama 0.32.5 and exact `qwen3:4b` automatically; loopback-only execution, exact model digest, signed lease and receipt required |
 | Remote whole-model Ollama gateway | Shipped | Bearer-protected loopback OpenAI subset; authenticated QUIC; exact installed digest; one-shot fenced lease; signed transcript receipt |
 | Model strategy planner | Shipped | Read-only previews for maximum model, speed, throughput, efficiency, and balanced objectives; no execution authority |
 | Durable authority substrate | Shipped | Hash-chained controller epoch, one-shot durable worker/storage nonces, restart-preserving recovery, and STOP fencing |

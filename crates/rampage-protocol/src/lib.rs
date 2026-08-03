@@ -16,6 +16,16 @@ pub const MAX_MODEL_PROMPT_BYTES: u64 = 1024 * 1024;
 pub const MAX_MODEL_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_MODEL_OUTPUT_TOKENS: u32 = 32 * 1024;
 pub const MAX_RELAY_ENDPOINTS: usize = 4096;
+/// Maximum signed-lease not-before tolerance for ordinary consumer clock skew.
+///
+/// Expiration remains exact and fencing epochs remain mandatory. This tolerance exists only so a
+/// freshly issued lease is not rejected by a trusted worker whose wall clock trails the controller
+/// by a small amount; it never extends the lease after `expires_at`.
+pub const MAX_LEASE_CLOCK_SKEW_SECONDS: i64 = 5;
+
+fn lease_has_started(issued_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    issued_at <= now + chrono::Duration::seconds(MAX_LEASE_CLOCK_SKEW_SECONDS)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -184,7 +194,7 @@ impl PromotionCanaryLeaseV1 {
 
     pub fn is_active_at(&self, now: DateTime<Utc>, fencing_epoch: u64) -> bool {
         self.schema == Self::SCHEMA
-            && self.issued_at <= now
+            && lease_has_started(self.issued_at, now)
             && now < self.expires_at
             && self.fencing_epoch == fencing_epoch
             && is_sha256_digest(&self.candidate_digest)
@@ -632,7 +642,7 @@ impl ModelSessionLeaseV1 {
 
     pub fn is_active_at(&self, now: DateTime<Utc>, current_epoch: u64) -> bool {
         self.schema == Self::SCHEMA
-            && self.issued_at <= now
+            && lease_has_started(self.issued_at, now)
             && now < self.expires_at
             && self.fencing_epoch == current_epoch
             && self.backend == ModelBackend::LocalOllama
@@ -877,7 +887,7 @@ impl StorageLeaseV1 {
 
     pub fn is_active_at(&self, now: DateTime<Utc>, current_epoch: u64) -> bool {
         self.schema == Self::SCHEMA
-            && self.issued_at <= now
+            && lease_has_started(self.issued_at, now)
             && now < self.expires_at
             && self.fencing_epoch == current_epoch
             && self.size_bytes <= MAX_ARTIFACT_TRANSFER_BYTES
@@ -1372,7 +1382,7 @@ impl CapabilityLeaseV1 {
 
     pub fn is_active_at(&self, now: DateTime<Utc>, current_epoch: u64) -> bool {
         self.schema == Self::SCHEMA
-            && self.issued_at <= now
+            && lease_has_started(self.issued_at, now)
             && now < self.expires_at
             && self.fencing_epoch == current_epoch
             && !self.signature.is_empty()
@@ -1434,6 +1444,55 @@ mod tests {
         };
         assert!(lease.is_active_at(now, 4));
         assert!(!lease.is_active_at(now, 5));
+    }
+
+    #[test]
+    fn lease_not_before_allows_only_bounded_clock_skew() {
+        let now = Utc::now();
+        let mut lease = CapabilityLeaseV1 {
+            schema: CapabilityLeaseV1::SCHEMA.into(),
+            lease_id: Uuid::now_v7(),
+            job_id: Uuid::now_v7(),
+            node_id: Uuid::now_v7(),
+            project_id: Uuid::now_v7(),
+            adapter: "rampage.echo.v1".into(),
+            operation: "echo".into(),
+            input_digests: BTreeSet::new(),
+            granted: vec![],
+            network_allowlist: BTreeSet::new(),
+            issued_at: now + Duration::milliseconds(500),
+            expires_at: now + Duration::minutes(1),
+            nonce: "nonce".into(),
+            fencing_epoch: 4,
+            signature: "signed".into(),
+        };
+        assert!(lease.is_active_at(now, 4));
+        lease.issued_at = now + Duration::seconds(MAX_LEASE_CLOCK_SKEW_SECONDS + 1);
+        assert!(!lease.is_active_at(now, 4));
+        lease.issued_at = now;
+        lease.expires_at = now;
+        assert!(!lease.is_active_at(now, 4));
+
+        let mut storage = StorageLeaseV1 {
+            schema: StorageLeaseV1::SCHEMA.into(),
+            lease_id: Uuid::now_v7(),
+            node_id: Uuid::now_v7(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            operation: ArtifactTransferOperation::Put,
+            storage_class: StorageClass::Cache,
+            size_bytes: 16 * 1024 * 1024,
+            issued_at: now + Duration::milliseconds(500),
+            expires_at: now + Duration::minutes(1),
+            nonce: "storage-nonce".into(),
+            fencing_epoch: 4,
+            signature: "signed".into(),
+        };
+        assert!(storage.is_active_at(now, 4));
+        storage.issued_at = now + Duration::seconds(MAX_LEASE_CLOCK_SKEW_SECONDS + 1);
+        assert!(!storage.is_active_at(now, 4));
+        storage.issued_at = now;
+        storage.expires_at = now;
+        assert!(!storage.is_active_at(now, 4));
     }
 
     #[test]

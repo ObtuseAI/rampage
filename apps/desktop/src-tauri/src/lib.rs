@@ -1,3 +1,4 @@
+mod local_ai;
 mod pairing;
 
 #[cfg(target_os = "windows")]
@@ -17,6 +18,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
+use local_ai::{LocalAiRuntime, LocalAiRuntimeView};
 use pairing::{PairingManager, PairingRequestView, PairingWindowView, WorkerPairingView};
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_autostart::ManagerExt;
@@ -56,6 +58,7 @@ impl Default for WorkerRuntime {
 
 const BACKGROUND_ARG: &str = "--background";
 const AUTOSTART_NAME: &str = "Rampage";
+const OWNER_FABRIC_MARKER: &str = "owner-fabric-v1.ready";
 #[cfg(target_os = "windows")]
 const AUTOSTART_RUN_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
 #[cfg(target_os = "windows")]
@@ -642,9 +645,61 @@ fn worker_runtime_status(runtime: State<'_, WorkerRuntime>) -> Result<WorkerRunt
         .map_err(|_| "worker runtime state lock poisoned".to_string())
 }
 
+#[tauri::command]
+fn local_ai_runtime_status(
+    runtime: State<'_, LocalAiRuntime>,
+) -> Result<LocalAiRuntimeView, String> {
+    runtime.view()
+}
+
+#[tauri::command]
+async fn run_fabric_benchmark(app: AppHandle) -> Result<serde_json::Value, String> {
+    const MAX_RESULT_BYTES: usize = 1024 * 1024;
+    if fabric_mode(app.clone())? != "owner" {
+        return Err("only the owner PC can benchmark the compute fabric".into());
+    }
+    let data_dir = runtime_dir(&app)?;
+    let output = app
+        .shell()
+        .sidecar("rampage")
+        .map_err(|error| error.to_string())?
+        .env("RAMPAGE_DATA_DIR", data_dir)
+        .args([
+            "benchmark",
+            "--cores-per-node",
+            "4",
+            "--iterations-per-core",
+            "5000000",
+            "--timeout-seconds",
+            "180",
+        ])
+        .output()
+        .await
+        .map_err(|error| format!("could not start the signed fabric benchmark: {error}"))?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr)
+            .chars()
+            .take(1024)
+            .collect::<String>();
+        return Err(format!("fabric benchmark failed: {}", error.trim()));
+    }
+    if output.stdout.len() > MAX_RESULT_BYTES {
+        return Err("fabric benchmark result exceeded the 1 MiB desktop limit".into());
+    }
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("fabric benchmark returned invalid JSON: {error}"))?;
+    if result.get("schema").and_then(serde_json::Value::as_str)
+        != Some("rampage.fabric-benchmark-result.v1")
+    {
+        return Err("fabric benchmark returned an unexpected result schema".into());
+    }
+    Ok(result)
+}
+
 fn worker_enrollment_exists(data_dir: &std::path::Path) -> bool {
-    data_dir.join("remote-invite.json").is_file()
-        || data_dir.join("agent.controller-pin.json").is_file()
+    !data_dir.join(OWNER_FABRIC_MARKER).is_file()
+        && (data_dir.join("remote-invite.json").is_file()
+            || data_dir.join("agent.controller-pin.json").is_file())
 }
 
 fn launch_owner_relay_if_configured(
@@ -737,6 +792,10 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
     if worker_enrollment_exists(&data_dir) {
         return launch_remote_worker(app, &data_dir);
     }
+    write_new_marker(
+        &data_dir.join(OWNER_FABRIC_MARKER),
+        b"rampage.owner-fabric.v1\n",
+    )?;
     let intelligence_dir = data_dir.join("intelligence");
     std::fs::create_dir_all(&intelligence_dir).map_err(|error| error.to_string())?;
     let private_relay = configured_private_relay(&data_dir)?;
@@ -760,11 +819,13 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
         .map_err(|_| "sidecar state lock poisoned".to_string())?
         .push(controller);
     let token_path = data_dir.join("controller.token");
-    for _ in 0..100 {
+    // A cold Windows start can include executable reputation scanning and PyInstaller extraction.
+    // Keep the setup wait bounded, but do not fail a healthy first launch after only two seconds.
+    for _ in 0..300 {
         if token_path.is_file() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(100));
     }
     let token = String::from_utf8(read_bounded_regular_file(
         &token_path,
@@ -815,46 +876,88 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
         if !ready {
             return;
         }
-        let Ok(response) = client
-            .post(format!("{controller_origin}/v1/enrollment/invites"))
-            .header("x-rampage-token", &token)
-            .json(&serde_json::json!({}))
-            .send()
-            .await
-        else {
-            return;
-        };
-        let Ok(invite) = response.json::<serde_json::Value>().await else {
-            return;
-        };
-        let Some(enrollment_code) = invite
-            .get("enrollment_code")
-            .and_then(|value| value.as_str())
-        else {
-            return;
-        };
         let Ok(data_dir) = runtime_dir(&handle) else {
             return;
         };
         let key_file = data_dir.join("agent.key");
+        let controller_pin = key_file.with_extension("controller-pin.json");
+        let mut agent_args = vec![
+            "--controller".into(),
+            agent_controller,
+            "--key-file".into(),
+            key_file.to_string_lossy().into_owned(),
+        ];
+        if !controller_pin.is_file() {
+            let Ok(response) = client
+                .post(format!("{controller_origin}/v1/enrollment/invites"))
+                .header("x-rampage-token", &token)
+                .json(&serde_json::json!({}))
+                .send()
+                .await
+            else {
+                return;
+            };
+            if !response.status().is_success() {
+                return;
+            }
+            let Ok(invite_bytes) = response.bytes().await else {
+                return;
+            };
+            if invite_bytes.len() > 256 * 1024 {
+                return;
+            }
+            let Ok(invite) = serde_json::from_slice::<serde_json::Value>(&invite_bytes) else {
+                return;
+            };
+            if invite.get("schema").and_then(serde_json::Value::as_str)
+                != Some("rampage.enrollment-invite.v1")
+                || invite.get("controller_mesh").is_none()
+            {
+                return;
+            }
+            let Ok(invite_bytes) = serde_json::to_vec_pretty(&invite) else {
+                return;
+            };
+            if invite_bytes.len() > 256 * 1024 {
+                return;
+            }
+            let invite_file = data_dir.join(format!(
+                "owner-agent-invite-{}.json",
+                &fresh_intelligence_token()[..16]
+            ));
+            let Ok(mut file) = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&invite_file)
+            else {
+                return;
+            };
+            if file
+                .write_all(&invite_bytes)
+                .and_then(|()| file.sync_all())
+                .is_err()
+            {
+                let _ = std::fs::remove_file(&invite_file);
+                return;
+            }
+            agent_args.extend([
+                "--invite-file".into(),
+                invite_file.to_string_lossy().into_owned(),
+            ]);
+        }
+        agent_args.extend([
+            "--display-name".into(),
+            "This Device".into(),
+            "--device-kind".into(),
+            "desktop".into(),
+            "--serve".into(),
+        ]);
         let Ok(command) = handle.shell().sidecar("rampage-agent") else {
             return;
         };
         let Ok((_, agent)) = command
             .env("RAMPAGE_DATA_DIR", &data_dir)
-            .args([
-                "--controller".into(),
-                agent_controller,
-                "--key-file".into(),
-                key_file.to_string_lossy().into_owned(),
-                "--enrollment-code".into(),
-                enrollment_code.into(),
-                "--display-name".into(),
-                "This Device".into(),
-                "--device-kind".into(),
-                "desktop".into(),
-                "--serve".into(),
-            ])
+            .args(agent_args)
             .spawn()
         else {
             return;
@@ -977,9 +1080,14 @@ pub fn run() {
         })
         .manage(Sidecars::default())
         .manage(WorkerRuntime::default())
+        .manage(LocalAiRuntime::default())
         .manage(PairingManager::default())
         .setup(|app| {
             launch_fabric(app.handle()).map_err(std::io::Error::other)?;
+            local_ai::schedule(
+                app.state::<LocalAiRuntime>().inner().clone(),
+                diagnostic_instance_is_bounded(),
+            );
             install_desktop_lifecycle(app)?;
             schedule_diagnostic_exit(app.handle());
             Ok(())
@@ -988,6 +1096,8 @@ pub fn run() {
             local_stop,
             fabric_mode,
             worker_runtime_status,
+            local_ai_runtime_status,
+            run_fabric_benchmark,
             controller_token,
             join_remote,
             open_pairing_window,
@@ -1096,5 +1206,18 @@ mod tests {
             "rampage-desktop.exe".into(),
             BACKGROUND_ARG.into()
         ]));
+    }
+
+    #[test]
+    fn durable_owner_marker_prevents_local_mesh_pin_role_confusion() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("agent.controller-pin.json"), b"pinned").unwrap();
+        assert!(worker_enrollment_exists(temp.path()));
+        std::fs::write(
+            temp.path().join(OWNER_FABRIC_MARKER),
+            b"rampage.owner-fabric.v1\n",
+        )
+        .unwrap();
+        assert!(!worker_enrollment_exists(temp.path()));
     }
 }

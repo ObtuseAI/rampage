@@ -150,6 +150,7 @@ fn main() -> anyhow::Result<()> {
         sysinfo::System::name().unwrap_or_else(|| std::env::consts::OS.into()),
     );
     base_labels.insert("arch".into(), std::env::consts::ARCH.into());
+    base_labels.insert("node_id".into(), node_id.to_string());
     let discovered = discovery::discover(base_labels, &data_dir);
     let storage_capacity = |class| {
         discovered
@@ -182,6 +183,7 @@ fn main() -> anyhow::Result<()> {
         "rampage.hash.v1".into(),
         "rampage.eval-shard.v1".into(),
         "rampage.artifact-hash.v1".into(),
+        "rampage.benchmark.v1".into(),
     ]);
     let has_ollama = discovery::ollama_available(&ollama_base_url);
     if has_ollama {
@@ -275,11 +277,13 @@ fn main() -> anyhow::Result<()> {
     }
     if args.serve {
         let mut ready_announced = false;
+        let mut reconnect_delay = std::time::Duration::from_secs(1);
         loop {
             if data_dir.join("KILL").is_file() {
                 return Ok(());
             }
             let now = Utc::now();
+            refresh_dynamic_model_capabilities(&mut offer, &ollama_base_url);
             offer.offer_id = Uuid::now_v7();
             offer.observed_at = now;
             offer.expires_at = now + Duration::seconds(45);
@@ -301,7 +305,16 @@ fn main() -> anyhow::Result<()> {
             offer.mesh_endpoint =
                 transport.signed_worker_endpoint(&signing_key, now, offer.expires_at);
             rampage_policy::sign_offer(&signing_key, &mut offer);
-            transport.post_json("/v1/offers", &offer)?;
+            if let Err(error) = transport.post_json("/v1/offers", &offer) {
+                eprintln!(
+                    "owner PC unavailable; retrying the signed fabric connection in {} second(s): {error}",
+                    reconnect_delay.as_secs()
+                );
+                std::thread::sleep(reconnect_delay);
+                reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(10));
+                continue;
+            }
+            reconnect_delay = std::time::Duration::from_secs(1);
             if !ready_announced {
                 println!(
                     "{}",
@@ -314,13 +327,23 @@ fn main() -> anyhow::Result<()> {
                 );
                 ready_announced = true;
             }
-            let did_work = execute_one_work_item(
+            let did_work = match execute_one_work_item(
                 &args,
                 &transport,
                 &identity,
                 &signing_key,
                 artifact_store.as_ref(),
-            )?;
+            ) {
+                Ok(did_work) => did_work,
+                Err(error) => {
+                    eprintln!(
+                        "fabric work channel unavailable; retrying without dropping enrollment: {error}"
+                    );
+                    std::thread::sleep(reconnect_delay);
+                    reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(10));
+                    continue;
+                }
+            };
             // Drain an admitted queue promptly, but back off while idle so a donated machine does
             // not burn CPU polling. Offer freshness is maintained independently on every loop.
             std::thread::sleep(if did_work {
@@ -347,6 +370,25 @@ fn main() -> anyhow::Result<()> {
     }
     println!("{}", serde_json::to_string_pretty(&offer)?);
     Ok(())
+}
+
+fn refresh_dynamic_model_capabilities(offer: &mut ResourceOfferV1, ollama_base_url: &str) {
+    let has_ollama = discovery::ollama_available(ollama_base_url);
+    if has_ollama {
+        offer.adapters.insert("rampage.ollama.v1".into());
+    } else {
+        offer.adapters.remove("rampage.ollama.v1");
+    }
+    offer.model_runtimes =
+        match discovery::discover_model_runtimes(&offer.resources, has_ollama, ollama_base_url) {
+            Ok(profiles) => profiles,
+            Err(error) => {
+                eprintln!("model runtime refresh rejected; continuing fail-closed: {error}");
+                Vec::new()
+            }
+        };
+    offer.workload_capabilities =
+        discovery::discover_workload_capabilities(&offer.adapters, &offer.model_runtimes);
 }
 
 fn execute_one_work_item(
@@ -1247,6 +1289,10 @@ async fn run_ollama_invocation(
             "model": request.lease.model_id,
             "messages": request.messages,
             "stream": true,
+            // Keep reasoning-capable runtimes in their structured mode. Ollama then places the
+            // reasoning trace in `message.thinking`, which Rampage intentionally does not forward,
+            // while ordinary answer text remains in `message.content`.
+            "think": true,
             "options": options
         }))
         .send()
@@ -1668,7 +1714,8 @@ mod tests {
         }]}))
     }
 
-    async fn fake_chat() -> Response {
+    async fn fake_chat(Json(request): Json<serde_json::Value>) -> Response {
+        assert_eq!(request.get("think"), Some(&serde_json::Value::Bool(true)));
         Response::builder()
             .header("content-type", "application/x-ndjson")
             .body(Body::from(concat!(

@@ -117,6 +117,17 @@ enum Command {
     },
     /// Show signed link benchmarks and resource offers used by topology-aware placement.
     Topology,
+    /// Run a sustained, signed CPU benchmark concurrently on every admissible machine.
+    Benchmark {
+        /// Maximum logical cores reserved on each machine.
+        #[arg(long, default_value_t = 4)]
+        cores_per_node: u64,
+        /// Deterministic SHA-256 chain iterations performed by each reserved core.
+        #[arg(long, default_value_t = 5_000_000)]
+        iterations_per_core: u64,
+        #[arg(long, default_value_t = 180)]
+        timeout_seconds: u64,
+    },
     /// Preview independent shards across the pooled fabric without issuing leases.
     ShardPlan {
         /// One comma-separated numeric partition per independent shard.
@@ -391,6 +402,50 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Topology => {
             print_json(fetch_json(&format!("{}/v1/offers", cli.controller)).await?)
+        }
+        Command::Benchmark {
+            cores_per_node,
+            iterations_per_core,
+            timeout_seconds,
+        } => {
+            anyhow::ensure!(
+                (1..=64).contains(&cores_per_node),
+                "cores-per-node must be between 1 and 64"
+            );
+            anyhow::ensure!(
+                (1..=20_000_000).contains(&iterations_per_core),
+                "iterations-per-core must be between 1 and 20000000"
+            );
+            let offers = fetch_json(&format!("{}/v1/offers", cli.controller)).await?;
+            let (set, names) = make_benchmark_set(&offers, cores_per_node, iterations_per_core)?;
+            let set_id = set.set_id;
+            let admission = post_json(&format!("{}/v1/shard-sets", cli.controller), &set).await?;
+            anyhow::ensure!(
+                admission.get("all_admitted").and_then(Value::as_bool) == Some(true),
+                "fabric benchmark was not atomically admitted"
+            );
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds.max(1));
+            loop {
+                let status =
+                    fetch_json(&format!("{}/v1/shard-sets/{set_id}", cli.controller)).await?;
+                if status.get("status").and_then(Value::as_str) != Some("running") {
+                    let summary = benchmark_summary(&status, &names)?;
+                    let succeeded =
+                        status.get("status").and_then(Value::as_str) == Some("succeeded");
+                    print_json(summary)?;
+                    anyhow::ensure!(
+                        succeeded,
+                        "fabric benchmark finished below its success threshold"
+                    );
+                    break Ok(());
+                }
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "fabric benchmark did not finish before the timeout"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
         }
         Command::ShardPlan {
             values,
@@ -686,6 +741,165 @@ fn make_shard_set(
     Ok(set)
 }
 
+fn make_benchmark_set(
+    offers: &Value,
+    cores_per_node: u64,
+    iterations_per_core: u64,
+) -> anyhow::Result<(ShardSetV1, BTreeMap<Uuid, String>)> {
+    let set_id = Uuid::now_v7();
+    let project_id = Uuid::now_v7();
+    let submitted_by = Uuid::now_v7();
+    let deadline = Utc::now() + Duration::minutes(10);
+    let mut names = BTreeMap::new();
+    let mut shards = Vec::new();
+    for offer in offers
+        .as_array()
+        .context("controller offers response is not an array")?
+    {
+        let adapters = offer
+            .get("adapters")
+            .and_then(Value::as_array)
+            .context("resource offer omitted adapters")?;
+        if !adapters
+            .iter()
+            .any(|adapter| adapter.as_str() == Some("rampage.benchmark.v1"))
+        {
+            continue;
+        }
+        let node_id = offer
+            .get("node_id")
+            .and_then(Value::as_str)
+            .context("resource offer omitted node_id")?
+            .parse::<Uuid>()?;
+        let cpu = offer
+            .get("resources")
+            .and_then(Value::as_array)
+            .and_then(|resources| {
+                resources.iter().find(|resource| {
+                    resource.get("class").and_then(Value::as_str) == Some("cpu_compute")
+                })
+            })
+            .context("resource offer omitted CPU capacity")?;
+        let available = cpu
+            .get("available")
+            .and_then(Value::as_u64)
+            .context("CPU offer omitted available logical cores")?;
+        let lanes = available.min(cores_per_node).min(64);
+        if lanes == 0 || lanes.saturating_mul(iterations_per_core) > 400_000_000 {
+            continue;
+        }
+        let name = cpu
+            .pointer("/labels/device_name")
+            .and_then(Value::as_str)
+            .unwrap_or("Rampage node")
+            .to_string();
+        names.insert(node_id, name);
+        shards.push(JobSpecV1 {
+            schema: JobSpecV1::SCHEMA.into(),
+            job_id: Uuid::now_v7(),
+            project_id,
+            submitted_by,
+            adapter: "rampage.benchmark.v1".into(),
+            operation: "sha256_chain".into(),
+            arguments: BTreeMap::from([(
+                "iterations_per_lane".into(),
+                iterations_per_core.to_string(),
+            )]),
+            inputs: vec![],
+            requests: vec![ResourceRequestV1 {
+                class: ResourceClass::CpuCompute,
+                minimum: lanes,
+                preferred: lanes,
+                unit: "logical_core".into(),
+                required_labels: BTreeMap::from([("node_id".into(), node_id.to_string())]),
+            }],
+            trust: WorkloadTrust::NativeTrusted,
+            restart_tolerant: true,
+            network_allowlist: BTreeSet::new(),
+            deadline,
+            idempotency_key: format!("{set_id}:benchmark:{node_id}"),
+        });
+    }
+    anyhow::ensure!(
+        !shards.is_empty(),
+        "no live node advertises the sustained benchmark adapter"
+    );
+    let set = ShardSetV1 {
+        schema: ShardSetV1::SCHEMA.into(),
+        set_id,
+        project_id,
+        submitted_by,
+        minimum_successes: shards.len() as u32,
+        shards,
+        deadline,
+        idempotency_key: format!("{set_id}:benchmark-set"),
+    };
+    set.validate_at(Utc::now())?;
+    Ok((set, names))
+}
+
+fn benchmark_summary(status: &Value, names: &BTreeMap<Uuid, String>) -> anyhow::Result<Value> {
+    let mut nodes = Vec::new();
+    let mut fabric_hashes_per_second = 0_u64;
+    let mut fastest_node_hashes_per_second = 0_u64;
+    for member in status
+        .get("members")
+        .and_then(Value::as_array)
+        .context("benchmark status omitted members")?
+    {
+        if member.get("status").and_then(Value::as_str) != Some("succeeded") {
+            continue;
+        }
+        let node_id = member
+            .get("node_id")
+            .and_then(Value::as_str)
+            .context("benchmark member omitted node_id")?
+            .parse::<Uuid>()?;
+        let result_text = member
+            .get("result")
+            .and_then(Value::as_str)
+            .context("benchmark member omitted its signed result")?;
+        let result: Value = serde_json::from_str(result_text)
+            .context("benchmark member returned malformed result JSON")?;
+        anyhow::ensure!(
+            result.get("schema").and_then(Value::as_str) == Some("rampage.cpu-benchmark-result.v1"),
+            "benchmark member returned an unsupported result schema"
+        );
+        let rate = result
+            .get("hashes_per_second")
+            .and_then(Value::as_u64)
+            .context("benchmark result omitted hashes_per_second")?;
+        fabric_hashes_per_second = fabric_hashes_per_second.saturating_add(rate);
+        fastest_node_hashes_per_second = fastest_node_hashes_per_second.max(rate);
+        nodes.push(json!({
+            "node_id": node_id,
+            "name": names.get(&node_id).cloned().unwrap_or_else(|| "Rampage node".into()),
+            "receipt_id": member.get("receipt_id"),
+            "lanes": result.get("lanes"),
+            "total_hashes": result.get("total_hashes"),
+            "elapsed_ms": result.get("elapsed_ms"),
+            "hashes_per_second": rate,
+            "result_digest": result.get("result_digest")
+        }));
+    }
+    anyhow::ensure!(
+        !nodes.is_empty(),
+        "benchmark produced no successful signed results"
+    );
+    let effective_scale =
+        fabric_hashes_per_second as f64 / fastest_node_hashes_per_second.max(1) as f64;
+    Ok(json!({
+        "schema": "rampage.fabric-benchmark-result.v1",
+        "set_id": status.get("set_id"),
+        "status": status.get("status"),
+        "nodes": nodes,
+        "fabric_hashes_per_second": fabric_hashes_per_second,
+        "fastest_node_hashes_per_second": fastest_node_hashes_per_second,
+        "effective_scale_over_fastest_node": effective_scale,
+        "all_results_signed": true
+    }))
+}
+
 fn join(controller: &str, invitation: &str, name: &str, kind: &str) -> anyhow::Result<()> {
     let current = std::env::current_exe()?;
     let sibling = current.with_file_name(if cfg!(windows) {
@@ -867,4 +1081,74 @@ fn write_artifact_payload(response: &Value, output: &PathBuf) -> anyhow::Result<
 fn print_json(value: Value) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn benchmark_set_pins_one_bounded_job_to_each_advertising_node() {
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+        let offers = json!([{
+            "node_id": first,
+            "adapters": ["rampage.benchmark.v1"],
+            "resources": [{
+                "class": "cpu_compute",
+                "available": 3,
+                "labels": {"device_name": "Main PC"}
+            }]
+        }, {
+            "node_id": second,
+            "adapters": ["rampage.echo.v1"],
+            "resources": [{
+                "class": "cpu_compute",
+                "available": 8,
+                "labels": {"device_name": "Old worker"}
+            }]
+        }]);
+        let (set, names) = make_benchmark_set(&offers, 4, 100).unwrap();
+        assert_eq!(set.shards.len(), 1);
+        assert_eq!(set.minimum_successes, 1);
+        assert_eq!(names.get(&first).map(String::as_str), Some("Main PC"));
+        assert_eq!(set.shards[0].requests[0].minimum, 3);
+        let first_label = first.to_string();
+        assert_eq!(
+            set.shards[0].requests[0]
+                .required_labels
+                .get("node_id")
+                .map(String::as_str),
+            Some(first_label.as_str())
+        );
+    }
+
+    #[test]
+    fn benchmark_summary_uses_only_completed_signed_receipt_members() {
+        let node_id = Uuid::now_v7();
+        let result = json!({
+            "schema": "rampage.cpu-benchmark-result.v1",
+            "lanes": 2,
+            "total_hashes": 1000,
+            "elapsed_ms": 10.0,
+            "hashes_per_second": 100_000,
+            "result_digest": format!("sha256:{}", "a".repeat(64))
+        });
+        let status = json!({
+            "set_id": Uuid::now_v7(),
+            "status": "succeeded",
+            "members": [{
+                "status": "succeeded",
+                "node_id": node_id,
+                "receipt_id": Uuid::now_v7(),
+                "result": result.to_string()
+            }]
+        });
+        let summary =
+            benchmark_summary(&status, &BTreeMap::from([(node_id, "Laptop".to_string())])).unwrap();
+        assert_eq!(summary["fabric_hashes_per_second"], 100_000);
+        assert_eq!(summary["effective_scale_over_fastest_node"], 1.0);
+        assert_eq!(summary["all_results_signed"], true);
+        assert_eq!(summary["nodes"][0]["name"], "Laptop");
+    }
 }

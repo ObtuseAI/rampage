@@ -68,6 +68,42 @@ export interface WorkerRuntime {
   message: string | null;
 }
 
+export interface LocalAiRuntime {
+  state: "detecting" | "installing" | "pulling_model" | "ready" | "failed" | "disabled";
+  modelId: string;
+  runtimeVersion: string | null;
+  modelDigest: string | null;
+  message: string;
+}
+
+export interface FabricBenchmarkResult {
+  schema: "rampage.fabric-benchmark-result.v1";
+  set_id: string;
+  status: "succeeded";
+  nodes: Array<{
+    node_id: string;
+    name: string;
+    receipt_id: string;
+    lanes: number;
+    total_hashes: number;
+    elapsed_ms: number;
+    hashes_per_second: number;
+    result_digest: string;
+  }>;
+  fabric_hashes_per_second: number;
+  fastest_node_hashes_per_second: number;
+  effective_scale_over_fastest_node: number;
+  all_results_signed: true;
+}
+
+const initialLocalAiRuntime: LocalAiRuntime = {
+  state: "detecting",
+  modelId: "qwen3:4b",
+  runtimeVersion: null,
+  modelDigest: null,
+  message: "Checking the automatic local AI runtime.",
+};
+
 const demoNodes: FabricNode[] = [
   { id: "home", name: "Command Rig", kind: "desktop", state: "ready", cpu: 31, memory: 46, gpu: 18, storage: 22, storageAvailableGb: 120, modelMemoryAvailableGb: 10, modelRuntimeCount: 1, artifactEndpoint: false, latencyMs: 0, topologyConfidence: "controller_local", x: 0, y: 0, z: 0 },
   { id: "deck", name: "Steam Deck", kind: "steam_deck", state: "working", cpu: 64, memory: 53, gpu: 72, storage: 35, storageAvailableGb: 18, modelMemoryAvailableGb: 8, modelRuntimeCount: 0, artifactEndpoint: true, latencyMs: 18.4, downlinkMbps: 386, uplinkMbps: 201, topologyConfidence: "measured", x: -3.2, y: -0.4, z: 1.8 },
@@ -124,6 +160,9 @@ interface RampageState {
   pairingWindow: PairingWindow | null;
   workerPairing: WorkerPairing;
   workerRuntime: WorkerRuntime;
+  localAiRuntime: LocalAiRuntime;
+  fabricBenchmark: FabricBenchmarkResult | null;
+  fabricBenchmarkPending: boolean;
   setMode: (mode: "arena" | "grid") => void;
   setSelectedNode: (id: string) => void;
   setCommandOpen: (open: boolean) => void;
@@ -146,6 +185,7 @@ interface RampageState {
   rejectPairing: (requestId: string) => Promise<void>;
   runDemo: () => Promise<void>;
   runPoolProof: () => Promise<void>;
+  runFabricBenchmark: () => Promise<void>;
   storeFile: (file: File, nodeId: string) => Promise<void>;
   localStop: () => void;
   localResume: () => Promise<void>;
@@ -223,6 +263,9 @@ export const useRampage = create<RampageState>((set, get) => ({
   pairingWindow: null,
   workerPairing: { state: "idle" },
   workerRuntime: { state: "inactive", nodeId: null, message: null },
+  localAiRuntime: initialLocalAiRuntime,
+  fabricBenchmark: null,
+  fabricBenchmarkPending: false,
   setMode: (mode) => set({ mode }),
   setSelectedNode: (selectedNode) => set({ selectedNode }),
   setCommandOpen: (commandOpen) => set({ commandOpen }),
@@ -301,8 +344,11 @@ export const useRampage = create<RampageState>((set, get) => ({
   },
   refresh: async () => {
     try {
-      const fabricRole = await invoke<"owner" | "worker">("fabric_mode").catch(() => "owner" as const);
-      const runAtLogin = await invoke<boolean>("autostart_enabled").catch(() => get().runAtLogin);
+      const [fabricRole, runAtLogin, localAiRuntime] = await Promise.all([
+        invoke<"owner" | "worker">("fabric_mode").catch(() => "owner" as const),
+        invoke<boolean>("autostart_enabled").catch(() => get().runAtLogin),
+        invoke<LocalAiRuntime>("local_ai_runtime_status").catch(() => get().localAiRuntime),
+      ]);
       if (fabricRole === "worker") {
         const workerRuntime = await invoke<WorkerRuntime>("worker_runtime_status").catch(() => ({
           state: "failed" as const,
@@ -315,6 +361,7 @@ export const useRampage = create<RampageState>((set, get) => ({
           onboarding: false,
           fabricRole,
           workerRuntime,
+          localAiRuntime,
           runAtLogin,
           killLatch: false,
           connected: active,
@@ -331,6 +378,8 @@ export const useRampage = create<RampageState>((set, get) => ({
             gpu: 0,
             storage: 0,
             storageAvailableGb: 0,
+            modelMemoryAvailableGb: 0,
+            modelRuntimeCount: localAiRuntime.state === "ready" ? 1 : 0,
             artifactEndpoint: false,
             x: 0,
             y: 0,
@@ -366,6 +415,7 @@ export const useRampage = create<RampageState>((set, get) => ({
         connected: true,
         fabricRole,
         runAtLogin,
+        localAiRuntime,
         capability: health.kill_latch
           ? "read_only"
           : intelligenceHealth?.authority === "proposal_only"
@@ -555,6 +605,24 @@ export const useRampage = create<RampageState>((set, get) => ({
       await new Promise((resolve) => window.setTimeout(resolve, 500));
     }
     set({ lastAction: `Pool proof is still running. Shard set ${setId.slice(0, 8)}… remains resumable.` });
+  },
+  runFabricBenchmark: async () => {
+    if (get().fabricRole !== "owner" || get().fabricBenchmarkPending) return;
+    set({ fabricBenchmarkPending: true, lastAction: "Running signed sustained work on every live machine…" });
+    try {
+      const fabricBenchmark = await invoke<FabricBenchmarkResult>("run_fabric_benchmark");
+      const rate = (fabricBenchmark.fabric_hashes_per_second / 1_000_000).toFixed(2);
+      set({
+        fabricBenchmark,
+        lastAction: `Fabric proof complete: ${fabricBenchmark.nodes.length} signed node receipt${fabricBenchmark.nodes.length === 1 ? "" : "s"}, ${rate} MH/s combined.`,
+      });
+    } catch (error) {
+      set({
+        lastAction: error instanceof Error ? `Fabric benchmark failed: ${error.message}` : `Fabric benchmark failed: ${String(error)}`,
+      });
+    } finally {
+      set({ fabricBenchmarkPending: false });
+    }
   },
   storeFile: async (file, nodeId) => {
     if (file.size > 64 * 1024 * 1024) throw new Error("Artifact exceeds the 64 MiB transfer limit.");

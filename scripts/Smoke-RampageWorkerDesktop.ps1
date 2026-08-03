@@ -116,6 +116,59 @@ try {
         throw 'packaged artifact round-trip changed binary payload'
     }
 
+    $benchmark = (& $cliExe --controller $controllerUrl benchmark --cores-per-node 1 `
+        --iterations-per-core 1000 --timeout-seconds 30 | Out-String) | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $benchmark.status -ne 'succeeded' -or
+        -not $benchmark.all_results_signed -or $benchmark.nodes.Count -ne 1 -or
+        -not $benchmark.nodes[0].receipt_id) {
+        throw 'packaged worker did not return a signed sustained benchmark receipt'
+    }
+
+    $preRestartOfferId = $nodeOffer.offer_id
+    Stop-ProcessTree -RootProcessId $controller.Id
+    $controller.WaitForExit()
+    $env:RAMPAGE_BIND = "127.0.0.1:$ControllerPort"
+    $env:RAMPAGE_DATA_DIR = $ownerData
+    $controller = Start-Process -FilePath $controllerExe -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $ownerData 'controller.restart.stdout.log') `
+        -RedirectStandardError (Join-Path $ownerData 'controller.restart.stderr.log')
+    $controllerRecovered = $false
+    for ($attempt = 0; $attempt -lt 100; $attempt++) {
+        if ($controller.HasExited) {
+            $controllerError = Get-Content -Raw (Join-Path $ownerData 'controller.restart.stderr.log') `
+                -ErrorAction SilentlyContinue
+            throw "release controller restart failed (exit=$($controller.ExitCode)): $controllerError"
+        }
+        try {
+            Invoke-RestMethod "$controllerUrl/health" | Out-Null
+            $controllerRecovered = $true
+            break
+        } catch { Start-Sleep -Milliseconds 100 }
+    }
+    if (-not $controllerRecovered) { throw 'release controller did not recover on its durable mesh port' }
+    $workerRecovered = $false
+    for ($attempt = 0; $attempt -lt 300; $attempt++) {
+        if ($desktop.HasExited) {
+            throw "packaged worker desktop exited instead of surviving controller restart (exit=$($desktop.ExitCode))"
+        }
+        try {
+            $offers = @(Invoke-RestMethod "$controllerUrl/v1/offers" -Headers $headers)
+            $recoveredOffer = $offers | Where-Object {
+                $_ -and "$($_.node_id)" -eq "$($node.node_id)" -and
+                    "$($_.offer_id)" -ne "$preRestartOfferId"
+            } | Select-Object -First 1
+            if ($recoveredOffer -and $recoveredOffer.mesh_endpoint.signature) {
+                $nodeOffer = $recoveredOffer
+                $workerRecovered = $true
+                break
+            }
+        } catch { }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $workerRecovered) {
+        throw 'packaged worker did not reconnect autonomously after the owner controller restarted'
+    }
+
     $desktopId = $desktop.Id
     $firstOfferId = $nodeOffer.offer_id
     $null = $desktop.CloseMainWindow()
@@ -179,6 +232,9 @@ try {
         artifact_endpoint_signature = $true
         artifact_digest = $put.digest
         artifact_round_trip = $true
+        sustained_benchmark = $true
+        benchmark_receipts = $benchmark.nodes.Count
+        controller_restart_recovery = $true
         consumed_invite_removed = $true
         pinned_restart = $true
         close_to_tray = $true

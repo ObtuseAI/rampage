@@ -3,7 +3,9 @@
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use rampage_policy::{sign_receipt, verify_lease_with_key};
-use rampage_protocol::{ArtifactRefV1, ExecutionReceiptV1, JobState, StorageClass, WorkClaimV1};
+use rampage_protocol::{
+    ArtifactRefV1, ExecutionReceiptV1, JobState, ResourceClass, StorageClass, WorkClaimV1,
+};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -202,6 +204,9 @@ fn run_adapter(
             }
             Ok(AdapterOutput::text(format!("{:.12}", sum / count as f64)))
         }
+        ("rampage.benchmark.v1", "sha256_chain") => {
+            run_cpu_benchmark(claim).map(AdapterOutput::text)
+        }
         ("rampage.ollama.v1", "generate") => run_ollama(claim).map(AdapterOutput::text),
         ("rampage.artifact-hash.v1", "hash_artifact") => {
             let store = store.ok_or_else(|| {
@@ -250,6 +255,91 @@ fn run_adapter(
         }
         _ => Err(ExecutionError::UnsupportedAdapter),
     }
+}
+
+fn run_cpu_benchmark(claim: &WorkClaimV1) -> Result<String, ExecutionError> {
+    const MAX_LANES: u64 = 64;
+    const MAX_ITERATIONS_PER_LANE: u64 = 20_000_000;
+    const MAX_TOTAL_ITERATIONS: u64 = 400_000_000;
+
+    let lanes = claim
+        .lease
+        .granted
+        .iter()
+        .find(|resource| {
+            resource.class == ResourceClass::CpuCompute && resource.unit == "logical_core"
+        })
+        .map(|resource| resource.available)
+        .filter(|lanes| (1..=MAX_LANES).contains(lanes))
+        .ok_or(ExecutionError::InvalidArgument("benchmark CPU grant"))?;
+    let iterations_per_lane = claim
+        .job
+        .arguments
+        .get("iterations_per_lane")
+        .ok_or(ExecutionError::MissingArgument("iterations_per_lane"))?
+        .parse::<u64>()
+        .map_err(|_| ExecutionError::InvalidArgument("iterations_per_lane"))?;
+    if !(1..=MAX_ITERATIONS_PER_LANE).contains(&iterations_per_lane)
+        || lanes.saturating_mul(iterations_per_lane) > MAX_TOTAL_ITERATIONS
+    {
+        return Err(ExecutionError::InvalidArgument("iterations_per_lane"));
+    }
+
+    let started = std::time::Instant::now();
+    let lane_digests = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(lanes as usize);
+        for lane in 0..lanes {
+            let job_id = claim.job.job_id;
+            handles.push(scope.spawn(move || {
+                let mut digest = Sha256::new()
+                    .chain_update(b"rampage.cpu-benchmark.v1\0")
+                    .chain_update(job_id.as_bytes())
+                    .chain_update(lane.to_le_bytes())
+                    .finalize()
+                    .to_vec();
+                for iteration in 0..iterations_per_lane {
+                    digest = Sha256::new()
+                        .chain_update(&digest)
+                        .chain_update(lane.to_le_bytes())
+                        .chain_update(iteration.to_le_bytes())
+                        .finalize()
+                        .to_vec();
+                }
+                digest
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle.join().map_err(|_| {
+                    ExecutionError::BackendUnavailable("benchmark worker thread panicked".into())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+    let elapsed = started.elapsed();
+    let total_hashes = lanes.saturating_mul(iterations_per_lane);
+    let elapsed_seconds = elapsed.as_secs_f64().max(f64::EPSILON);
+    let hashes_per_second = (total_hashes as f64 / elapsed_seconds).round() as u64;
+    let result_digest = format!(
+        "sha256:{}",
+        hex::encode(
+            Sha256::new()
+                .chain_update(b"rampage.cpu-benchmark-result.v1\0")
+                .chain_update(lane_digests.concat())
+                .finalize()
+        )
+    );
+    Ok(serde_json::json!({
+        "schema": "rampage.cpu-benchmark-result.v1",
+        "lanes": lanes,
+        "iterations_per_lane": iterations_per_lane,
+        "total_hashes": total_hashes,
+        "elapsed_ms": elapsed.as_secs_f64() * 1_000.0,
+        "hashes_per_second": hashes_per_second,
+        "result_digest": result_digest
+    })
+    .to_string())
 }
 
 fn run_ollama(claim: &WorkClaimV1) -> Result<String, ExecutionError> {
@@ -412,4 +502,44 @@ mod tests {
             Err(ExecutionError::AuthorityState(_))
         ));
     }
+
+    #[test]
+    fn sustained_benchmark_is_bounded_by_the_signed_cpu_grant() {
+        let key = system_signing_key();
+        let node_id = Uuid::now_v7();
+        let mut claim = claim(&key, node_id);
+        claim.job.adapter = "rampage.benchmark.v1".into();
+        claim.job.operation = "sha256_chain".into();
+        claim.job.arguments = BTreeMap::from([("iterations_per_lane".into(), "10".into())]);
+        claim.lease.adapter = claim.job.adapter.clone();
+        claim.lease.operation = claim.job.operation.clone();
+        claim.lease.granted = vec![rampage_protocol::ResourceQuantityV1 {
+            class: ResourceClass::CpuCompute,
+            capacity: 2,
+            available: 2,
+            unit: "logical_core".into(),
+            labels: BTreeMap::new(),
+        }];
+        let output = run_cpu_benchmark(&claim).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["lanes"], 2);
+        assert_eq!(parsed["total_hashes"], 20);
+        assert!(
+            parsed["result_digest"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+
+        claim.job.arguments.insert(
+            "iterations_per_lane".into(),
+            (MAX_TEST_ITERATIONS + 1).to_string(),
+        );
+        assert!(matches!(
+            run_cpu_benchmark(&claim),
+            Err(ExecutionError::InvalidArgument("iterations_per_lane"))
+        ));
+    }
+
+    const MAX_TEST_ITERATIONS: u64 = 20_000_000;
 }
