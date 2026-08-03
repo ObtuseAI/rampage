@@ -54,9 +54,20 @@ $env:RAMPAGE_BIND = $oldControllerBind
 $env:RAMPAGE_INTELLIGENCE_PORT = $oldIntelligencePort
 $env:RAMPAGE_MESH_PORT = $oldMeshPort
 
+function Stop-ProcessTree([int]$RootProcessId) {
+    $children = @(Get-CimInstance Win32_Process | Where-Object ParentProcessId -eq $RootProcessId)
+    foreach ($child in $children) { Stop-ProcessTree -RootProcessId $child.ProcessId }
+    Stop-Process -Id $RootProcessId -Force -ErrorAction SilentlyContinue
+}
+
 try {
     $health = $null
-    for ($attempt = 0; $attempt -lt 150; $attempt++) {
+    # A cold PyInstaller one-file extraction can exceed 15 seconds on otherwise supported Windows
+    # machines. Keep the gate bounded while allowing the packaged intelligence service to unpack.
+    for ($attempt = 0; $attempt -lt 600; $attempt++) {
+        if ($desktop.HasExited) {
+            throw "desktop exited before its local fabric became ready (exit=$($desktop.ExitCode))"
+        }
         try {
             $health = Invoke-RestMethod "$controllerBase/health"
             $intelligence = Invoke-RestMethod "http://127.0.0.1:$intelligencePort/health"
@@ -104,7 +115,21 @@ try {
     } | ConvertTo-Json
 } finally {
     if ($desktop -and -not $desktop.HasExited) {
+        $desktopId = $desktop.Id
         $null = $desktop.CloseMainWindow()
-        if (-not $desktop.WaitForExit(5000)) { Stop-Process -Id $desktop.Id -Force }
+        if (-not $desktop.WaitForExit(5000)) { Stop-ProcessTree -RootProcessId $desktopId }
+    }
+    # Setup failures can terminate the shell before its Exit handler drains already-started
+    # sidecars. Remove only processes whose executable is inside this exact candidate directory.
+    $candidateDirectory = [IO.Path]::GetFullPath((Split-Path -Parent $resolvedExecutable))
+    $candidateProcesses = @(Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -like 'rampage*.exe' -and $_.ExecutablePath -and
+        [IO.Path]::GetFullPath($_.ExecutablePath).StartsWith(
+            $candidateDirectory + [IO.Path]::DirectorySeparatorChar,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    })
+    foreach ($process in $candidateProcesses) {
+        Stop-ProcessTree -RootProcessId $process.ProcessId
     }
 }

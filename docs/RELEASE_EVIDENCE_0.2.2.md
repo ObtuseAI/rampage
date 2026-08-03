@@ -31,8 +31,8 @@ portable release assets.
 
 | Artifact | Bytes | SHA-256 | Authenticode |
 | --- | ---: | --- | --- |
-| `Rampage_0.2.2_x64-setup.exe` | 69,109,694 | `e466c2136e232c123f8bfa9f1bb79b0152016c7d544743a63b614cbe6bc11a70` | Not signed |
-| `Rampage_0.2.2_x64_en-US.msi` | 78,929,920 | `831ff871c1041ab44c2c6b996d49ce79209ebb0da86f6a2691bb4a65ab605e3e` | Not signed |
+| `Rampage_0.2.2_x64-setup.exe` | 68,824,182 | `94731f9e55f56e48d6d5a91a618bbcc7315917f1937a61d81a1a701c4e8f808d` | Not signed |
+| `Rampage_0.2.2_x64_en-US.msi` | 78,606,336 | `7b2a81140c836830da0cb6284ff53319c20f4cb14f322b5092dc9fd28c4c7f60` | Not signed |
 
 The checksums are duplicated in [`SHA256SUMS-0.2.2.txt`](SHA256SUMS-0.2.2.txt) and must match the
 assets attached to the GitHub prerelease.
