@@ -235,6 +235,57 @@ impl Ledger {
         Ok(events)
     }
 
+    /// Return the newest event of one exact type without scanning a high-volume ledger.
+    pub fn latest_event_of_type(
+        &self,
+        event_type: &str,
+    ) -> Result<Option<LedgerEvent>, LedgerError> {
+        let connection = self.connection.lock().map_err(|_| LedgerError::Poisoned)?;
+        let row = connection
+            .query_row(
+                "SELECT sequence, recorded_at, event_type, subject_id, payload_json,
+                        previous_hash, event_hash
+                 FROM ledger_events WHERE event_type = ?1 ORDER BY sequence DESC LIMIT 1",
+                params![event_type],
+                |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            sequence,
+            timestamp,
+            event_type,
+            subject_id,
+            payload_json,
+            previous_hash,
+            event_hash,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let recorded_at = DateTime::parse_from_rfc3339(&timestamp)
+            .map_err(|error| serde_json::Error::io(std::io::Error::other(error)))?
+            .with_timezone(&Utc);
+        Ok(Some(LedgerEvent {
+            sequence,
+            recorded_at,
+            event_type,
+            subject_id,
+            payload: serde_json::from_str(&payload_json)?,
+            previous_hash,
+            event_hash,
+        }))
+    }
+
     pub fn events_for_subject(
         &self,
         subject_id: &str,
@@ -413,6 +464,33 @@ mod tests {
         assert_eq!(first.sequence, 1);
         assert_eq!(second.previous_hash, first.event_hash);
         assert_eq!(ledger.verify().unwrap(), 2);
+    }
+
+    #[test]
+    fn newest_event_lookup_is_exact_and_does_not_replay_the_ledger() {
+        let ledger = Ledger::in_memory().unwrap();
+        ledger
+            .append("mesh.started", "mesh", &json!({"port": 1}))
+            .unwrap();
+        ledger
+            .append("resource.offer.registered", "node", &json!({}))
+            .unwrap();
+        let newest = ledger
+            .append("mesh.started", "mesh", &json!({"port": 2}))
+            .unwrap();
+        assert_eq!(
+            ledger
+                .latest_event_of_type("mesh.started")
+                .unwrap()
+                .unwrap(),
+            newest
+        );
+        assert!(
+            ledger
+                .latest_event_of_type("missing.event")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

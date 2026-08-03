@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
 
 app = FastAPI(
     title="Rampage Intelligence",
-    version="0.2.1",
+    version="0.2.2",
     description="Proposal-only durable intelligence outside the Rampage trust kernel",
     lifespan=lifespan,
 )

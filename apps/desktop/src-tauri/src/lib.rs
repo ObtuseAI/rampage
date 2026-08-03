@@ -1,10 +1,13 @@
 mod pairing;
 
+#[cfg(target_os = "windows")]
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use rand::{TryRng as _, rngs::SysRng};
 use std::{
     io::{Read, Write},
+    net::SocketAddr,
     path::PathBuf,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use sysinfo::{Pid, System};
@@ -17,7 +20,10 @@ use tauri::{
 use pairing::{PairingManager, PairingRequestView, PairingWindowView, WorkerPairingView};
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_autostart::ManagerExt;
-use tauri_plugin_shell::{ShellExt, process::CommandChild};
+use tauri_plugin_shell::{
+    ShellExt,
+    process::{CommandChild, CommandEvent},
+};
 #[cfg(target_os = "windows")]
 use winreg::{
     RegKey, RegValue,
@@ -26,6 +32,27 @@ use winreg::{
 
 #[derive(Default)]
 struct Sidecars(Mutex<Vec<CommandChild>>);
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkerRuntimeView {
+    state: &'static str,
+    node_id: Option<String>,
+    message: Option<String>,
+}
+
+#[derive(Clone)]
+struct WorkerRuntime(Arc<Mutex<WorkerRuntimeView>>);
+
+impl Default for WorkerRuntime {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(WorkerRuntimeView {
+            state: "inactive",
+            node_id: None,
+            message: None,
+        })))
+    }
+}
 
 const BACKGROUND_ARG: &str = "--background";
 const AUTOSTART_NAME: &str = "Rampage";
@@ -72,6 +99,15 @@ fn schedule_diagnostic_exit(app: &AppHandle) {
         tokio::time::sleep(delay).await;
         handle.exit(0);
     });
+}
+
+fn diagnostic_instance_is_bounded() -> bool {
+    diagnostic_exit_delay(
+        std::env::var("RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS")
+            .ok()
+            .as_deref(),
+    )
+    .is_some()
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -121,6 +157,21 @@ fn runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
+fn controller_bind() -> Result<SocketAddr, String> {
+    let address = std::env::var("RAMPAGE_BIND").unwrap_or_else(|_| "127.0.0.1:47831".into());
+    let address = address
+        .parse::<SocketAddr>()
+        .map_err(|error| format!("invalid RAMPAGE_BIND: {error}"))?;
+    if !address.ip().is_loopback() {
+        return Err("RAMPAGE_BIND must remain loopback-only".into());
+    }
+    Ok(address)
+}
+
+fn controller_origin() -> Result<String, String> {
+    Ok(format!("http://{}", controller_bind()?))
+}
+
 #[tauri::command]
 fn local_stop(app: AppHandle) -> Result<(), String> {
     let data_dir = runtime_dir(&app)?;
@@ -154,9 +205,12 @@ fn propagate_controller_stop(data_dir: PathBuf) {
     if token.is_empty() {
         return;
     }
+    let Ok(controller) = controller_origin() else {
+        return;
+    };
     tauri::async_runtime::spawn(async move {
         let _ = reqwest::Client::new()
-            .post("http://127.0.0.1:47831/v1/stop")
+            .post(format!("{controller}/v1/stop"))
             .header("x-rampage-token", token)
             .send()
             .await;
@@ -165,7 +219,7 @@ fn propagate_controller_stop(data_dir: PathBuf) {
 
 #[tauri::command]
 fn fabric_mode(app: AppHandle) -> Result<&'static str, String> {
-    Ok(if runtime_dir(&app)?.join("remote-invite.json").is_file() {
+    Ok(if worker_enrollment_exists(&runtime_dir(&app)?) {
         "worker"
     } else {
         "owner"
@@ -279,9 +333,13 @@ async fn open_pairing_window(
     app: AppHandle,
     pairing: State<'_, PairingManager>,
 ) -> Result<PairingWindowView, String> {
-    if fabric_mode(app)? != "owner" {
+    if fabric_mode(app.clone())? != "owner" {
         return Err("only the owner PC can approve a new machine".into());
     }
+    let firewall_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || ensure_private_network_firewall(&firewall_app))
+        .await
+        .map_err(|error| error.to_string())??;
     pairing::open_owner_window(&pairing, local_device_name()).await
 }
 
@@ -291,13 +349,17 @@ fn pairing_window(pairing: State<'_, PairingManager>) -> Result<PairingWindowVie
 }
 
 #[tauri::command]
-fn begin_pairing(
+async fn begin_pairing(
     app: AppHandle,
     pairing: State<'_, PairingManager>,
 ) -> Result<WorkerPairingView, String> {
     if fabric_mode(app.clone())? == "worker" {
         return Err("this machine is already enrolled as a worker".into());
     }
+    let firewall_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || ensure_private_network_firewall(&firewall_app))
+        .await
+        .map_err(|error| error.to_string())??;
     pairing::begin_worker(app, &pairing, local_device_name())
 }
 
@@ -321,8 +383,9 @@ async fn approve_pairing(
         return Err("only the owner PC can approve a new machine".into());
     }
     let token = controller_token(app)?;
+    let controller = controller_origin()?;
     let response = reqwest::Client::new()
-        .post("http://127.0.0.1:47831/v1/enrollment/invites")
+        .post(format!("{controller}/v1/enrollment/invites"))
         .header("x-rampage-token", token)
         .send()
         .await
@@ -373,7 +436,7 @@ fn persist_remote_invite(app: &AppHandle, invitation: &str) -> Result<(), String
     let data_dir = runtime_dir(app)?;
     std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
     let destination = data_dir.join("remote-invite.json");
-    if destination.exists() {
+    if destination.exists() || data_dir.join("agent.controller-pin.json").exists() {
         return Err("this machine is already enrolled; remove it from the current fabric before enrolling again".into());
     }
     let temporary = data_dir.join(format!(
@@ -406,14 +469,12 @@ fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(
     let invite_file = data_dir.join("remote-invite.json");
     let key_file = data_dir.join("agent.key");
     let display_name = local_device_name();
-    let (_, agent) = app
+    let mut command = app
         .shell()
         .sidecar("rampage-agent")
         .map_err(|error| error.to_string())?
         .env("RAMPAGE_DATA_DIR", data_dir)
         .args([
-            "--invite-file".into(),
-            invite_file.to_string_lossy().into_owned(),
             "--key-file".into(),
             key_file.to_string_lossy().into_owned(),
             "--display-name".into(),
@@ -421,15 +482,169 @@ fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(
             "--device-kind".into(),
             "desktop".into(),
             "--serve".into(),
-        ])
+        ]);
+    if invite_file.is_file() {
+        command = command.args([
+            "--invite-file".into(),
+            invite_file.to_string_lossy().into_owned(),
+        ]);
+    }
+    let (mut events, agent) = command
         .spawn()
         .map_err(|error| format!("could not start remote worker: {error}"))?;
+    let runtime = app.state::<WorkerRuntime>().inner().clone();
+    if let Ok(mut status) = runtime.0.lock() {
+        *status = WorkerRuntimeView {
+            state: "starting",
+            node_id: None,
+            message: Some(
+                "Connecting to the owner PC and publishing a signed resource offer.".into(),
+            ),
+        };
+    }
+    tauri::async_runtime::spawn(async move {
+        let mut last_error: Option<String> = None;
+        while let Some(event) = events.recv().await {
+            let next = match event {
+                CommandEvent::Stdout(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .ok()
+                    .filter(|value| {
+                        value.get("schema").and_then(serde_json::Value::as_str)
+                            == Some("rampage.worker-ready.v1")
+                    })
+                    .map(|value| WorkerRuntimeView {
+                        state: "active",
+                        node_id: value
+                            .get("node_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string),
+                        message: Some("Signed compute offer accepted by the owner PC.".into()),
+                    }),
+                CommandEvent::Stderr(bytes) => {
+                    let message = String::from_utf8_lossy(&bytes)
+                        .chars()
+                        .take(512)
+                        .collect::<String>();
+                    if !message.trim().is_empty() {
+                        last_error = Some(message);
+                    }
+                    None
+                }
+                CommandEvent::Error(error) => Some(WorkerRuntimeView {
+                    state: "failed",
+                    node_id: None,
+                    message: Some(error.chars().take(512).collect()),
+                }),
+                CommandEvent::Terminated(payload) => Some(WorkerRuntimeView {
+                    state: "failed",
+                    node_id: None,
+                    message: Some(last_error.clone().unwrap_or_else(|| {
+                        format!(
+                            "Worker exited before contributing (code {:?}).",
+                            payload.code
+                        )
+                    })),
+                }),
+                _ => None,
+            };
+            if let Some(next) = next
+                && let Ok(mut status) = runtime.0.lock()
+            {
+                *status = next;
+            }
+        }
+    });
     app.state::<Sidecars>()
         .0
         .lock()
         .map_err(|_| "sidecar state lock poisoned".to_string())?
         .push(agent);
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_private_network_firewall(app: &AppHandle) -> Result<(), String> {
+    let data_dir = runtime_dir(app)?;
+    let marker = data_dir.join("firewall-private-v1.ready");
+    if marker.is_file() {
+        return Ok(());
+    }
+    let install_dir = std::env::current_exe()
+        .map_err(|error| error.to_string())?
+        .parent()
+        .ok_or_else(|| "Rampage installation directory is unavailable".to_string())?
+        .to_path_buf();
+    let escaped = |path: PathBuf| path.to_string_lossy().replace('\'', "''");
+    let desktop = escaped(install_dir.join("rampage-desktop.exe"));
+    let controller = escaped(install_dir.join("rampage-controller.exe"));
+    let agent = escaped(install_dir.join("rampage-agent.exe"));
+    let script = format!(
+        "$ErrorActionPreference='Stop';\
+         $rules=@(\
+           @{{Name='Rampage Nearby Pairing (Private UDP 47839)';Program='{desktop}';Port='47839'}},\
+           @{{Name='Rampage Fabric Controller (Private UDP)';Program='{controller}';Port='Any'}},\
+           @{{Name='Rampage Fabric Worker (Private UDP)';Program='{agent}';Port='Any'}}\
+         );\
+         foreach($rule in $rules){{\
+           Get-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue | Remove-NetFirewallRule;\
+           New-NetFirewallRule -DisplayName $rule.Name -Direction Inbound -Action Allow -Profile Private -Protocol UDP -LocalPort $rule.Port -Program $rule.Program | Out-Null\
+         }}"
+    );
+    let encoded_bytes = script
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let encoded = BASE64.encode(encoded_bytes);
+    let launcher = format!(
+        "$ErrorActionPreference='Stop';$p=Start-Process -FilePath powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile -EncodedCommand {encoded}';exit $p.ExitCode"
+    );
+    let status = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", &launcher])
+        .status()
+        .map_err(|error| {
+            format!("could not request the Windows private-network allowance: {error}")
+        })?;
+    if !status.success() {
+        return Err("Windows did not approve Rampage for this private network.".into());
+    }
+    std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
+    write_new_marker(&marker, b"rampage.firewall-private.v1\n")?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_private_network_firewall(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+fn write_new_marker(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    match std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+    {
+        Ok(mut file) => {
+            file.write_all(bytes).map_err(|error| error.to_string())?;
+            file.sync_all().map_err(|error| error.to_string())?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[tauri::command]
+fn worker_runtime_status(runtime: State<'_, WorkerRuntime>) -> Result<WorkerRuntimeView, String> {
+    runtime
+        .0
+        .lock()
+        .map(|status| status.clone())
+        .map_err(|_| "worker runtime state lock poisoned".to_string())
+}
+
+fn worker_enrollment_exists(data_dir: &std::path::Path) -> bool {
+    data_dir.join("remote-invite.json").is_file()
+        || data_dir.join("agent.controller-pin.json").is_file()
 }
 
 fn launch_owner_relay_if_configured(
@@ -519,17 +734,20 @@ fn configured_private_relay(data_dir: &std::path::Path) -> Result<Option<String>
 fn launch_fabric(app: &AppHandle) -> Result<(), String> {
     let data_dir = runtime_dir(app)?;
     std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
-    if data_dir.join("remote-invite.json").is_file() {
+    if worker_enrollment_exists(&data_dir) {
         return launch_remote_worker(app, &data_dir);
     }
     let intelligence_dir = data_dir.join("intelligence");
     std::fs::create_dir_all(&intelligence_dir).map_err(|error| error.to_string())?;
     let private_relay = configured_private_relay(&data_dir)?;
+    let controller_bind = controller_bind()?;
+    let controller_origin = format!("http://{controller_bind}");
     let mut controller_command = app
         .shell()
         .sidecar("rampage-controller")
         .map_err(|error| error.to_string())?
-        .env("RAMPAGE_DATA_DIR", &data_dir);
+        .env("RAMPAGE_DATA_DIR", &data_dir)
+        .env("RAMPAGE_BIND", controller_bind.to_string());
     if let Some(relay) = private_relay {
         controller_command = controller_command.env("RAMPAGE_PRIVATE_RELAYS", relay);
     }
@@ -578,12 +796,13 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
         .push(intelligence);
 
     let handle = app.clone();
+    let agent_controller = controller_origin.clone();
     tauri::async_runtime::spawn(async move {
         let client = reqwest::Client::new();
         let mut ready = false;
         for _ in 0..80 {
             if client
-                .get("http://127.0.0.1:47831/health")
+                .get(format!("{controller_origin}/health"))
                 .send()
                 .await
                 .is_ok_and(|response| response.status().is_success())
@@ -597,7 +816,7 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
             return;
         }
         let Ok(response) = client
-            .post("http://127.0.0.1:47831/v1/enrollment/invites")
+            .post(format!("{controller_origin}/v1/enrollment/invites"))
             .header("x-rampage-token", &token)
             .json(&serde_json::json!({}))
             .send()
@@ -625,7 +844,7 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
             .env("RAMPAGE_DATA_DIR", &data_dir)
             .args([
                 "--controller".into(),
-                "http://127.0.0.1:47831".into(),
+                agent_controller,
                 "--key-file".into(),
                 key_file.to_string_lossy().into_owned(),
                 "--enrollment-code".into(),
@@ -648,10 +867,7 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
 }
 
 fn install_desktop_lifecycle(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let role = if runtime_dir(app.handle())?
-        .join("remote-invite.json")
-        .is_file()
-    {
+    let role = if worker_enrollment_exists(&runtime_dir(app.handle())?) {
         "Worker active"
     } else {
         "Owner fabric active"
@@ -735,12 +951,15 @@ fn install_desktop_lifecycle(app: &tauri::App) -> Result<(), Box<dyn std::error:
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+    let mut builder = tauri::Builder::default();
+    if !diagnostic_instance_is_bounded() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if should_focus_existing_instance(&args) {
                 show_main_window(app);
             }
-        }))
+        }));
+    }
+    let app = builder
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .app_name("Rampage")
@@ -757,6 +976,7 @@ pub fn run() {
             }
         })
         .manage(Sidecars::default())
+        .manage(WorkerRuntime::default())
         .manage(PairingManager::default())
         .setup(|app| {
             launch_fabric(app.handle()).map_err(std::io::Error::other)?;
@@ -767,6 +987,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             local_stop,
             fabric_mode,
+            worker_runtime_status,
             controller_token,
             join_remote,
             open_pairing_window,
@@ -856,6 +1077,14 @@ mod tests {
         assert_eq!(diagnostic_exit_delay(Some("999")), None);
         assert_eq!(diagnostic_exit_delay(Some("not-a-number")), None);
         assert_eq!(diagnostic_exit_delay(None), None);
+    }
+
+    #[test]
+    fn controller_override_remains_loopback_only() {
+        let parsed = "127.0.0.1:49123".parse::<SocketAddr>().unwrap();
+        assert!(parsed.ip().is_loopback());
+        let remote = "192.0.2.1:49123".parse::<SocketAddr>().unwrap();
+        assert!(!remote.ip().is_loopback());
     }
 
     #[test]

@@ -24,6 +24,15 @@ use std::{
 };
 use uuid::Uuid;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PinnedControllerV1 {
+    schema: String,
+    endpoint: MeshEndpointRecordV1,
+    governor_public_key: String,
+    enrolled_at: chrono::DateTime<Utc>,
+}
+
 #[derive(Parser)]
 #[command(name = "rampage-agent", about = "Rampage machine resource agent")]
 struct Args {
@@ -93,6 +102,35 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    let enrollment_marker = args.key_file.with_extension("enrolled");
+    let controller_pin_file = args.key_file.with_extension("controller-pin.json");
+    let stored_pin = if controller_pin_file.is_file() {
+        Some(read_json_file_bounded::<PinnedControllerV1>(
+            &controller_pin_file,
+            64 * 1024,
+        )?)
+    } else {
+        None
+    };
+    let invitation_endpoint_id = invitation
+        .as_ref()
+        .and_then(|invite| invite.controller_mesh.as_ref())
+        .map(|endpoint| endpoint.endpoint_id.as_str());
+    let already_enrolled = stored_pin.is_some()
+        || invitation_endpoint_id.is_some_and(|endpoint_id| {
+            fs::read_to_string(&enrollment_marker).is_ok_and(|saved| saved.trim() == endpoint_id)
+        });
+    let migrated_pin = if stored_pin.is_none() && already_enrolled {
+        Some(pin_from_invitation(invitation.as_ref().ok_or_else(
+            || anyhow::anyhow!("stored enrollment is missing its controller route"),
+        )?)?)
+    } else {
+        None
+    };
+    let controller_pin = stored_pin.as_ref().or(migrated_pin.as_ref());
+    let remote_controller = controller_pin
+        .map(RemoteController::Pinned)
+        .or_else(|| invitation.as_ref().map(RemoteController::Invitation));
     let identity = NodeIdentityV1 {
         schema: "rampage.node-identity.v1".into(),
         node_id,
@@ -131,7 +169,7 @@ fn main() -> anyhow::Result<()> {
     )?);
     let transport = ControllerTransport::new(
         &args.controller,
-        invitation.as_ref(),
+        remote_controller,
         &signing_key,
         &data_dir,
         node_id,
@@ -198,14 +236,6 @@ fn main() -> anyhow::Result<()> {
     };
     let mut offer = offer;
     rampage_policy::sign_offer(&signing_key, &mut offer);
-    let enrollment_marker = args.key_file.with_extension("enrolled");
-    let invitation_endpoint_id = invitation
-        .as_ref()
-        .and_then(|invite| invite.controller_mesh.as_ref())
-        .map(|endpoint| endpoint.endpoint_id.as_str());
-    let already_enrolled = invitation_endpoint_id.is_some_and(|endpoint_id| {
-        fs::read_to_string(&enrollment_marker).is_ok_and(|saved| saved.trim() == endpoint_id)
-    });
     let enrollment_code = args.enrollment_code.as_deref().or_else(|| {
         invitation
             .as_ref()
@@ -229,7 +259,22 @@ fn main() -> anyhow::Result<()> {
             fs::rename(temporary, &enrollment_marker)?;
         }
     }
+    if stored_pin.is_none() && invitation.is_some() {
+        let pin =
+            if let Some(pin) = migrated_pin {
+                pin
+            } else {
+                pin_from_invitation(invitation.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("remote enrollment is missing its invitation")
+                })?)?
+            };
+        write_json_atomic(&controller_pin_file, &pin)?;
+        if let Some(path) = &args.invite_file {
+            fs::remove_file(path)?;
+        }
+    }
     if args.serve {
+        let mut ready_announced = false;
         loop {
             if data_dir.join("KILL").is_file() {
                 return Ok(());
@@ -257,6 +302,18 @@ fn main() -> anyhow::Result<()> {
                 transport.signed_worker_endpoint(&signing_key, now, offer.expires_at);
             rampage_policy::sign_offer(&signing_key, &mut offer);
             transport.post_json("/v1/offers", &offer)?;
+            if !ready_announced {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "schema": "rampage.worker-ready.v1",
+                        "node_id": node_id,
+                        "offer_id": offer.offer_id,
+                        "offer_expires_at": offer.expires_at,
+                    }))?
+                );
+                ready_announced = true;
+            }
             let did_work = execute_one_work_item(
                 &args,
                 &transport,
@@ -395,6 +452,11 @@ struct MeshController {
     destination: iroh::EndpointAddr,
 }
 
+enum RemoteController<'a> {
+    Invitation(&'a EnrollmentInviteV1),
+    Pinned(&'a PinnedControllerV1),
+}
+
 fn mesh_config_for_controller(
     record: &MeshEndpointRecordV1,
 ) -> anyhow::Result<rampage_mesh::MeshConfig> {
@@ -417,14 +479,14 @@ fn mesh_config_for_controller(
 impl ControllerTransport {
     fn new(
         controller: &str,
-        invitation: Option<&EnrollmentInviteV1>,
+        remote: Option<RemoteController<'_>>,
         signing_key: &SigningKey,
         data_dir: &std::path::Path,
         node_id: Uuid,
         artifact_store: std::sync::Arc<rampage_storage::CasStore>,
         ollama_base_url: &str,
     ) -> anyhow::Result<Self> {
-        let Some(invitation) = invitation else {
+        let Some(remote) = remote else {
             anyhow::ensure!(
                 controller.starts_with("http://127.0.0.1:")
                     || controller.starts_with("http://[::1]:")
@@ -442,22 +504,37 @@ impl ControllerTransport {
                 token,
             });
         };
-        anyhow::ensure!(
-            invitation.schema == "rampage.enrollment-invite.v1"
-                && invitation.expires_at > Utc::now(),
-            "invite is expired or has an unsupported schema"
-        );
-        let mesh_record = invitation
-            .controller_mesh
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("invite does not contain a mesh endpoint"))?;
-        let governor_key = invitation
-            .governor_public_key
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("invite does not contain a Governor public key"))?;
-        rampage_policy::verify_mesh_endpoint_with_key(governor_key, mesh_record)
-            .map_err(|_| anyhow::anyhow!("invite mesh endpoint signature is invalid"))?;
-        let destination = rampage_mesh::endpoint_addr_from_record(mesh_record)?;
+        let (mesh_record, governor_key, destination) = match remote {
+            RemoteController::Invitation(invitation) => {
+                anyhow::ensure!(
+                    invitation.schema == "rampage.enrollment-invite.v1"
+                        && invitation.expires_at > Utc::now(),
+                    "invite is expired or has an unsupported schema"
+                );
+                let mesh_record = invitation
+                    .controller_mesh
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("invite does not contain a mesh endpoint"))?;
+                let governor_key = invitation.governor_public_key.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("invite does not contain a Governor public key")
+                })?;
+                rampage_policy::verify_mesh_endpoint_with_key(governor_key, mesh_record)
+                    .map_err(|_| anyhow::anyhow!("invite mesh endpoint signature is invalid"))?;
+                (
+                    mesh_record,
+                    governor_key,
+                    rampage_mesh::endpoint_addr_from_record(mesh_record)?,
+                )
+            }
+            RemoteController::Pinned(pin) => {
+                validate_controller_pin(pin)?;
+                (
+                    &pin.endpoint,
+                    pin.governor_public_key.as_str(),
+                    rampage_mesh::endpoint_addr_from_pinned_record(&pin.endpoint)?,
+                )
+            }
+        };
         let mesh_config = mesh_config_for_controller(mesh_record)?;
         let runtime = tokio::runtime::Runtime::new()?;
         let endpoint = runtime.block_on(rampage_mesh::bind_endpoint(
@@ -1475,6 +1552,77 @@ impl MeshController {
     }
 }
 
+fn pin_from_invitation(invitation: &EnrollmentInviteV1) -> anyhow::Result<PinnedControllerV1> {
+    let endpoint = invitation
+        .controller_mesh
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("invitation omitted its controller mesh endpoint"))?;
+    let governor_public_key = invitation
+        .governor_public_key
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("invitation omitted its Governor public key"))?;
+    let pin = PinnedControllerV1 {
+        schema: "rampage.pinned-controller.v1".into(),
+        endpoint,
+        governor_public_key,
+        enrolled_at: Utc::now(),
+    };
+    validate_controller_pin(&pin)?;
+    Ok(pin)
+}
+
+fn validate_controller_pin(pin: &PinnedControllerV1) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        pin.schema == "rampage.pinned-controller.v1",
+        "unsupported controller pin schema"
+    );
+    anyhow::ensure!(
+        pin.endpoint.endpoint_id.len() == 64
+            && pin
+                .endpoint
+                .endpoint_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            && pin.governor_public_key.len() == 64
+            && pin
+                .governor_public_key
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+        "controller pin contains a malformed identity"
+    );
+    rampage_policy::verify_pinned_mesh_endpoint_with_key(&pin.governor_public_key, &pin.endpoint)
+        .map_err(|_| anyhow::anyhow!("stored controller route signature is invalid"))?;
+    rampage_mesh::endpoint_addr_from_pinned_record(&pin.endpoint)?;
+    Ok(())
+}
+
+fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension(format!("tmp-{}", Uuid::now_v7().simple()));
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let write_result = (|| -> anyhow::Result<()> {
+        let mut file = options.open(&temporary)?;
+        serde_json::to_writer_pretty(&mut file, value)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        sync_parent_directory(path)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result
+}
+
 fn parse_enrollment_code(code: &str) -> anyhow::Result<(Uuid, String)> {
     let (invite_id, secret) = code
         .split_once('.')
@@ -1556,6 +1704,41 @@ mod tests {
 
         record.relay_urls = vec!["http://relay.example.test".into()];
         assert!(mesh_config_for_controller(&record).is_err());
+    }
+
+    #[test]
+    fn consumed_invitation_migrates_to_a_verified_pin_after_expiry() {
+        let governor = SigningKey::from_bytes(&[91_u8; 32]);
+        let controller = SigningKey::from_bytes(&[92_u8; 32]);
+        let now = Utc::now();
+        let mut endpoint = MeshEndpointRecordV1 {
+            schema: MeshEndpointRecordV1::SCHEMA.into(),
+            endpoint_id: hex::encode(controller.verifying_key().to_bytes()),
+            direct_addresses: vec!["127.0.0.1:47838".into()],
+            relay_urls: Vec::new(),
+            issued_at: now - Duration::minutes(11),
+            expires_at: now - Duration::minutes(1),
+            signature: String::new(),
+        };
+        rampage_policy::sign_mesh_endpoint(&governor, &mut endpoint);
+        let invitation = EnrollmentInviteV1 {
+            schema: "rampage.enrollment-invite.v1".into(),
+            invite_id: Uuid::now_v7(),
+            enrollment_code: format!("{}.{}", Uuid::now_v7(), "a".repeat(32)),
+            expires_at: now - Duration::minutes(1),
+            controller_mesh: Some(endpoint),
+            governor_public_key: Some(hex::encode(governor.verifying_key().to_bytes())),
+        };
+        assert!(
+            rampage_policy::verify_mesh_endpoint_with_key(
+                invitation.governor_public_key.as_deref().unwrap(),
+                invitation.controller_mesh.as_ref().unwrap(),
+            )
+            .is_err()
+        );
+        let pin = pin_from_invitation(&invitation).unwrap();
+        assert_eq!(pin.schema, "rampage.pinned-controller.v1");
+        assert!(validate_controller_pin(&pin).is_ok());
     }
 
     fn model_offer(

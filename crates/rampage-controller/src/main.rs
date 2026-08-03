@@ -242,6 +242,8 @@ struct LinkProbeRequest {
     download_bytes: u64,
 }
 
+const DEFAULT_MESH_UDP_PORT: u16 = 47_838;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -308,13 +310,17 @@ async fn main() -> anyhow::Result<()> {
         replica_evidence,
     ) = restore_state(&ledger, fencing_epoch)?;
     let mesh_config = mesh_config_from_env(&nodes)?;
+    let mesh_port_path = data_dir.join("mesh.port");
+    let mesh_port = configured_mesh_port(&mesh_port_path, &ledger)?;
     let mesh = Arc::new(
-        rampage_mesh::bind_node(
+        rampage_mesh::bind_node_on_port(
             load_or_create_secret(&data_dir.join("mesh.key"))?,
             &mesh_config,
+            mesh_port,
         )
         .await?,
     );
+    persist_mesh_port(&mesh_port_path, mesh_port)?;
     ledger.append(
         "mesh.started",
         &mesh.endpoint_id(),
@@ -4892,6 +4898,52 @@ fn mesh_config_from_env(nodes: &HashMap<Uuid, NodeIdentityV1>) -> anyhow::Result
     Ok(config)
 }
 
+fn configured_mesh_port(path: &std::path::Path, ledger: &Ledger) -> anyhow::Result<u16> {
+    if let Ok(value) = std::env::var("RAMPAGE_MESH_PORT") {
+        let port = value.parse::<u16>()?;
+        anyhow::ensure!(port != 0, "RAMPAGE_MESH_PORT must be non-zero");
+        return Ok(port);
+    }
+    if path.is_file() {
+        let port = std::fs::read_to_string(path)?.trim().parse::<u16>()?;
+        anyhow::ensure!(port != 0, "stored mesh port must be non-zero");
+        return Ok(port);
+    }
+    if let Some(event) = ledger.latest_event_of_type("mesh.started")?
+        && let Some(port) = mesh_port_from_started_event(&event)
+    {
+        return Ok(port);
+    }
+    Ok(DEFAULT_MESH_UDP_PORT)
+}
+
+fn mesh_port_from_started_event(event: &LedgerEvent) -> Option<u16> {
+    (event.event_type == "mesh.started")
+        .then_some(())
+        .and_then(|()| event.payload.get("sockets"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter_map(|address| address.parse::<SocketAddr>().ok())
+        .find(|address| address.is_ipv4())
+        .map(|address| address.port())
+        .filter(|port| *port != 0)
+}
+
+fn persist_mesh_port(path: &std::path::Path, port: u16) -> anyhow::Result<()> {
+    if path.is_file() {
+        let stored = std::fs::read_to_string(path)?.trim().parse::<u16>()?;
+        anyhow::ensure!(
+            stored == port,
+            "stored mesh port changed during controller startup"
+        );
+        return Ok(());
+    }
+    write_new_durable_file(path, format!("{port}\n").as_bytes())?;
+    Ok(())
+}
+
 type RestoredState = (
     HashMap<Uuid, NodeIdentityV1>,
     HashMap<Uuid, ResourceOfferV1>,
@@ -5426,6 +5478,26 @@ mod tests {
         append_bounded_bytes(&mut bytes, &[1, 2], 3).unwrap();
         assert!(append_bounded_bytes(&mut bytes, &[3, 4], 3).is_err());
         assert_eq!(bytes, vec![1, 2]);
+    }
+
+    #[test]
+    fn upgrade_reuses_the_latest_legacy_controller_mesh_port() {
+        let ledger = Ledger::in_memory().unwrap();
+        ledger
+            .append(
+                "mesh.started",
+                "mesh",
+                &serde_json::json!({"mode": "local_only", "sockets": ["0.0.0.0:58899", "[::]:58901"]}),
+            )
+            .unwrap();
+        ledger
+            .append("resource.offer.registered", "node", &serde_json::json!({}))
+            .unwrap();
+        let event = ledger
+            .latest_event_of_type("mesh.started")
+            .unwrap()
+            .unwrap();
+        assert_eq!(mesh_port_from_started_event(&event), Some(58_899));
     }
 
     #[test]

@@ -11,10 +11,12 @@ or copied invitation.
 4. Rampage shows the nearby laptop and the same four digits on both screens.
 5. Check the digits, then choose **Codes match—approve** on the main PC.
 6. The main PC reports **Connected securely**. The laptop stores its enrollment durably and restarts
-   automatically as a worker.
+   automatically into a contributor status screen. **Worker active** appears only after the owner
+   PC accepts the laptop's first signed resource offer.
 
-If Windows displays a firewall prompt, allow Rampage on **private networks** only. Rampage does not
-require public-network access for nearby pairing.
+The first pairing action may trigger one standard Windows administrator prompt. Rampage uses it to
+install executable-scoped UDP allowances for its pairing, controller, and worker binaries on
+**private networks only**. Public-network access is not enabled.
 
 ## What the four digits mean
 
@@ -25,8 +27,15 @@ intercepted device. It is deliberately not a password and cannot recreate the re
 After approval, the owner creates the normal short-lived, Governor-signed Rampage invite, encrypts
 it with AES-256-GCM under a key derived with HKDF-SHA-256, and sends the ciphertext directly to the
 laptop. The laptop authenticates and persists it, sends an encrypted completion receipt, and
-restarts. The long invitation never appears in the normal UI and is never sent in discovery
+restarts. After the controller consumes the one-time secret, the laptop replaces the invitation
+with a Governor-signed controller pin and removes the enrollment secret. The pin remains valid as a
+transport identity anchor after the ten-minute discovery record expires; it grants no job or lease
+authority. The long invitation never appears in the normal UI and is never sent in discovery
 broadcasts.
+
+The controller also persists its authenticated UDP port. An upgrade migrates the newest proven
+legacy port from the evidence ledger before selecting the fixed port used by a new installation, so
+an enrolled laptop does not lose its signed route merely because the main app restarts.
 
 ## Why discovery remains narrow
 

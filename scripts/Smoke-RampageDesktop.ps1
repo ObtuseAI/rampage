@@ -12,24 +12,58 @@ $executablePath = if ([System.IO.Path]::IsPathRooted($Executable)) {
 $resolvedExecutable = (Resolve-Path $executablePath).Path
 $smokeRoot = Join-Path $root ('output\desktop-smoke-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $smokeRoot | Out-Null
+
+function Get-FreeTcpPort {
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    try {
+        $listener.Start()
+        return ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+    } finally {
+        $listener.Stop()
+    }
+}
+
+function Get-FreeUdpPort {
+    $socket = [Net.Sockets.UdpClient]::new(0)
+    try {
+        return ([Net.IPEndPoint]$socket.Client.LocalEndPoint).Port
+    } finally {
+        $socket.Dispose()
+    }
+}
+
+$controllerPort = Get-FreeTcpPort
+$intelligencePort = Get-FreeTcpPort
+while ($intelligencePort -eq $controllerPort) { $intelligencePort = Get-FreeTcpPort }
+$meshPort = Get-FreeUdpPort
+$controllerBase = "http://127.0.0.1:$controllerPort"
 $oldData = $env:RAMPAGE_DATA_DIR
 $oldDiagnosticExit = $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS
+$oldControllerBind = $env:RAMPAGE_BIND
+$oldIntelligencePort = $env:RAMPAGE_INTELLIGENCE_PORT
+$oldMeshPort = $env:RAMPAGE_MESH_PORT
 $env:RAMPAGE_DATA_DIR = $smokeRoot
 $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = '30000'
+$env:RAMPAGE_BIND = "127.0.0.1:$controllerPort"
+$env:RAMPAGE_INTELLIGENCE_PORT = $intelligencePort.ToString()
+$env:RAMPAGE_MESH_PORT = $meshPort.ToString()
 $desktop = Start-Process -FilePath $resolvedExecutable -PassThru
 $env:RAMPAGE_DATA_DIR = $oldData
 $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = $oldDiagnosticExit
+$env:RAMPAGE_BIND = $oldControllerBind
+$env:RAMPAGE_INTELLIGENCE_PORT = $oldIntelligencePort
+$env:RAMPAGE_MESH_PORT = $oldMeshPort
 
 try {
     $health = $null
     for ($attempt = 0; $attempt -lt 150; $attempt++) {
         try {
-            $health = Invoke-RestMethod 'http://127.0.0.1:47831/health'
-            $intelligence = Invoke-RestMethod 'http://127.0.0.1:47832/health'
+            $health = Invoke-RestMethod "$controllerBase/health"
+            $intelligence = Invoke-RestMethod "http://127.0.0.1:$intelligencePort/health"
             $token = (Get-Content -Raw (Join-Path $smokeRoot 'controller.token')).Trim()
             $headers = @{ 'x-rampage-token' = $token }
-            $nodes = Invoke-RestMethod 'http://127.0.0.1:47831/v1/nodes' -Headers $headers
-            $offers = Invoke-RestMethod 'http://127.0.0.1:47831/v1/offers' -Headers $headers
+            $nodes = Invoke-RestMethod "$controllerBase/v1/nodes" -Headers $headers
+            $offers = Invoke-RestMethod "$controllerBase/v1/offers" -Headers $headers
             if ($nodes.Count -ge 1 -and $offers.Count -ge 1 -and $intelligence.status -eq 'ready') { break }
         } catch {
             Start-Sleep -Milliseconds 100
