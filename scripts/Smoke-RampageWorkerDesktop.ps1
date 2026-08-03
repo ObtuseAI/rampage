@@ -24,6 +24,7 @@ $oldToken = $env:RAMPAGE_TOKEN
 $oldDiagnosticExit = $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS
 $controller = $null
 $desktop = $null
+$restartDesktop = $null
 
 function Stop-ProcessTree([int]$RootProcessId) {
     $children = @(Get-CimInstance Win32_Process | Where-Object ParentProcessId -eq $RootProcessId)
@@ -61,7 +62,7 @@ try {
     $env:RAMPAGE_DATA_DIR = $workerData
     $env:RAMPAGE_BIND = $oldBind
     $env:RAMPAGE_TOKEN = $oldToken
-    $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = '180000'
+    $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = '60000'
     $desktop = Start-Process -FilePath $desktopExe -PassThru
     $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = $oldDiagnosticExit
 
@@ -116,10 +117,48 @@ try {
     }
 
     $desktopId = $desktop.Id
+    $firstOfferId = $nodeOffer.offer_id
     $null = $desktop.CloseMainWindow()
     Start-Sleep -Milliseconds 750
     if ($desktop.HasExited) { throw 'closing the worker window exited instead of keeping its contribution in the tray' }
-    if (-not $desktop.WaitForExit(182000)) { Stop-ProcessTree -RootProcessId $desktopId; throw 'worker diagnostic exit did not complete' }
+    if (-not $desktop.WaitForExit(62000)) { Stop-ProcessTree -RootProcessId $desktopId; throw 'worker diagnostic exit did not complete' }
+    Start-Sleep -Milliseconds 750
+
+    $controllerPin = Join-Path $workerData 'agent.controller-pin.json'
+    $oneTimeInvite = Join-Path $workerData 'remote-invite.json'
+    if (-not (Test-Path -LiteralPath $controllerPin -PathType Leaf)) {
+        throw 'worker did not convert its consumed invitation into a durable controller pin'
+    }
+    if (Test-Path -LiteralPath $oneTimeInvite) {
+        throw 'worker retained the consumed one-time enrollment secret after pinning the controller'
+    }
+
+    $env:RAMPAGE_DATA_DIR = $workerData
+    $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = '30000'
+    $restartDesktop = Start-Process -FilePath $desktopExe -PassThru
+    $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = $oldDiagnosticExit
+    $reconnected = $false
+    for ($attempt = 0; $attempt -lt 300; $attempt++) {
+        if ($restartDesktop.HasExited) {
+            throw "pinned worker desktop exited before reconnecting (exit=$($restartDesktop.ExitCode))"
+        }
+        $offers = @(Invoke-RestMethod "$controllerUrl/v1/offers" -Headers $headers)
+        $nodeOffer = $offers | Where-Object {
+            $_ -and "$($_.node_id)" -eq "$($node.node_id)" -and "$($_.offer_id)" -ne "$firstOfferId"
+        } | Select-Object -First 1
+        if ($nodeOffer -and $nodeOffer.mesh_endpoint.signature) {
+            $reconnected = $true
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $reconnected) { throw 'pinned worker did not publish a fresh signed offer after restart' }
+    # Allow the bounded 30-second diagnostic timer a cleanup margin for WebView and sidecars on
+    # slower Windows machines; the process is still required to terminate autonomously.
+    if (-not $restartDesktop.WaitForExit(45000)) {
+        Stop-ProcessTree -RootProcessId $restartDesktop.Id
+        throw 'restarted pinned worker diagnostic exit did not complete'
+    }
     Start-Sleep -Milliseconds 750
     $workerProcesses = @(Get-CimInstance Win32_Process | Where-Object {
         $_.CommandLine -and $_.CommandLine.Contains($workerData)
@@ -140,6 +179,8 @@ try {
         artifact_endpoint_signature = $true
         artifact_digest = $put.digest
         artifact_round_trip = $true
+        consumed_invite_removed = $true
+        pinned_restart = $true
         close_to_tray = $true
         clean_explicit_exit = $true
         sidecar_leak = $false
@@ -151,6 +192,7 @@ try {
     $env:RAMPAGE_TOKEN = $oldToken
     $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = $oldDiagnosticExit
     if ($desktop -and -not $desktop.HasExited) { Stop-ProcessTree -RootProcessId $desktop.Id }
+    if ($restartDesktop -and -not $restartDesktop.HasExited) { Stop-ProcessTree -RootProcessId $restartDesktop.Id }
     if ($controller -and -not $controller.HasExited) { Stop-ProcessTree -RootProcessId $controller.Id }
     $lateWorkerProcesses = @(Get-CimInstance Win32_Process | Where-Object {
         $_.CommandLine -and $_.CommandLine.Contains($workerData)

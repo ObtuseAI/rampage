@@ -18,7 +18,7 @@ use rampage_protocol::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use thiserror::Error;
 
 pub const CONTROL_ALPN: &[u8] = b"rampage.mesh.control.v1";
@@ -144,6 +144,33 @@ pub async fn bind_endpoint(
         .bind()
         .await
         .map_err(|error| anyhow::anyhow!("mesh bind failed: {error}"))?;
+    Ok(endpoint)
+}
+
+/// Bind an authenticated endpoint to one stable IPv4 UDP port.
+///
+/// Controllers use this variant so signed, pinned routes survive process restarts. Workers keep
+/// using ephemeral ports because their fresh signed endpoint is attached to every resource offer.
+pub async fn bind_endpoint_on_port(
+    secret_bytes: [u8; 32],
+    config: &MeshConfig,
+    port: u16,
+) -> anyhow::Result<Endpoint> {
+    anyhow::ensure!(port != 0, "stable mesh port must be non-zero");
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .clear_ip_transports()
+        .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))?
+        .clear_address_lookup()
+        .relay_mode(config.relay_mode()?)
+        .secret_key(SecretKey::from_bytes(&secret_bytes))
+        .alpns(vec![
+            CONTROL_ALPN.to_vec(),
+            ARTIFACT_ALPN.to_vec(),
+            MODEL_ALPN.to_vec(),
+        ])
+        .bind()
+        .await
+        .map_err(|error| anyhow::anyhow!("stable mesh bind on UDP {port} failed: {error}"))?;
     Ok(endpoint)
 }
 
@@ -615,6 +642,22 @@ pub async fn bind_node(secret_bytes: [u8; 32], config: &MeshConfig) -> anyhow::R
     })
 }
 
+pub async fn bind_node_on_port(
+    secret_bytes: [u8; 32],
+    config: &MeshConfig,
+    port: u16,
+) -> anyhow::Result<MeshNode> {
+    config.validate()?;
+    let mode = match config.mode {
+        MeshMode::LocalOnly => "local_only",
+        MeshMode::PrivateRelay { .. } => "private_relay",
+    };
+    Ok(MeshNode {
+        endpoint: bind_endpoint_on_port(secret_bytes, config, port).await?,
+        mode,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,6 +699,23 @@ mod tests {
         let endpoint = bind_endpoint([17_u8; 32], &MeshConfig::default())
             .await
             .unwrap();
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn controller_endpoint_binds_the_requested_stable_udp_port() {
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let endpoint = bind_endpoint_on_port([19_u8; 32], &MeshConfig::default(), port)
+            .await
+            .unwrap();
+        assert!(
+            endpoint
+                .bound_sockets()
+                .iter()
+                .any(|address| address.is_ipv4() && address.port() == port)
+        );
         endpoint.close().await;
     }
 

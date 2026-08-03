@@ -18,17 +18,17 @@ the authority to run wild.
 [![Rust 1.91](https://img.shields.io/badge/Rust-1.91%2B-0b0f17?logo=rust&logoColor=67f5c5)](Cargo.toml)
 [![AI authority](https://img.shields.io/badge/AI%20authority-proposals%20only-0b0f17?logo=probot&logoColor=67f5c5)](docs/ARCHITECTURE.md#recursive-improvement)
 
-## [⬇ Download Rampage 0.2.1 for Windows](https://obtuseai.github.io/rampage/download/)
+## [⬇ Download Rampage 0.2.2 for Windows](https://obtuseai.github.io/rampage/download/)
 
 **One installer. Desktop shortcut included.**
-[Release notes and SHA-256](https://github.com/ObtuseAI/rampage/releases/tag/v0.2.1-pairing.1) ·
+[Release notes and SHA-256](https://github.com/ObtuseAI/rampage/releases/tag/v0.2.2-pairing.2) ·
 [All releases](https://github.com/ObtuseAI/rampage/releases)
 
 [**Launch the showcase**](https://obtuseai.github.io/rampage/) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Easy pairing](docs/PAIRING.md) ·
 [Security](SECURITY.md) ·
-[0.2.1 release evidence](docs/RELEASE_EVIDENCE_0.2.1.md) ·
+[0.2.2 release evidence](docs/RELEASE_EVIDENCE_0.2.2.md) ·
 [Owner-relay evidence](docs/OWNER_RELAY_EVIDENCE.md) ·
 [Resumable-storage evidence](docs/RESUMABLE_STORAGE_EVIDENCE.md) ·
 [Native distribution](docs/DISTRIBUTION.md) ·
@@ -61,10 +61,10 @@ machine that can actually perform it.
 
 ## Built—not imagined
 
-Rampage 0.2.1 is the current Windows x64 pairing candidate. It combines the established compute,
-mesh, storage, and gateway foundations with zero-copy nearby enrollment and a self-contained
-packaged 3D Arena. Evidence links distinguish automated and packaged proof from the still-pending
-physical laptop and phone gates.
+Rampage 0.2.2 is the current Windows x64 pairing candidate. It combines the established compute,
+mesh, storage, and gateway foundations with zero-copy nearby enrollment, durable worker identity,
+private-network firewall setup, and a self-contained packaged 3D Arena. Evidence links distinguish
+automated and packaged proof from the still-pending physical laptop and phone gates.
 
 | Proof surface | Validated result |
 | --- | --- |
@@ -79,8 +79,8 @@ physical laptop and phone gates.
 | Packaged product | Native Tauri shell, role-aware system tray, close-to-tray, start-at-login, governed sidecars, clean explicit shutdown, installer, and automatic desktop launcher |
 | Verification | Rust, desktop, TypeScript SDK, Python intelligence, Python SDK, deterministic universal-gateway, forced-relay mesh, packaging, and lifecycle gates |
 
-The packaged 0.2.1 qualification record—including artifact hashes and the unsigned-release
-boundary—is in [the current release evidence](docs/RELEASE_EVIDENCE_0.2.1.md). The original 0.2
+The packaged 0.2.2 qualification record—including artifact hashes and the unsigned-release
+boundary—is in [the current release evidence](docs/RELEASE_EVIDENCE_0.2.2.md). The original 0.2
 record remains in [its immutable evidence page](docs/RELEASE_EVIDENCE.md). The newer API,
 workload-contract, self-scan,
 and signed-canary campaign is recorded separately in

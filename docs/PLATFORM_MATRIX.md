@@ -5,7 +5,7 @@ binary release claim.
 
 | Platform | Installable package | Controller | Worker | Intended donation profile | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| Windows 11 x64 | MSI and NSIS 0.2.1 pairing candidate | Shipped | Shipped | CPU, RAM cache, NVIDIA GPU/VRAM, disk | Packaged 0.2.1 lifecycle, zero-copy pairing protocol, 3D recovery, direct QUIC, owner relay, restart-resumable storage, signed possession receipts, and two-node autonomous repair; physical laptop pairing pending |
+| Windows 11 x64 | MSI and NSIS 0.2.2 pairing candidate | Shipped | Shipped | CPU, RAM cache, NVIDIA GPU/VRAM, disk | Packaged 0.2.2 lifecycle, zero-copy pairing, durable controller pin, private-only firewall setup, restart recovery, direct QUIC, owner relay, restart-resumable storage, signed possession receipts, and two-node autonomous repair; physical 0.2.2 laptop pairing pending |
 | Windows 10 x64 | Not qualified | Source likely portable | Source likely portable | Same as Windows 11, hardware-dependent | Unexecuted |
 | macOS Apple Silicon | Not shipped | Rust source portable | Rust source portable | CPU/GPU whole jobs, RAM cache, disk | Unexecuted; native packaging and discovery adapters required |
 | Linux x64 | Not shipped | Rust source portable | Rust source portable | CPU, vendor GPU/VRAM, RAM cache, disk | Unexecuted; GTK dependency warning must be resolved or accepted before release |
@@ -20,7 +20,7 @@ packaging on its named GitHub-hosted runner; it does not convert an unsigned can
 release. Stable Windows and macOS publication additionally requires real platform credentials and
 independent signature/notarization verification.
 
-The installable column describes the current 0.2.1 candidate artifacts. Later source-qualified capabilities
+The installable column describes the current 0.2.2 candidate artifacts. Later source-qualified capabilities
 do not become packaged or signed merely because they pass a source campaign; each evidence page
 states that boundary explicitly.
 

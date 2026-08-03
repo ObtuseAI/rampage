@@ -62,6 +62,12 @@ export type WorkerPairing =
   | { state: "approved"; request_id: string; owner_name: string }
   | { state: "failed"; message: string };
 
+export interface WorkerRuntime {
+  state: "inactive" | "starting" | "active" | "failed";
+  nodeId: string | null;
+  message: string | null;
+}
+
 const demoNodes: FabricNode[] = [
   { id: "home", name: "Command Rig", kind: "desktop", state: "ready", cpu: 31, memory: 46, gpu: 18, storage: 22, storageAvailableGb: 120, modelMemoryAvailableGb: 10, modelRuntimeCount: 1, artifactEndpoint: false, latencyMs: 0, topologyConfidence: "controller_local", x: 0, y: 0, z: 0 },
   { id: "deck", name: "Steam Deck", kind: "steam_deck", state: "working", cpu: 64, memory: 53, gpu: 72, storage: 35, storageAvailableGb: 18, modelMemoryAvailableGb: 8, modelRuntimeCount: 0, artifactEndpoint: true, latencyMs: 18.4, downlinkMbps: 386, uplinkMbps: 201, topologyConfidence: "measured", x: -3.2, y: -0.4, z: 1.8 },
@@ -117,6 +123,7 @@ interface RampageState {
   diagnostic: FabricDiagnosticReport | null;
   pairingWindow: PairingWindow | null;
   workerPairing: WorkerPairing;
+  workerRuntime: WorkerRuntime;
   setMode: (mode: "arena" | "grid") => void;
   setSelectedNode: (id: string) => void;
   setCommandOpen: (open: boolean) => void;
@@ -215,6 +222,7 @@ export const useRampage = create<RampageState>((set, get) => ({
   diagnostic: import.meta.env.DEV ? demoDiagnostic : null,
   pairingWindow: null,
   workerPairing: { state: "idle" },
+  workerRuntime: { state: "inactive", nodeId: null, message: null },
   setMode: (mode) => set({ mode }),
   setSelectedNode: (selectedNode) => set({ selectedNode }),
   setCommandOpen: (commandOpen) => set({ commandOpen }),
@@ -296,19 +304,28 @@ export const useRampage = create<RampageState>((set, get) => ({
       const fabricRole = await invoke<"owner" | "worker">("fabric_mode").catch(() => "owner" as const);
       const runAtLogin = await invoke<boolean>("autostart_enabled").catch(() => get().runAtLogin);
       if (fabricRole === "worker") {
+        const workerRuntime = await invoke<WorkerRuntime>("worker_runtime_status").catch(() => ({
+          state: "failed" as const,
+          nodeId: null,
+          message: "Contributor runtime status is unavailable.",
+        }));
+        const active = workerRuntime.state === "active";
+        localStorage.setItem("rampage.onboarded", "true");
         set({
+          onboarding: false,
           fabricRole,
+          workerRuntime,
           runAtLogin,
           killLatch: false,
-          connected: true,
-          capability: "local_reduced",
+          connected: active,
+          capability: active ? "local_reduced" : "blocked",
           gatewayModels: [],
           diagnostic: null,
           nodes: [{
-            id: "worker",
+            id: workerRuntime.nodeId ?? "worker",
             name: "This Worker",
             kind: "desktop",
-            state: "ready",
+            state: active ? "ready" : workerRuntime.state === "starting" ? "sleeping" : "offline",
             cpu: 0,
             memory: 0,
             gpu: 0,
@@ -320,7 +337,7 @@ export const useRampage = create<RampageState>((set, get) => ({
             z: 0,
           }],
           selectedNode: "worker",
-          lastAction: "Contributing through a signed, owner-controlled mesh session.",
+          lastAction: workerRuntime.message ?? "Contributor runtime is starting.",
           lastSync: new Date(),
         });
         return;
