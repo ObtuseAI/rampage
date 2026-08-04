@@ -18,7 +18,7 @@ packages, public artifacts, and physical two-machine behavior are separate claim
 | Desktop, edge, and TypeScript builds | `pnpm check` | PASS — desktop 18, edge 2, SDK 12 tests plus all production builds |
 | Proposal-only intelligence | Ruff, mypy, and pytest | PASS — Ruff clean, mypy clean across 9 files, 17 tests |
 | NSIS installer and desktop shortcut | `scripts/Smoke-RampageInstaller.ps1` | PASS — install 0, uninstall 0, six payloads, controller/intelligence ready, one signed node and offer, shortcut created then removed, no leaked sidecars |
-| Public release assets | GitHub release | PENDING publication |
+| Public release assets | [`v0.3.1-recovery.1`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.1) | PASS — 12 uploaded assets, three source-bound manifests, three checksum files, and GitHub build-provenance attestation |
 | Physical owner/laptop re-pair | Fresh 0.3.1 installs | PENDING physical laptop action |
 | Physical owner-to-laptop view | `scripts/Qualify-RampageRemoteAssist.ps1 -ExpectedVersion 0.3.1` | PENDING live opted-in worker |
 
@@ -36,6 +36,25 @@ asset hashes will be recorded separately after publication.
 The source-current Recovery Center capture is
 `docs/assets/rampage-recovery-center.png`, SHA-256
 `f5503739ce0f1a069ea067a9bb807639d541872f7f6487a12efcb46fa414366d`.
+
+## Public candidate artifacts
+
+The tag-bound GitHub Actions run rebuilt every package from merged commit
+`51b4c054748200c76bdc45798e705a75da42d98e`. Its Windows manifest reports version 0.3.1,
+and the recommended Windows download returned HTTP 200 with the expected byte length after the
+release was published.
+
+| Package | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `Rampage_0.3.1_x64-setup.exe` | 69,112,909 | `22e4ea85dfc63bb2667b32523409acab1b377b0eebd1ea25c9655df53fe73c9c` |
+| `Rampage_0.3.1_x64_en-US.msi` | 78,987,264 | `c6ad9513c9a5667f2964e05034735a5a52bb83033deab92a9a303f601941bb43` |
+| `Rampage_0.3.1_amd64.AppImage` | 168,880,632 | `9d6a05bfed97d0367dc6561a14e70317685d74972953ff86dbed27dd705ee16a` |
+| `Rampage_0.3.1_amd64.deb` | 98,031,344 | `4745a39166d008ceb0d13c902c40745eeb50975364b1b0b7a7f6c6049f886a5d` |
+| `Rampage_0.3.1_aarch64.dmg` | 86,234,740 | `ba00e8feba971d2de6fe19c35cc9ceb978e04bae127b975227f95dbe35d74d04` |
+| `Rampage.app.zip` | 84,272,637 | `644aa2d82823dd1bb226de3bc36bf0dc74699da22f977be339f08f83c953aa01` |
+
+Candidate Windows and macOS packages are intentionally identified as unsigned/not notarized; the
+workflow keeps production-signing gates reserved for a future stable channel.
 
 ## Honest boundary
 
