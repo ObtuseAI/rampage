@@ -4,6 +4,7 @@ use aes_gcm::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use hkdf::Hkdf;
+use if_addrs::{IfAddr, Ifv4Addr};
 use rand::{TryRng as _, rngs::SysRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,7 +23,6 @@ const PAIRING_PORT: u16 = 47_839;
 const PAIRING_MULTICAST: Ipv4Addr = Ipv4Addr::new(239, 255, 73, 82);
 const PAIRING_WINDOW_MS: u64 = 3 * 60 * 1_000;
 const WORKER_WAIT_MS: u64 = 5 * 60 * 1_000;
-const MAX_CLOCK_SKEW_MS: u64 = 30_000;
 const MAX_DATAGRAM_BYTES: usize = 8 * 1_024;
 const MAX_INVITATION_BYTES: usize = 5 * 1_024;
 const MAX_PENDING_REQUESTS: usize = 16;
@@ -410,8 +410,8 @@ async fn owner_receive_loop(manager: PairingManager, socket: Arc<UdpSocket>) {
             device_name,
             device_kind,
             ephemeral_public_key,
-            issued_at_ms,
-            expires_at_ms,
+            issued_at_ms: _,
+            expires_at_ms: _,
         } = message
         else {
             continue;
@@ -420,9 +420,6 @@ async fn owner_receive_loop(manager: PairingManager, socket: Arc<UdpSocket>) {
             || !valid_request_id(&request_id)
             || bounded_label(&device_name, "device name").is_err()
             || device_kind != "desktop"
-            || issued_at_ms > now.saturating_add(MAX_CLOCK_SKEW_MS)
-            || expires_at_ms <= now
-            || expires_at_ms > now.saturating_add(WORKER_WAIT_MS + MAX_CLOCK_SKEW_MS)
         {
             continue;
         }
@@ -467,7 +464,12 @@ async fn owner_receive_loop(manager: PairingManager, socket: Arc<UdpSocket>) {
                 else {
                     continue;
                 };
-                let effective_expiry = expires_at_ms.min(inner.owner_open_until_ms);
+                // Remote wall clocks are not a trust boundary. Keep the request bounded by the
+                // owner's local pairing window so clock drift cannot silently break discovery or
+                // let a peer extend enrollment availability.
+                let effective_expiry = now
+                    .saturating_add(WORKER_WAIT_MS)
+                    .min(inner.owner_open_until_ms);
                 let challenge = PairingDatagram::Challenge {
                     schema: PAIRING_SCHEMA.into(),
                     request_id: request_id.clone(),
@@ -523,10 +525,7 @@ async fn worker_pairing_loop(
         expires_at_ms,
     })
     .map_err(|error| error.to_string())?;
-    let destinations = [
-        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, PAIRING_PORT)),
-        SocketAddr::V4(SocketAddrV4::new(PAIRING_MULTICAST, PAIRING_PORT)),
-    ];
+    let destinations = pairing_destinations();
     let mut interval = tokio::time::interval(Duration::from_millis(750));
     let mut buffer = vec![0_u8; MAX_DATAGRAM_BYTES + 1];
     let mut selected_owner: Option<(SocketAddr, [u8; 32], Vec<u8>, String)> = None;
@@ -542,7 +541,7 @@ async fn worker_pairing_loop(
         }
         tokio::select! {
             _ = interval.tick() => {
-                for destination in destinations {
+                for destination in &destinations {
                     let _ = socket.send_to(&hello, destination).await;
                 }
             }
@@ -551,8 +550,8 @@ async fn worker_pairing_loop(
                 if length == 0 || length > MAX_DATAGRAM_BYTES { continue; }
                 let Ok(message) = serde_json::from_slice::<PairingDatagram>(&buffer[..length]) else { continue; };
                 match message {
-                    PairingDatagram::Challenge { schema, request_id: response_id, owner_name, ephemeral_public_key, expires_at_ms: challenge_expiry }
-                        if schema == PAIRING_SCHEMA && response_id == request_id && challenge_expiry > now_ms() => {
+                    PairingDatagram::Challenge { schema, request_id: response_id, owner_name, ephemeral_public_key, expires_at_ms: _ }
+                        if schema == PAIRING_SCHEMA && response_id == request_id => {
                         let Ok(owner_public) = decode_32(&ephemeral_public_key) else { continue; };
                         if let Some((selected_addr, _, _, _)) = &selected_owner
                             && (*selected_addr != source)
@@ -568,7 +567,9 @@ async fn worker_pairing_loop(
                             request_id: request_id.clone(),
                             owner_name,
                             verification_code,
-                            expires_at_ms: challenge_expiry,
+                            // Present a countdown based on this device's monotonic pairing
+                            // lifetime rather than assuming both Windows clocks agree.
+                            expires_at_ms,
                         })?;
                     }
                     PairingDatagram::Approval { schema, request_id: response_id, nonce, ciphertext }
@@ -743,7 +744,18 @@ fn bind_owner_socket() -> Result<Arc<UdpSocket>, String> {
     socket
         .set_broadcast(true)
         .map_err(|error| error.to_string())?;
-    let _ = socket.join_multicast_v4(&PAIRING_MULTICAST, &Ipv4Addr::UNSPECIFIED);
+    let mut joined = false;
+    for interface in active_ipv4_interfaces() {
+        if socket
+            .join_multicast_v4(&PAIRING_MULTICAST, &interface.ip)
+            .is_ok()
+        {
+            joined = true;
+        }
+    }
+    if !joined {
+        let _ = socket.join_multicast_v4(&PAIRING_MULTICAST, &Ipv4Addr::UNSPECIFIED);
+    }
     UdpSocket::from_std(socket)
         .map(Arc::new)
         .map_err(|error| error.to_string())
@@ -759,6 +771,45 @@ fn bind_worker_socket() -> Result<UdpSocket, String> {
         .set_broadcast(true)
         .map_err(|error| error.to_string())?;
     UdpSocket::from_std(socket).map_err(|error| error.to_string())
+}
+
+fn active_ipv4_interfaces() -> Vec<Ifv4Addr> {
+    let mut interfaces = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|interface| {
+            interface.is_oper_up()
+                && !interface.is_loopback()
+                && !interface.is_p2p()
+                && !interface.is_link_local()
+        })
+        .filter_map(|interface| match interface.addr {
+            IfAddr::V4(address) if !address.ip.is_unspecified() => Some(address),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    interfaces.sort_by_key(|interface| interface.ip);
+    interfaces.dedup_by_key(|interface| interface.ip);
+    interfaces
+}
+
+fn pairing_destinations() -> Vec<SocketAddr> {
+    pairing_destinations_for(active_ipv4_interfaces())
+}
+
+fn pairing_destinations_for(interfaces: impl IntoIterator<Item = Ifv4Addr>) -> Vec<SocketAddr> {
+    let mut addresses = vec![Ipv4Addr::BROADCAST, PAIRING_MULTICAST];
+    addresses.extend(
+        interfaces
+            .into_iter()
+            .filter_map(|interface| interface.broadcast),
+    );
+    addresses.sort_unstable();
+    addresses.dedup();
+    addresses
+        .into_iter()
+        .map(|address| SocketAddr::V4(SocketAddrV4::new(address, PAIRING_PORT)))
+        .collect()
 }
 
 fn prune_owner_state(inner: &mut PairingInner, now: u64) {
@@ -995,8 +1046,10 @@ mod tests {
             device_name: "Studio Laptop".into(),
             device_kind: "desktop".into(),
             ephemeral_public_key: BASE64.encode(worker_public),
-            issued_at_ms: now_ms(),
-            expires_at_ms: now_ms() + 60_000,
+            // Pairing must remain available even when the laptop's wall clock is wrong. The
+            // owner bounds the request with its own three-minute enrollment window.
+            issued_at_ms: u64::MAX,
+            expires_at_ms: 0,
         })
         .unwrap();
         worker_socket.send_to(&hello, owner_addr).await.unwrap();
@@ -1070,6 +1123,39 @@ mod tests {
         assert!(bounded_label("Laptop", "device").is_ok());
         assert!(bounded_label("Laptop\nInjected", "device").is_err());
         assert!(bounded_label(&"x".repeat(65), "device").is_err());
+    }
+
+    #[test]
+    fn discovery_targets_every_active_lan_broadcast_once() {
+        let destinations = pairing_destinations_for([
+            Ifv4Addr {
+                ip: "192.168.86.32".parse().unwrap(),
+                netmask: "255.255.255.0".parse().unwrap(),
+                prefixlen: 24,
+                broadcast: Some("192.168.86.255".parse().unwrap()),
+            },
+            Ifv4Addr {
+                ip: "192.168.86.44".parse().unwrap(),
+                netmask: "255.255.255.0".parse().unwrap(),
+                prefixlen: 24,
+                broadcast: Some("192.168.86.255".parse().unwrap()),
+            },
+            Ifv4Addr {
+                ip: "10.42.0.8".parse().unwrap(),
+                netmask: "255.255.0.0".parse().unwrap(),
+                prefixlen: 16,
+                broadcast: Some("10.42.255.255".parse().unwrap()),
+            },
+        ]);
+        assert_eq!(
+            destinations,
+            vec![
+                "10.42.255.255:47839".parse().unwrap(),
+                "192.168.86.255:47839".parse().unwrap(),
+                "239.255.73.82:47839".parse().unwrap(),
+                "255.255.255.255:47839".parse().unwrap(),
+            ]
+        );
     }
 
     #[test]

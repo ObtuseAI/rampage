@@ -8,6 +8,11 @@ Candidate 2 also recognizes an owner's cryptographically matching self-enrolled 
 confusing it for a worker-role conflict. The fix was added after a physical in-place owner upgrade,
 and foreign-controller pins remain fail-closed.
 
+Candidate 3 fixes the next physical-laptop discovery failure. Rampage now advertises on every active
+LAN interface instead of trusting Windows to choose one path for global broadcast, and pairing
+lifetimes are bounded independently on each device instead of requiring synchronized wall clocks.
+The normal flow remains one **Find my fabric** action on the laptop and **Add machine** on the owner.
+
 ## What changed
 
 - **Fix Rampage** safely restarts a consistent native installation without erasing identity or work.
@@ -22,6 +27,10 @@ and foreign-controller pins remain fail-closed.
 - A redacted recovery receipt makes support diagnosis copyable without exposing controller secrets or
   private keys.
 - SDK lifecycle methods are available in Rust, TypeScript, and Python for loopback owner automation.
+- Nearby discovery sends to multicast, global broadcast, and each active directed LAN broadcast,
+  while excluding loopback, link-local, and point-to-point tunnel interfaces.
+- The owner derives request expiry from its own open window and the laptop displays its own bounded
+  countdown. Remote clocks cannot extend the window or silently prevent discovery.
 
 ## Simpler compute outcomes
 
