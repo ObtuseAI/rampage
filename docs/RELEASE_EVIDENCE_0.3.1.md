@@ -18,7 +18,8 @@ packages, public artifacts, and physical two-machine behavior are separate claim
 | Desktop, edge, and TypeScript builds | `pnpm check` | PASS — desktop 18, edge 2, SDK 12 tests plus all production builds |
 | Proposal-only intelligence | Ruff, mypy, and pytest | PASS — Ruff clean, mypy clean across 9 files, 17 tests |
 | NSIS installer and desktop shortcut | `scripts/Smoke-RampageInstaller.ps1` | PASS — install 0, uninstall 0, six payloads, controller/intelligence ready, one signed node and offer, shortcut created then removed, no leaked sidecars |
-| Public release assets | [`v0.3.1-recovery.1`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.1) | PASS — 12 uploaded assets, three source-bound manifests, three checksum files, and GitHub build-provenance attestation |
+| Public release assets | [`v0.3.1-recovery.2`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.2) | PASS — 12 uploaded assets, three source-bound manifests, three checksum files, and GitHub build-provenance attestation |
+| Physical owner upgrade and recovery | Public candidate 2 on Windows | PASS — exact public hash, install exit 0, runtime preserved, desktop shortcut present, lifecycle consistent, non-destructive repair restart, controller ready, one resident agent, and one fresh signed offer |
 | Physical owner/laptop re-pair | Fresh 0.3.1 installs | PENDING physical laptop action |
 | Physical owner-to-laptop view | `scripts/Qualify-RampageRemoteAssist.ps1 -ExpectedVersion 0.3.1` | PENDING live opted-in worker |
 
@@ -39,22 +40,27 @@ The source-current Recovery Center capture is
 
 ## Public candidate artifacts
 
-The tag-bound GitHub Actions run rebuilt every package from merged commit
-`51b4c054748200c76bdc45798e705a75da42d98e`. Its Windows manifest reports version 0.3.1,
+The candidate-2 tag-bound GitHub Actions run rebuilt every package from merged commit
+`a6b608e4585ddf84702c288c73872a6d1a5f695c`. Its Windows manifest reports version 0.3.1,
 and the recommended Windows download returned HTTP 200 with the expected byte length after the
 release was published.
 
 | Package | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `Rampage_0.3.1_x64-setup.exe` | 69,112,909 | `22e4ea85dfc63bb2667b32523409acab1b377b0eebd1ea25c9655df53fe73c9c` |
-| `Rampage_0.3.1_x64_en-US.msi` | 78,987,264 | `c6ad9513c9a5667f2964e05034735a5a52bb83033deab92a9a303f601941bb43` |
-| `Rampage_0.3.1_amd64.AppImage` | 168,880,632 | `9d6a05bfed97d0367dc6561a14e70317685d74972953ff86dbed27dd705ee16a` |
-| `Rampage_0.3.1_amd64.deb` | 98,031,344 | `4745a39166d008ceb0d13c902c40745eeb50975364b1b0b7a7f6c6049f886a5d` |
-| `Rampage_0.3.1_aarch64.dmg` | 86,234,740 | `ba00e8feba971d2de6fe19c35cc9ceb978e04bae127b975227f95dbe35d74d04` |
-| `Rampage.app.zip` | 84,272,637 | `644aa2d82823dd1bb226de3bc36bf0dc74699da22f977be339f08f83c953aa01` |
+| `Rampage_0.3.1_x64-setup.exe` | 69,113,786 | `ee7872088b6a9c72aea7c3c01157d8090cf9db020090a8b8078444d4aa3de38f` |
+| `Rampage_0.3.1_x64_en-US.msi` | 78,999,552 | `7973ea3e9a9d53fd576eaba7872cf5683ec0c7b9e3d1eeddcf779a1b12a22ce8` |
+| `Rampage_0.3.1_amd64.AppImage` | 168,905,208 | `c27e050e6c9993fcc9e1715506c1d2e2f3eaf89efcb8352251ec9d8ede853ae3` |
+| `Rampage_0.3.1_amd64.deb` | 98,046,092 | `7480b85d9f6f155f5dfc49f42b4dbbd873acf0fbc81be940c8e56c741fab68ad` |
+| `Rampage_0.3.1_aarch64.dmg` | 86,246,925 | `1c31ece2407183c0952b2e35fbfcd7c96487a34e2dc7537f4dc6f5eec9a5f1a6` |
+| `Rampage.app.zip` | 84,285,483 | `46474441e098ffa3af77ef260adb92041c789e503209aac5a6ddb2f82a674190` |
 
 Candidate Windows and macOS packages are intentionally identified as unsigned/not notarized; the
 workflow keeps production-signing gates reserved for a future stable channel.
+
+Candidate 1 was superseded after the first physical owner upgrade exposed a false recovery warning:
+an owner legitimately self-enrolls its own local agent. Candidate 2 accepts that state only when the
+enrollment marker matches the pinned endpoint and the pinned Ed25519 governor key matches this
+owner's local controller. Foreign, incomplete, and mismatched identities remain fail-closed.
 
 ## Honest boundary
 
