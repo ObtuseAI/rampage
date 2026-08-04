@@ -4,7 +4,7 @@ use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use rampage_protocol::{
     ArtifactRefV1, CapabilityLeaseV1, EnrollmentInviteV1, ExecutionReceiptV1, JobSpecV1,
-    ModelSessionRequestV1, ResourceOfferV1, StorageClass,
+    ModelSessionRequestV1, NodeIdentityV1, ResourceOfferV1, StorageClass,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -51,6 +51,18 @@ impl RampageClient {
     pub async fn create_invite(&self) -> anyhow::Result<EnrollmentInviteV1> {
         self.post("/v1/enrollment/invites", &serde_json::json!({}))
             .await
+    }
+
+    pub async fn nodes(&self) -> anyhow::Result<Vec<NodeIdentityV1>> {
+        self.get("/v1/nodes").await
+    }
+
+    pub async fn revoke_node(&self, node_id: uuid::Uuid) -> anyhow::Result<Value> {
+        self.post(
+            &format!("/v1/nodes/{node_id}/revoke"),
+            &serde_json::json!({"confirmation": format!("FORGET {node_id}")}),
+        )
+        .await
     }
 
     pub async fn plan(&self, job: &JobSpecV1) -> anyhow::Result<Value> {

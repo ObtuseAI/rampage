@@ -3,6 +3,8 @@ param(
     [string]$NodeId,
     [string]$ControllerBase = 'http://127.0.0.1:47831',
     [string]$DataDir = (Join-Path $env:APPDATA 'ai.obtuse.rampage\runtime'),
+    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    [string]$ExpectedVersion = '0.3.1',
     [ValidateRange(5, 60)]
     [int]$TimeoutSeconds = 15
 )
@@ -79,8 +81,8 @@ $health = (Invoke-RampageRequest -Method GET -Path '/health').Body
 if ($health.status -ne 'ready' -or $health.kill_latch -eq $true) {
     throw 'The owner controller is not ready or its STOP latch is active'
 }
-if ($health.version -ne '0.3.0') {
-    throw "Remote Assist qualification requires controller 0.3.0, found $($health.version)"
+if ($health.version -ne $ExpectedVersion) {
+    throw "Remote Assist qualification requires controller $ExpectedVersion, found $($health.version)"
 }
 
 $nodes = @((Invoke-RampageRequest -Method GET -Path '/v1/nodes').Body)
@@ -113,7 +115,7 @@ if ($NodeId) {
         throw "Cannot qualify worker ${NodeId}: $reason"
     }
 } elseif ($eligible.Count -eq 0) {
-    throw 'No live paired worker is advertising opted-in Rampage 0.3.0 Remote Assist'
+    throw "No live paired worker is advertising opted-in Rampage $ExpectedVersion Remote Assist"
 } elseif ($eligible.Count -gt 1) {
     $choices = ($eligible.node_id | Sort-Object) -join ', '
     throw "More than one Remote Assist worker is eligible; rerun with -NodeId. Choices: $choices"

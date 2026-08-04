@@ -1,4 +1,4 @@
-import { Activity, BatteryCharging, Bot, Gauge, Layers3, Network, Sparkles, Zap } from "lucide-react";
+import { Activity, Bot, Gamepad2, Gauge, Layers3, Network, Sparkles, Zap } from "lucide-react";
 import { useRampage } from "../store";
 import type { ComputeStrategy } from "../types";
 
@@ -10,39 +10,39 @@ const strategies: Array<{
   icon: typeof Layers3;
 }> = [
   {
+    id: "autonomous_balanced",
+    label: "Automatic",
+    short: "RAMPAGE CHOOSES",
+    description: "Measure every device and path, then continuously choose the safest high-value role without technical setup.",
+    icon: Sparkles,
+  },
+  {
     id: "maximum_model_size",
-    label: "Maximum Model",
-    short: "BIGGEST LLM",
+    label: "Biggest AI",
+    short: "BIGGEST AI",
     description: "Combine only compatible, qualified model memory to fit the largest possible local model.",
     icon: Layers3,
   },
   {
     id: "speed_boost",
-    label: "Speed Boost",
-    short: "FASTEST CHAT",
+    label: "Fastest AI",
+    short: "FASTEST AI",
     description: "Use tensor peers only when measured links predict faster tokens; otherwise select the fastest whole-model node.",
     icon: Zap,
   },
   {
     id: "maximum_throughput",
-    label: "Throughput",
-    short: "MOST REQUESTS",
+    label: "More Work",
+    short: "MOST WORK",
     description: "Replicate the model across capable nodes for more simultaneous requests and agent work.",
     icon: Network,
   },
   {
     id: "efficiency",
-    label: "Efficiency",
-    short: "LESS ENERGY",
-    description: "Choose the smallest qualified placement that fits while preserving owner reserves.",
-    icon: BatteryCharging,
-  },
-  {
-    id: "autonomous_balanced",
-    label: "Autonomous",
-    short: "EVIDENCE ADAPTS",
-    description: "Let proposal-only intelligence recommend a strategy; the Governor still enforces every promotion gate.",
-    icon: Sparkles,
+    label: "Protect This PC",
+    short: "GAMING-SAFE",
+    description: "Keep foreground CPU, memory, GPU, and network reserves on this PC while moving eligible background work elsewhere.",
+    icon: Gamepad2,
   },
 ];
 
@@ -76,7 +76,7 @@ export function ComputeStrategyPanel() {
             >
               <Icon size={15} />
               <span>{strategy.label}</span>
-              {strategy.id === "maximum_model_size" && <em>FOCUS</em>}
+              {strategy.id === "autonomous_balanced" && <em>RECOMMENDED</em>}
             </button>
           );
         })}
@@ -86,26 +86,29 @@ export function ComputeStrategyPanel() {
           <p>{selected.description}</p>
           <span><Gauge size={14} /> {plan?.reason ?? "Connect the controller to calculate a signed-resource placement preview."}</span>
         </div>
-        <div className="model-targets">
-          <label>
-            Model
-            <input list="rampage-installed-models" value={state.targetModelId} onChange={(event) => state.setTargetModelId(event.target.value)} />
-            <datalist id="rampage-installed-models">
-              {state.gatewayModels.map((model) => <option key={model} value={model} />)}
-            </datalist>
-          </label>
-          <label>
-            Weights GiB
-            <input type="number" min="1" max="16000" value={state.targetModelGiB} onChange={(event) => state.setTargetModelGiB(event.target.valueAsNumber)} />
-          </label>
-          <label>
-            KV reserve GiB
-            <input type="number" min="0" max="1000" value={state.kvCacheGiB} onChange={(event) => state.setKvCacheGiB(event.target.valueAsNumber)} />
-          </label>
-          <button onClick={() => void state.planModelSession()} disabled={state.modelPlanPending}>
-            {state.modelPlanPending ? "Profiling…" : "Plan fabric"}
-          </button>
-        </div>
+        <details className="model-advanced">
+          <summary>Advanced model target</summary>
+          <div className="model-targets">
+            <label>
+              Model
+              <input list="rampage-installed-models" value={state.targetModelId} onChange={(event) => state.setTargetModelId(event.target.value)} />
+              <datalist id="rampage-installed-models">
+                {state.gatewayModels.map((model) => <option key={model} value={model} />)}
+              </datalist>
+            </label>
+            <label>
+              Weights GiB
+              <input type="number" min="1" max="16000" value={state.targetModelGiB} onChange={(event) => state.setTargetModelGiB(event.target.valueAsNumber)} />
+            </label>
+            <label>
+              KV reserve GiB
+              <input type="number" min="0" max="1000" value={state.kvCacheGiB} onChange={(event) => state.setKvCacheGiB(event.target.valueAsNumber)} />
+            </label>
+            <button onClick={() => void state.planModelSession()} disabled={state.modelPlanPending}>
+              {state.modelPlanPending ? "Profiling…" : "Plan fabric"}
+            </button>
+          </div>
+        </details>
         <div className="model-metrics" aria-live="polite">
           <div><span>Requested</span><strong>{formatGiB((state.targetModelGiB + state.kvCacheGiB) * gib)}</strong></div>
           <div><span>Visible memory</span><strong>{plan ? formatGiB(plan.observed_fabric_bytes) : "—"}</strong></div>

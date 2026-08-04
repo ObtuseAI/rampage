@@ -17,7 +17,7 @@ const computeStrategies: ComputeStrategy[] = [
 
 function storedComputeStrategy(): ComputeStrategy {
   const stored = localStorage.getItem("rampage.compute-strategy") as ComputeStrategy | null;
-  return stored && computeStrategies.includes(stored) ? stored : "maximum_model_size";
+  return stored && computeStrategies.includes(stored) ? stored : "autonomous_balanced";
 }
 
 function controllerHeaders(json = false): HeadersInit {
@@ -97,6 +97,27 @@ export interface FabricBenchmarkResult {
   all_results_signed: true;
 }
 
+export interface RecoveryNode {
+  nodeId: string;
+  displayName: string;
+  platform: string;
+  deviceKind: string;
+  live: boolean;
+  local: boolean;
+}
+
+export interface RecoveryStatus {
+  schema: "rampage.recovery-status.v1";
+  version: string;
+  role: "owner" | "worker" | "setup";
+  state: string;
+  healthy: boolean;
+  issues: string[];
+  canLeaveFabric: boolean;
+  canFactoryReset: boolean;
+  nodes: RecoveryNode[];
+}
+
 const initialLocalAiRuntime: LocalAiRuntime = {
   state: "detecting",
   modelId: "qwen3:4b",
@@ -130,6 +151,20 @@ const demoDiagnostic: FabricDiagnosticReport = {
     evidence: "Fresh signed offers show useful idle capacity inside every owner reserve.",
   }],
 };
+const demoRecoveryStatus: RecoveryStatus = {
+  schema: "rampage.recovery-status.v1",
+  version: "0.3.1",
+  role: "owner",
+  state: "owner_active",
+  healthy: true,
+  issues: [],
+  canLeaveFabric: false,
+  canFactoryReset: true,
+  nodes: [
+    { nodeId: "0198f1aa-9f18-7dc3-81a3-d78f22efb660", displayName: "This Device", platform: "windows-x86_64", deviceKind: "desktop", live: true, local: true },
+    { nodeId: "0198f1aa-9f18-7dc3-81a3-d78f22efb662", displayName: "Studio Laptop", platform: "windows-x86_64", deviceKind: "laptop", live: false, local: false },
+  ],
+};
 
 interface RampageState {
   mode: "arena" | "grid";
@@ -146,7 +181,7 @@ interface RampageState {
   meshEndpointId: string | null;
   inviteCode: string | null;
   inviteBundle: string | null;
-  fabricRole: "owner" | "worker";
+  fabricRole: "owner" | "worker" | "setup";
   lastAction: string | null;
   runAtLogin: boolean;
   killLatch: boolean;
@@ -169,6 +204,8 @@ interface RampageState {
   remoteDesktopFrame: RemoteDesktopFramePayload | null;
   remoteDesktopPending: boolean;
   remoteDesktopInputSequence: number;
+  recoveryOpen: boolean;
+  recoveryStatus: RecoveryStatus | null;
   setMode: (mode: "arena" | "grid") => void;
   setSelectedNode: (id: string) => void;
   setCommandOpen: (open: boolean) => void;
@@ -179,7 +216,7 @@ interface RampageState {
   setKvCacheGiB: (gib: number) => void;
   planModelSession: () => Promise<void>;
   copyGatewayConfig: () => Promise<void>;
-  finishOnboarding: () => void;
+  finishOnboarding: () => Promise<void>;
   refresh: () => Promise<void>;
   createInvite: () => Promise<void>;
   joinFabric: (invitation: string) => Promise<void>;
@@ -202,6 +239,12 @@ interface RampageState {
   refreshRemoteDesktopFrame: () => Promise<void>;
   sendRemoteDesktopInput: (events: RemoteInputEvent[]) => Promise<void>;
   closeRemoteDesktop: () => Promise<void>;
+  setRecoveryOpen: (open: boolean) => void;
+  refreshRecovery: () => Promise<void>;
+  repairConnection: () => Promise<void>;
+  leaveFabric: (confirmation: string) => Promise<void>;
+  factoryReset: (confirmation: string) => Promise<void>;
+  forgetNode: (nodeId: string, confirmation: string) => Promise<void>;
 }
 
 function offersToNodes(offers: ResourceOffer[]): FabricNode[] {
@@ -295,6 +338,8 @@ export const useRampage = create<RampageState>((set, get) => ({
   remoteDesktopFrame: null,
   remoteDesktopPending: false,
   remoteDesktopInputSequence: 0,
+  recoveryOpen: false,
+  recoveryStatus: null,
   setMode: (mode) => set({ mode }),
   setSelectedNode: (selectedNode) => set({ selectedNode }),
   setCommandOpen: (commandOpen) => set({ commandOpen }),
@@ -367,18 +412,45 @@ export const useRampage = create<RampageState>((set, get) => ({
       lastAction: "Universal AI gateway settings copied. Treat the shared local API key as a secret.",
     });
   },
-  finishOnboarding: () => {
+  finishOnboarding: async () => {
     localStorage.setItem("rampage.onboarded", "true");
-    set({ onboarding: false });
+    try {
+      await invoke("activate_owner_fabric");
+      set({ onboarding: false, fabricRole: "owner" });
+    } catch (error) {
+      localStorage.removeItem("rampage.onboarded");
+      throw error;
+    }
   },
   refresh: async () => {
     try {
       const [fabricRole, runAtLogin, localAiRuntime, remoteAssistStatus] = await Promise.all([
-        invoke<"owner" | "worker">("fabric_mode").catch(() => "owner" as const),
+        invoke<"owner" | "worker" | "setup">("fabric_mode").catch(() => "owner" as const),
         invoke<boolean>("autostart_enabled").catch(() => get().runAtLogin),
         invoke<LocalAiRuntime>("local_ai_runtime_status").catch(() => get().localAiRuntime),
         invoke<RemoteAssistStatus>("remote_assist_status").catch(() => get().remoteAssistStatus),
       ]);
+      if (fabricRole === "setup") {
+        localStorage.removeItem("rampage.onboarded");
+        set({
+          onboarding: true,
+          fabricRole,
+          connected: false,
+          capability: "blocked",
+          nodes: [],
+          selectedNode: "",
+          workerRuntime: { state: "inactive", nodeId: null, message: null },
+          localAiRuntime,
+          remoteAssistStatus,
+          runAtLogin,
+          killLatch: false,
+          gatewayModels: [],
+          diagnostic: null,
+          lastAction: "This device is clean and ready to create or join a fabric.",
+          lastSync: new Date(),
+        });
+        return;
+      }
       if (fabricRole === "worker") {
         const workerRuntime = await invoke<WorkerRuntime>("worker_runtime_status").catch(() => ({
           state: "failed" as const,
@@ -834,6 +906,103 @@ export const useRampage = create<RampageState>((set, get) => ({
     } catch {
       set({ lastAction: "Remote Assist viewer closed. The worker lease will expire within 30 seconds." });
     }
+  },
+  setRecoveryOpen: (recoveryOpen) => {
+    set({ recoveryOpen });
+    if (recoveryOpen) void get().refreshRecovery();
+  },
+  refreshRecovery: async () => {
+    let native: Omit<RecoveryStatus, "nodes">;
+    try {
+      native = await invoke<Omit<RecoveryStatus, "nodes">>("recovery_status");
+    } catch (error) {
+      if (import.meta.env.DEV) {
+        set({ recoveryStatus: demoRecoveryStatus });
+        return;
+      }
+      const role = get().fabricRole;
+      set({
+        recoveryStatus: {
+          schema: "rampage.recovery-status.v1",
+          version: "unavailable",
+          role,
+          state: "status_unavailable",
+          healthy: false,
+          issues: [error instanceof Error ? error.message : "The native recovery bridge did not respond."],
+          canLeaveFabric: role === "worker",
+          canFactoryReset: true,
+          nodes: [],
+        },
+      });
+      return;
+    }
+    let nodes: RecoveryNode[] = [];
+    if (native.role === "owner") {
+      try {
+        localControllerToken ??= await invoke<string>("controller_token");
+        const [nodesResponse, offersResponse] = await Promise.all([
+          fetch(`${controller}/v1/nodes`, { headers: controllerHeaders() }),
+          fetch(`${controller}/v1/offers`, { headers: controllerHeaders() }),
+        ]);
+        if (nodesResponse.ok && offersResponse.ok) {
+          const enrolled = await nodesResponse.json() as Array<{
+            node_id: string;
+            display_name: string;
+            platform: string;
+            device_kind: string;
+          }>;
+          const offers = await offersResponse.json() as ResourceOffer[];
+          const liveIds = new Set(offers.map((offer) => offer.node_id));
+          nodes = enrolled.map((node) => ({
+            nodeId: node.node_id,
+            displayName: node.display_name,
+            platform: node.platform,
+            deviceKind: node.device_kind,
+            live: liveIds.has(node.node_id),
+            local: node.display_name === "This Device",
+          }));
+        }
+      } catch {
+        // Native recovery remains available even if the owner controller is unhealthy.
+      }
+    }
+    set({ recoveryStatus: { ...native, nodes } });
+  },
+  repairConnection: async () => {
+    set({ lastAction: "Restarting Rampage and rebuilding the local connection path…" });
+    await invoke("repair_connection");
+  },
+  leaveFabric: async (confirmation) => {
+    const prior = localStorage.getItem("rampage.onboarded");
+    localStorage.removeItem("rampage.onboarded");
+    try {
+      await invoke("leave_fabric", { confirmation });
+    } catch (error) {
+      if (prior !== null) localStorage.setItem("rampage.onboarded", prior);
+      throw error;
+    }
+  },
+  factoryReset: async (confirmation) => {
+    const keys = ["rampage.onboarded", "rampage.compute-strategy", "rampage.target-model", "rampage.target-model-gib", "rampage.kv-cache-gib"];
+    const prior = new Map(keys.map((key) => [key, localStorage.getItem(key)]));
+    keys.forEach((key) => localStorage.removeItem(key));
+    try {
+      await invoke("factory_reset", { confirmation });
+    } catch (error) {
+      prior.forEach((value, key) => { if (value !== null) localStorage.setItem(key, value); });
+      throw error;
+    }
+  },
+  forgetNode: async (nodeId, confirmation) => {
+    localControllerToken ??= await invoke<string>("controller_token");
+    const response = await fetch(`${controller}/v1/nodes/${nodeId}/revoke`, {
+      method: "POST",
+      headers: controllerHeaders(true),
+      body: JSON.stringify({ confirmation }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    set({ lastAction: "Machine forgotten. Its offers, leases, sessions, and future access were revoked." });
+    await Promise.all([get().refreshRecovery(), get().refresh()]);
   },
   toggleAutostart: async () => {
     const requested = !get().runAtLogin;

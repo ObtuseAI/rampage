@@ -25,6 +25,25 @@ export interface EnrollmentInvite {
   governor_public_key: string;
 }
 
+export interface NodeIdentity {
+  schema: "rampage.node-identity.v1";
+  node_id: string;
+  owner_id: string;
+  display_name: string;
+  device_kind: "desktop" | "laptop" | "server" | "steam_deck" | "phone" | "tablet" | "console";
+  platform: string;
+  public_key: string;
+  enrolled_at: string;
+  fencing_epoch: number;
+}
+
+export interface NodeRevocationReceipt {
+  schema: "rampage.node-revocation-receipt.v1";
+  node_id: string;
+  revoked: true;
+  remote_assist_sessions_closed: number;
+}
+
 export interface ExecutionReceipt {
   schema: "rampage.execution-receipt.v1";
   receipt_id: string;
@@ -420,6 +439,18 @@ export class RampageClient {
 
   invite(): Promise<EnrollmentInvite> {
     return this.request("/v1/enrollment/invites", { method: "POST", body: "{}" });
+  }
+
+  nodes(): Promise<NodeIdentity[]> {
+    return this.request("/v1/nodes");
+  }
+
+  revokeNode(nodeId: string): Promise<NodeRevocationReceipt> {
+    const encodedNodeId = encodeURIComponent(nodeId);
+    return this.request(
+      `/v1/nodes/${encodedNodeId}/revoke`,
+      this.json({ confirmation: `FORGET ${nodeId}` }),
+    );
   }
 
   discover(path: string): Promise<unknown> {

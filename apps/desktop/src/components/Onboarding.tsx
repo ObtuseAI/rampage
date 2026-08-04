@@ -13,6 +13,7 @@ export function Onboarding() {
   const joinFabric = useRampage((state) => state.joinFabric);
   const beginPairing = useRampage((state) => state.beginPairing);
   const cancelPairing = useRampage((state) => state.cancelPairing);
+  const openRecovery = useRampage((state) => state.setRecoveryOpen);
   const pairing = useRampage((state) => state.workerPairing);
   const [step, setStep] = useState(0);
   const [choice, setChoice] = useState<"owner" | "worker">("owner");
@@ -66,12 +67,13 @@ export function Onboarding() {
             }
             return;
           }
-          step < steps.length - 1 ? setStep(step + 1) : finish();
+          step < steps.length - 1 ? setStep(step + 1) : void finish().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not start this fabric."));
         }}>
           {step === 0 && choice === "worker"
             ? pairing.state === "idle" || pairing.state === "failed" ? "Find my fabric" : pairing.state === "approved" ? "Finishing securely…" : "Waiting for main PC…"
             : step < steps.length - 1 ? "Continue" : "Enter Rampage"} <ArrowRight size={17} />
         </button>
+        <button type="button" className="onboarding-recovery" onClick={() => openRecovery(true)}>Already paired or stuck? Fix Rampage</button>
       </section>
     </div>
   );
