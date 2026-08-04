@@ -153,6 +153,7 @@ export interface FabricNode {
   modelMemoryAvailableGb?: number;
   modelRuntimeCount?: number;
   artifactEndpoint: boolean;
+  remoteAssist: boolean;
   latencyMs?: number;
   downlinkMbps?: number;
   uplinkMbps?: number;
@@ -161,3 +162,43 @@ export interface FabricNode {
   y: number;
   z: number;
 }
+
+export interface RemoteAssistStatus {
+  supported: boolean;
+  enabled: boolean;
+  active: boolean;
+  sessionId: string | null;
+  mode: "view" | "control" | null;
+  expiresAt: string | null;
+}
+
+export interface RemoteDesktopSession {
+  schema: "rampage.remote-desktop-lease.v1";
+  lease_id: string;
+  session_id: string;
+  node_id: string;
+  mode: "view" | "control";
+  max_width: number;
+  max_height: number;
+  max_fps: number;
+  expires_at: string;
+}
+
+export interface RemoteDesktopFramePayload {
+  schema: "rampage.remote-desktop-frame-payload.v1";
+  session_id: string;
+  frame: {
+    sequence: number;
+    captured_at: string;
+    width: number;
+    height: number;
+    media_type: "image/jpeg";
+  };
+  data_base64: string;
+}
+
+export type RemoteInputEvent =
+  | { kind: "mouse_move"; x: number; y: number }
+  | { kind: "mouse_button"; button: "left" | "right" | "middle"; pressed: boolean }
+  | { kind: "mouse_wheel"; delta: number }
+  | { kind: "key"; virtual_key: number; pressed: boolean };

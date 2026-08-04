@@ -28,7 +28,14 @@ tokio.workspace = true
 uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_System_Power"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+windows = { workspace = true, features = [
+    "Win32_Graphics_Gdi",
+    "Win32_System_Power",
+    "Win32_System_StationsAndDesktops",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 axum.workspace = true

@@ -1,4 +1,4 @@
-import { Activity, Boxes, BrainCircuit, CircleStop, Command, Grid2X2, Orbit, Play, RefreshCw, Rocket, ShieldCheck, UserPlus } from "lucide-react";
+import { Activity, Boxes, BrainCircuit, CircleStop, Command, Eye, Grid2X2, MonitorUp, MousePointer2, Orbit, Play, RefreshCw, Rocket, ShieldCheck, UserPlus } from "lucide-react";
 import { lazy, Suspense, useEffect } from "react";
 import { CommandPalette } from "./components/CommandPalette";
 import { ComputeStrategyPanel } from "./components/ComputeStrategyPanel";
@@ -6,6 +6,7 @@ import { ArenaBoundary, ArenaLoading } from "./components/ArenaBoundary";
 import { PairingPanel } from "./components/PairingPanel";
 import { Onboarding } from "./components/Onboarding";
 import { OpsGrid } from "./components/OpsGrid";
+import { RemoteAssistPanel } from "./components/RemoteAssistPanel";
 import { useRampage } from "./store";
 
 const Arena = lazy(() => import("./components/Arena").then((module) => ({ default: module.Arena })));
@@ -24,14 +25,21 @@ export default function App() {
     const interval = window.setInterval(() => void useRampage.getState().refreshPairing(), 1_000);
     return () => window.clearInterval(interval);
   }, [state.onboarding, state.pairingWindow?.open, state.workerPairing.state]);
+  useEffect(() => {
+    if (state.fabricRole !== "worker") return;
+    void state.refreshRemoteAssistStatus();
+    const interval = window.setInterval(() => void useRampage.getState().refreshRemoteAssistStatus(), 1_000);
+    return () => window.clearInterval(interval);
+  }, [state.fabricRole]);
   const selected = state.nodes.find((node) => node.id === state.selectedNode) ?? state.nodes[0];
   return (
     <div className="shell">
       {state.onboarding && <Onboarding />}
       <CommandPalette />
+      <RemoteAssistPanel />
       <header className="topbar">
         <div className="identity"><div className="brand-mark">R</div><div><strong>RAMPAGE</strong><span>PERSONAL COMPUTE FABRIC</span></div></div>
-        <div className="status-ribbon" role="status"><i className={state.connected && !state.killLatch ? "online" : "reduced"} /><strong>{state.killLatch ? "OWNER STOPPED" : state.fabricRole === "worker" ? state.workerRuntime.state === "active" ? "WORKER ACTIVE" : state.workerRuntime.state === "starting" ? "WORKER CONNECTING" : "WORKER ATTENTION" : state.connected ? "FABRIC LIVE" : "LOCAL REDUCED"}</strong><span>{state.nodes.length} nodes</span><span>{state.meshMode.replace("_", " ")}</span><span>{state.diagnostic ? `self-scan ${state.diagnostic.health_score}/100` : state.capability.replaceAll("_", " ")}</span></div>
+        <div className={`status-ribbon ${state.remoteAssistStatus.active ? "remote-active" : ""}`} role="status"><i className={state.connected && !state.killLatch ? "online" : "reduced"} /><strong>{state.killLatch ? "OWNER STOPPED" : state.remoteAssistStatus.active ? "REMOTE CONTROL ACTIVE" : state.fabricRole === "worker" ? state.workerRuntime.state === "active" ? "WORKER ACTIVE" : state.workerRuntime.state === "starting" ? "WORKER CONNECTING" : "WORKER ATTENTION" : state.connected ? "FABRIC LIVE" : "LOCAL REDUCED"}</strong><span>{state.nodes.length} nodes</span><span>{state.meshMode.replace("_", " ")}</span><span>{state.diagnostic ? `self-scan ${state.diagnostic.health_score}/100` : state.capability.replaceAll("_", " ")}</span></div>
         <div className="header-actions">
           <button className="icon-button" onClick={() => void state.refresh()} aria-label="Refresh fabric"><RefreshCw size={17} /></button>
           {state.fabricRole === "owner" && <button className="command-button" onClick={() => void state.openPairingWindow().catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Pairing could not start." }))}><UserPlus size={15} /> Add machine</button>}
@@ -72,8 +80,13 @@ export default function App() {
           <div className="orbital-gauge" style={{ "--value": `${selected.cpu * 3.6}deg` } as React.CSSProperties}><strong>{selected.cpu}%</strong><span>CPU LOAD</span></div>
           <dl><div><dt>Memory</dt><dd>{selected.memory}%</dd></div><div><dt>GPU</dt><dd>{selected.gpu}%</dd></div><div><dt>Model lane</dt><dd>{selected.modelRuntimeCount ? `${selected.modelMemoryAvailableGb} GB · ${selected.modelRuntimeCount} runtime${selected.modelRuntimeCount === 1 ? "" : "s"}` : "Not qualified"}</dd></div><div><dt>Donated storage</dt><dd>{selected.storageAvailableGb} GB free</dd></div><div><dt>Fabric link</dt><dd>{selected.topologyConfidence === "measured" ? `${selected.latencyMs} ms / ${selected.downlinkMbps} Mbps down` : selected.topologyConfidence === "controller_local" ? "Controller local" : "Awaiting signed benchmark"}</dd></div><div><dt>Kind</dt><dd>{selected.kind.replace("_", " ")}</dd></div><div><dt>Policy</dt><dd>Owner protected</dd></div></dl>
           <div className="explanation"><ShieldCheck size={18} /><div><strong>Why this state?</strong><p>{selected.state === "sleeping" ? "Charging and foreground conditions are not currently satisfied." : "The node is inside owner reserves and its capability offer is admissible."}</p></div></div>
+          {state.fabricRole === "worker" && <div className={`remote-permission ${state.remoteAssistStatus.active ? "active" : ""}`}>
+            <div><MonitorUp size={18} /><div><strong>Owner Remote Assist</strong><p>{state.remoteAssistStatus.active ? `Your owner is ${state.remoteAssistStatus.mode === "control" ? "controlling" : "viewing"} this desktop now. Lock screen and admin prompts stay blocked.` : "Let your paired owner view or control this unlocked Windows desktop. Lock screen and admin prompts stay blocked."}</p></div></div>
+            <label className="permission-switch"><span>{state.remoteAssistStatus.enabled ? "Allowed" : "Off"}</span><input aria-label="Allow owner remote control" type="checkbox" checked={state.remoteAssistStatus.enabled} disabled={!state.remoteAssistStatus.supported} onChange={(event) => void state.setRemoteAssistEnabled(event.currentTarget.checked)} /><i /></label>
+          </div>}
           {state.diagnostic && <div className="explanation"><BrainCircuit size={18} /><div><strong>Autonomous self-scan · {state.diagnostic.status} · {state.diagnostic.health_score}/100</strong><p>{state.diagnostic.findings.find((finding) => finding.severity !== "info")?.evidence ?? "No warning or critical bottleneck is present in the latest evidence window."} No per-change approval is required inside the owner envelope.</p></div></div>}
           <button className="secondary">Open evidence trail</button>
+          {state.fabricRole === "owner" && selected.remoteAssist && <div className="remote-launch-actions"><button disabled={state.remoteDesktopPending || state.killLatch} onClick={() => void state.openRemoteDesktop(selected.id, "view").catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Remote view failed." }))}><Eye size={16} /> View desktop</button><button className="control" disabled={state.remoteDesktopPending || state.killLatch} onClick={() => void state.openRemoteDesktop(selected.id, "control").catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Remote control failed." }))}><MousePointer2 size={16} /> Control desktop</button></div>}
           {state.fabricRole === "owner" && <label className="secondary file-action">{selected.artifactEndpoint ? "Encrypt + replicate file" : "Encrypt file locally"}<input type="file" onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void state.storeFile(file, selected.id).catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Artifact transfer failed." })); event.currentTarget.value = ""; }} /></label>}
           {state.inviteCode && <div className="explanation"><ShieldCheck size={18} /><div><strong>One-time invite</strong><p>{state.inviteCode}</p>{state.inviteBundle && <button className="secondary" onClick={() => void navigator.clipboard.writeText(state.inviteBundle!)}>Copy complete invite</button>}</div></div>}
           </> : <div className="empty-fabric"><p className="eyebrow">NO ACTIVE NODES</p><h2>Add your first machine</h2><p>Rampage will show only enrolled machines with fresh signed offers. Showcase devices never appear in production.</p><button className="secondary" onClick={() => void state.openPairingWindow().catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Pairing could not start." }))}><UserPlus size={16} /> Find nearby laptop</button></div>}

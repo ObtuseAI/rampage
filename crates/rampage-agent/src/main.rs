@@ -1,4 +1,5 @@
 mod discovery;
+mod remote_assist;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{Duration, Utc};
@@ -11,7 +12,7 @@ use rampage_protocol::{
     LINK_BENCHMARK_TRANSFER_BYTES, LinkBenchmarkV1, MAX_MODEL_OUTPUT_BYTES, MeshControlRequestV1,
     MeshEndpointRecordV1, ModelExecutionReceiptV1, ModelInvocationFrameKind,
     ModelInvocationFrameV1, ModelInvocationRequestV1, ModelUsageV1, NodeIdentityV1,
-    ResourceOfferV1, StorageClass, WorkClaimV1,
+    RemoteDesktopResponseV1, ResourceOfferV1, StorageClass, WorkClaimV1,
 };
 use rand::{TryRng as _, rngs::SysRng};
 use sha2::{Digest, Sha256};
@@ -189,6 +190,9 @@ fn main() -> anyhow::Result<()> {
     if has_ollama {
         adapters.insert("rampage.ollama.v1".into());
     }
+    if remote_assist::enabled(&data_dir) {
+        adapters.insert("rampage.remote-assist.v1".into());
+    }
     let model_runtimes = match discovery::discover_model_runtimes(
         &discovered.resources,
         has_ollama,
@@ -283,7 +287,7 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             let now = Utc::now();
-            refresh_dynamic_model_capabilities(&mut offer, &ollama_base_url);
+            refresh_dynamic_capabilities(&mut offer, &ollama_base_url, &data_dir);
             offer.offer_id = Uuid::now_v7();
             offer.observed_at = now;
             offer.expires_at = now + Duration::seconds(45);
@@ -372,12 +376,22 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn refresh_dynamic_model_capabilities(offer: &mut ResourceOfferV1, ollama_base_url: &str) {
+fn refresh_dynamic_capabilities(
+    offer: &mut ResourceOfferV1,
+    ollama_base_url: &str,
+    data_dir: &Path,
+) {
     let has_ollama = discovery::ollama_available(ollama_base_url);
     if has_ollama {
         offer.adapters.insert("rampage.ollama.v1".into());
     } else {
         offer.adapters.remove("rampage.ollama.v1");
+    }
+    if remote_assist::enabled(data_dir) {
+        offer.adapters.insert("rampage.remote-assist.v1".into());
+    } else {
+        offer.adapters.remove("rampage.remote-assist.v1");
+        remote_assist::clear_active(data_dir);
     }
     offer.model_runtimes =
         match discovery::discover_model_runtimes(&offer.resources, has_ollama, ollama_base_url) {
@@ -585,12 +599,16 @@ impl ControllerTransport {
         ))?;
         runtime.spawn(serve_worker_gateway(
             endpoint.clone(),
-            mesh_record.endpoint_id.clone(),
-            node_id,
-            governor_key.to_string(),
-            artifact_store,
-            SigningKey::from_bytes(&signing_key.to_bytes()),
-            ollama_base_url.to_string(),
+            WorkerGatewayConfig {
+                controller_endpoint_id: mesh_record.endpoint_id.clone(),
+                node_id,
+                governor_public_key: governor_key.to_string(),
+                store: artifact_store,
+                signing_key: SigningKey::from_bytes(&signing_key.to_bytes()),
+                ollama_base_url: ollama_base_url.to_string(),
+                data_dir: data_dir.to_path_buf(),
+                remote_authority: std::sync::Arc::new(remote_assist::SessionAuthority::default()),
+            },
         ));
         Ok(Self::Mesh(MeshController {
             runtime,
@@ -901,21 +919,28 @@ fn signed_replica_receipt(
     receipt
 }
 
-async fn serve_worker_gateway(
-    endpoint: iroh::Endpoint,
+#[derive(Clone)]
+struct WorkerGatewayConfig {
     controller_endpoint_id: String,
     node_id: Uuid,
     governor_public_key: String,
     store: std::sync::Arc<rampage_storage::CasStore>,
     signing_key: SigningKey,
     ollama_base_url: String,
-) {
+    data_dir: PathBuf,
+    remote_authority: std::sync::Arc<remote_assist::SessionAuthority>,
+}
+
+async fn serve_worker_gateway(endpoint: iroh::Endpoint, config: WorkerGatewayConfig) {
     while let Some(incoming) = endpoint.accept().await {
-        let store = store.clone();
-        let controller_endpoint_id = controller_endpoint_id.clone();
-        let governor_public_key = governor_public_key.clone();
-        let signing_key = signing_key.clone();
-        let ollama_base_url = ollama_base_url.clone();
+        let store = config.store.clone();
+        let controller_endpoint_id = config.controller_endpoint_id.clone();
+        let node_id = config.node_id;
+        let governor_public_key = config.governor_public_key.clone();
+        let signing_key = config.signing_key.clone();
+        let ollama_base_url = config.ollama_base_url.clone();
+        let data_dir = config.data_dir.clone();
+        let remote_authority = config.remote_authority.clone();
         tokio::spawn(async move {
             let Ok(connection) = incoming.await else {
                 return;
@@ -934,6 +959,19 @@ async fn serve_worker_gateway(
                     store,
                     signing_key,
                     ollama_base_url,
+                )
+                .await;
+                return;
+            }
+            if connection.alpn() == rampage_mesh::REMOTE_DESKTOP_ALPN {
+                serve_remote_desktop_connection(
+                    connection,
+                    &peer,
+                    node_id,
+                    &governor_public_key,
+                    store,
+                    data_dir,
+                    remote_authority,
                 )
                 .await;
                 return;
@@ -1123,6 +1161,64 @@ async fn serve_worker_gateway(
                         rampage_mesh::write_artifact_response(&mut send, &response, &payload).await;
                 });
             }
+        });
+    }
+}
+
+async fn serve_remote_desktop_connection(
+    connection: iroh::endpoint::Connection,
+    controller_endpoint_id: &str,
+    node_id: Uuid,
+    governor_public_key: &str,
+    store: std::sync::Arc<rampage_storage::CasStore>,
+    data_dir: PathBuf,
+    authority: std::sync::Arc<remote_assist::SessionAuthority>,
+) {
+    while let Ok((mut send, mut receive)) = connection.accept_bi().await {
+        let controller_endpoint_id = controller_endpoint_id.to_string();
+        let governor_public_key = governor_public_key.to_string();
+        let store = store.clone();
+        let data_dir = data_dir.clone();
+        let authority = authority.clone();
+        tokio::spawn(async move {
+            let parsed = rampage_mesh::read_remote_desktop_request(&mut receive).await;
+            let request_id = parsed
+                .as_ref()
+                .map(|request| request.request_id)
+                .unwrap_or_else(|_| Uuid::nil());
+            let result = match parsed {
+                Ok(request) => tokio::task::spawn_blocking(move || {
+                    remote_assist::handle_request(
+                        request,
+                        node_id,
+                        &controller_endpoint_id,
+                        &governor_public_key,
+                        store.as_ref(),
+                        &data_dir,
+                        authority.as_ref(),
+                    )
+                })
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result),
+                Err(error) => Err(error),
+            };
+            let (response, payload) = match result {
+                Ok(result) => result,
+                Err(error) => (
+                    RemoteDesktopResponseV1 {
+                        schema: RemoteDesktopResponseV1::SCHEMA.into(),
+                        request_id,
+                        status: 403,
+                        frame: None,
+                        applied_events: 0,
+                        error: Some(bounded_error(&error.to_string())),
+                    },
+                    Vec::new(),
+                ),
+            };
+            let _ =
+                rampage_mesh::write_remote_desktop_response(&mut send, &response, &payload).await;
         });
     }
 }
@@ -1914,12 +2010,16 @@ mod tests {
             std::sync::Arc::new(rampage_storage::CasStore::open(temp.path(), [73_u8; 32]).unwrap());
         let gateway = tokio::spawn(serve_worker_gateway(
             worker.clone(),
-            controller.id().to_string(),
-            node_id,
-            governor_key.clone(),
-            store,
-            agent_key.clone(),
-            ollama_url,
+            WorkerGatewayConfig {
+                controller_endpoint_id: controller.id().to_string(),
+                node_id,
+                governor_public_key: governor_key.clone(),
+                store,
+                signing_key: agent_key.clone(),
+                ollama_base_url: ollama_url,
+                data_dir: temp.path().to_path_buf(),
+                remote_authority: std::sync::Arc::new(remote_assist::SessionAuthority::default()),
+            },
         ));
         let model = InstalledModelV1 {
             schema: InstalledModelV1::SCHEMA.into(),
@@ -2036,12 +2136,16 @@ mod tests {
             std::sync::Arc::new(rampage_storage::CasStore::open(temp.path(), [83_u8; 32]).unwrap());
         let gateway = tokio::spawn(serve_worker_gateway(
             worker.clone(),
-            controller.id().to_string(),
-            node_id,
-            governor_key.clone(),
-            store.clone(),
-            agent_key.clone(),
-            "http://127.0.0.1:11434".into(),
+            WorkerGatewayConfig {
+                controller_endpoint_id: controller.id().to_string(),
+                node_id,
+                governor_public_key: governor_key.clone(),
+                store: store.clone(),
+                signing_key: agent_key.clone(),
+                ollama_base_url: "http://127.0.0.1:11434".into(),
+                data_dir: temp.path().to_path_buf(),
+                remote_authority: std::sync::Arc::new(remote_assist::SessionAuthority::default()),
+            },
         ));
         let now = Utc::now();
         let offer = ResourceOfferV1 {
@@ -2122,12 +2226,16 @@ mod tests {
                 .unwrap();
         let restarted_gateway = tokio::spawn(serve_worker_gateway(
             restarted_worker.clone(),
-            controller.id().to_string(),
-            node_id,
-            governor_key,
-            reopened.clone(),
-            agent_key.clone(),
-            "http://127.0.0.1:11434".into(),
+            WorkerGatewayConfig {
+                controller_endpoint_id: controller.id().to_string(),
+                node_id,
+                governor_public_key: governor_key,
+                store: reopened.clone(),
+                signing_key: agent_key.clone(),
+                ollama_base_url: "http://127.0.0.1:11434".into(),
+                data_dir: temp.path().to_path_buf(),
+                remote_authority: std::sync::Arc::new(remote_assist::SessionAuthority::default()),
+            },
         ));
         let resumed = rampage_mesh::artifact_put(
             &controller,

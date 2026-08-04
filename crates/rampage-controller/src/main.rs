@@ -19,8 +19,9 @@ use rampage_controller::{
 use rampage_ledger::{Ledger, LedgerEvent};
 use rampage_mesh::{MeshConfig, MeshMode, MeshNode};
 use rampage_policy::{
-    Governor, GovernorConfig, ModelSessionLimits, verify_artifact_replica_receipt,
-    verify_enrollment, verify_mesh_endpoint_with_key, verify_model_receipt, verify_offer,
+    Governor, GovernorConfig, ModelSessionLimits, RemoteDesktopLimits,
+    verify_artifact_replica_receipt, verify_enrollment, verify_mesh_endpoint_with_key,
+    verify_model_receipt, verify_offer,
 };
 use rampage_protocol::{
     ArtifactRefV1, ArtifactReplicaReceiptV1, ArtifactTransferOperation, CapabilityLeaseV1,
@@ -31,8 +32,9 @@ use rampage_protocol::{
     ModelExecutionReceiptV1, ModelInvocationFrameKind, ModelInvocationRequestV1, ModelMemoryKind,
     ModelParallelism, ModelRuntimeOfferV1, ModelRuntimeStatus, ModelSessionLeaseV1,
     ModelSessionRequestV1, ModelUsageV1, NodeIdentityV1, PromotionCanaryLeaseV1,
-    PromotionCandidateV1, RelayAccessManifestV1, ResourceClass, ResourceOfferV1, ShardSetV1,
-    StorageClass, StorageLeaseV1, WorkClaimV1,
+    PromotionCandidateV1, RelayAccessManifestV1, RemoteDesktopActionV1, RemoteDesktopLeaseV1,
+    RemoteDesktopModeV1, RemoteDesktopRequestV1, RemoteInputEventV1, ResourceClass,
+    ResourceOfferV1, ShardSetV1, StorageClass, StorageLeaseV1, WorkClaimV1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -86,6 +88,7 @@ struct AppState {
     diagnostic_report: Arc<RwLock<Option<FabricDiagnosticReport>>>,
     diagnostic_digest: Arc<RwLock<Option<String>>>,
     autonomous_constraints: Arc<RwLock<AutonomousConstraints>>,
+    remote_desktop_sessions: Arc<RwLock<HashMap<Uuid, RemoteDesktopSession>>>,
 }
 
 #[derive(Clone)]
@@ -105,6 +108,12 @@ struct Assignment {
 struct ShardSetRecord {
     spec: ShardSetV1,
     leases: Vec<CapabilityLeaseV1>,
+}
+
+#[derive(Clone)]
+struct RemoteDesktopSession {
+    lease: RemoteDesktopLeaseV1,
+    control_started: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -242,6 +251,20 @@ struct LinkProbeRequest {
     download_bytes: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenRemoteDesktopRequest {
+    node_id: Uuid,
+    mode: RemoteDesktopModeV1,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteDesktopInputRequest {
+    sequence: u64,
+    events: Vec<RemoteInputEventV1>,
+}
+
 const DEFAULT_MESH_UDP_PORT: u16 = 47_838;
 
 #[tokio::main]
@@ -355,6 +378,7 @@ async fn main() -> anyhow::Result<()> {
         diagnostic_report: Arc::new(RwLock::new(None)),
         diagnostic_digest: Arc::new(RwLock::new(None)),
         autonomous_constraints: Arc::new(RwLock::new(AutonomousConstraints::default())),
+        remote_desktop_sessions: Arc::new(RwLock::new(HashMap::new())),
     };
     refresh_diagnostics(&state).map_err(anyhow::Error::msg)?;
     tokio::spawn(run_diagnostic_loop(state.clone()));
@@ -388,6 +412,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/artifacts/retrieve", post(retrieve_artifact))
         .route("/v1/artifacts/repair", post(repair_protected_artifacts))
         .route("/v1/benchmarks/link", post(link_probe))
+        .route("/v1/remote-assist/sessions", post(open_remote_desktop))
+        .route(
+            "/v1/remote-assist/sessions/{session_id}/frame",
+            get(remote_desktop_frame),
+        )
+        .route(
+            "/v1/remote-assist/sessions/{session_id}/input",
+            post(remote_desktop_input),
+        )
+        .route(
+            "/v1/remote-assist/sessions/{session_id}/close",
+            post(close_remote_desktop),
+        )
         .route("/v1/mesh/relay-access", get(relay_access_manifest))
         .route("/v1/governor/key", get(governor_key))
         .route("/v1/improvements/canary", post(authorize_promotion_canary))
@@ -1945,12 +1982,22 @@ async fn local_stop(
     for cancellation in state.model_cancellations.lock().await.values() {
         let _ = cancellation.send(true);
     }
+    let remote_sessions_closed = state
+        .remote_desktop_sessions
+        .write()
+        .map_err(lock_error)?
+        .drain()
+        .count();
     state
         .ledger
         .append(
             "fabric.owner_stop",
             "local-fabric",
-            &json!({"source": "local-api", "fencing_epoch": fencing_epoch}),
+            &json!({
+                "source": "local-api",
+                "fencing_epoch": fencing_epoch,
+                "remote_assist_sessions_closed": remote_sessions_closed
+            }),
         )
         .map_err(internal_error)?;
     Ok((
@@ -1998,6 +2045,330 @@ async fn local_resume(
             "fencing_epoch": state.fencing_epoch.load(Ordering::Acquire)
         })),
     ))
+}
+
+const REMOTE_DESKTOP_WIDTH: u32 = 1_920;
+const REMOTE_DESKTOP_HEIGHT: u32 = 1_080;
+const REMOTE_DESKTOP_FPS: u16 = 10;
+const MAX_REMOTE_DESKTOP_SESSIONS: usize = 16;
+
+fn remote_desktop_request_for(
+    lease: RemoteDesktopLeaseV1,
+    action: RemoteDesktopActionV1,
+    input_sequence: Option<u64>,
+    events: Vec<RemoteInputEventV1>,
+) -> RemoteDesktopRequestV1 {
+    RemoteDesktopRequestV1 {
+        schema: RemoteDesktopRequestV1::SCHEMA.into(),
+        request_id: Uuid::now_v7(),
+        lease,
+        action,
+        input_sequence,
+        events,
+    }
+}
+
+async fn open_remote_desktop(
+    State(state): State<AppState>,
+    Json(request): Json<OpenRemoteDesktopRequest>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    let _admission_guard = state.admission_gate.lock().await;
+    if state.kill_latch_path.is_file() {
+        return Err((
+            StatusCode::LOCKED,
+            Json(json!({"error": "owner kill latch is active"})),
+        ));
+    }
+    {
+        let now = chrono::Utc::now();
+        let mut sessions = state.remote_desktop_sessions.write().map_err(lock_error)?;
+        sessions.retain(|_, record| record.lease.expires_at > now);
+        if sessions.len() >= MAX_REMOTE_DESKTOP_SESSIONS {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({"error": "remote assist session limit reached"})),
+            ));
+        }
+        if sessions
+            .values()
+            .any(|record| record.lease.node_id == request.node_id)
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error": "this worker already has an active remote assist session"})),
+            ));
+        }
+    }
+
+    let (offer, endpoint) = remote_offer(&state, request.node_id)?;
+    let session_id = Uuid::now_v7();
+    let lease = state
+        .governor
+        .authorize_remote_desktop_at_epoch(
+            &offer,
+            &state.mesh.endpoint_id(),
+            session_id,
+            request.mode,
+            RemoteDesktopLimits {
+                max_width: REMOTE_DESKTOP_WIDTH,
+                max_height: REMOTE_DESKTOP_HEIGHT,
+                max_fps: REMOTE_DESKTOP_FPS,
+            },
+            state.fencing_epoch.load(Ordering::Acquire),
+        )
+        .map_err(|error| {
+            (
+                StatusCode::CONFLICT,
+                Json(json!({"error": error.to_string()})),
+            )
+        })?;
+    let heartbeat = remote_desktop_request_for(
+        lease.clone(),
+        RemoteDesktopActionV1::Heartbeat,
+        None,
+        Vec::new(),
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        rampage_mesh::remote_desktop_request(&state.mesh.endpoint(), endpoint, &heartbeat),
+    )
+    .await
+    .map_err(|_| remote_desktop_mesh_error("worker did not acknowledge remote assist"))?
+    .map_err(remote_desktop_mesh_error)?;
+    state
+        .remote_desktop_sessions
+        .write()
+        .map_err(lock_error)?
+        .insert(
+            session_id,
+            RemoteDesktopSession {
+                lease: lease.clone(),
+                control_started: false,
+            },
+        );
+    state
+        .ledger
+        .append(
+            "remote_assist.session.opened",
+            &session_id.to_string(),
+            &json!({
+                "node_id": request.node_id,
+                "mode": request.mode,
+                "expires_at": lease.expires_at,
+                "secure_desktop_authority": false,
+                "elevation_authority": false
+            }),
+        )
+        .map_err(internal_error)?;
+    Ok((StatusCode::CREATED, Json(json!({"session": lease}))))
+}
+
+fn current_remote_desktop_session(
+    state: &AppState,
+    session_id: Uuid,
+) -> Result<(RemoteDesktopLeaseV1, iroh::EndpointAddr), (StatusCode, Json<Value>)> {
+    let now = chrono::Utc::now();
+    let current = state
+        .remote_desktop_sessions
+        .read()
+        .map_err(lock_error)?
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "remote assist session was not found"})),
+            )
+        })?;
+    if current.lease.expires_at <= now {
+        state
+            .remote_desktop_sessions
+            .write()
+            .map_err(lock_error)?
+            .remove(&session_id);
+        return Err((
+            StatusCode::GONE,
+            Json(json!({"error": "remote assist session expired"})),
+        ));
+    }
+    let (offer, endpoint) = remote_offer(state, current.lease.node_id)?;
+    if current.lease.expires_at - now > chrono::Duration::seconds(10) {
+        return Ok((current.lease, endpoint));
+    }
+    let renewed = state
+        .governor
+        .authorize_remote_desktop_at_epoch(
+            &offer,
+            &state.mesh.endpoint_id(),
+            session_id,
+            current.lease.mode,
+            RemoteDesktopLimits {
+                max_width: current.lease.max_width,
+                max_height: current.lease.max_height,
+                max_fps: current.lease.max_fps,
+            },
+            state.fencing_epoch.load(Ordering::Acquire),
+        )
+        .map_err(|error| {
+            (
+                StatusCode::CONFLICT,
+                Json(json!({"error": error.to_string()})),
+            )
+        })?;
+    state
+        .remote_desktop_sessions
+        .write()
+        .map_err(lock_error)?
+        .insert(
+            session_id,
+            RemoteDesktopSession {
+                lease: renewed.clone(),
+                control_started: current.control_started,
+            },
+        );
+    Ok((renewed, endpoint))
+}
+
+async fn remote_desktop_frame(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if state.kill_latch_path.is_file() {
+        return Err((
+            StatusCode::LOCKED,
+            Json(json!({"error": "owner kill latch is active"})),
+        ));
+    }
+    let (lease, endpoint) = current_remote_desktop_session(&state, session_id)?;
+    let request = remote_desktop_request_for(lease, RemoteDesktopActionV1::Frame, None, Vec::new());
+    let (response, payload) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        rampage_mesh::remote_desktop_request(&state.mesh.endpoint(), endpoint, &request),
+    )
+    .await
+    .map_err(|_| remote_desktop_mesh_error("worker frame request timed out"))?
+    .map_err(remote_desktop_mesh_error)?;
+    let frame = response.frame.ok_or_else(|| {
+        remote_desktop_mesh_error("worker response did not contain a desktop frame")
+    })?;
+    Ok(Json(json!({
+        "schema": "rampage.remote-desktop-frame-payload.v1",
+        "session_id": session_id,
+        "frame": frame,
+        "data_base64": BASE64.encode(payload)
+    })))
+}
+
+async fn remote_desktop_input(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    Json(input): Json<RemoteDesktopInputRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if state.kill_latch_path.is_file() {
+        return Err((
+            StatusCode::LOCKED,
+            Json(json!({"error": "owner kill latch is active"})),
+        ));
+    }
+    let (lease, endpoint) = current_remote_desktop_session(&state, session_id)?;
+    if lease.mode != RemoteDesktopModeV1::Control {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "this remote assist session is view-only"})),
+        ));
+    }
+    let request = remote_desktop_request_for(
+        lease,
+        RemoteDesktopActionV1::Input,
+        Some(input.sequence),
+        input.events,
+    );
+    if !request.is_valid_for(request.lease.node_id, &state.mesh.endpoint_id()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid remote input batch"})),
+        ));
+    }
+    let (response, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        rampage_mesh::remote_desktop_request(&state.mesh.endpoint(), endpoint, &request),
+    )
+    .await
+    .map_err(|_| remote_desktop_mesh_error("worker input request timed out"))?
+    .map_err(remote_desktop_mesh_error)?;
+    let should_record = {
+        let mut sessions = state.remote_desktop_sessions.write().map_err(lock_error)?;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            let first_control = !session.control_started;
+            session.control_started = true;
+            first_control
+        } else {
+            false
+        }
+    };
+    if should_record {
+        state
+            .ledger
+            .append(
+                "remote_assist.control.started",
+                &session_id.to_string(),
+                &json!({"node_id": request.lease.node_id}),
+            )
+            .map_err(internal_error)?;
+    }
+    Ok(Json(json!({
+        "session_id": session_id,
+        "sequence": input.sequence,
+        "applied_events": response.applied_events
+    })))
+}
+
+async fn close_remote_desktop(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let session = state
+        .remote_desktop_sessions
+        .write()
+        .map_err(lock_error)?
+        .remove(&session_id);
+    let Some(session) = session else {
+        return Ok(Json(json!({"closed": true, "duplicate": true})));
+    };
+    if session.lease.expires_at > chrono::Utc::now()
+        && let Ok((_, endpoint)) = remote_offer(&state, session.lease.node_id)
+    {
+        let request = remote_desktop_request_for(
+            session.lease.clone(),
+            RemoteDesktopActionV1::Close,
+            None,
+            Vec::new(),
+        );
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            rampage_mesh::remote_desktop_request(&state.mesh.endpoint(), endpoint, &request),
+        )
+        .await;
+    }
+    state
+        .ledger
+        .append(
+            "remote_assist.session.closed",
+            &session_id.to_string(),
+            &json!({
+                "node_id": session.lease.node_id,
+                "control_started": session.control_started
+            }),
+        )
+        .map_err(internal_error)?;
+    Ok(Json(json!({"closed": true, "duplicate": false})))
+}
+
+fn remote_desktop_mesh_error(error: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(json!({"error": error.to_string()})),
+    )
 }
 
 fn stop_epoch_marker(kill_latch_path: &std::path::Path) -> PathBuf {
@@ -4178,7 +4549,7 @@ fn remote_offer(
     let endpoint_record = offer.mesh_endpoint.as_ref().ok_or_else(|| {
         (
             StatusCode::CONFLICT,
-            Json(json!({"error": "node does not advertise an artifact endpoint"})),
+            Json(json!({"error": "node does not advertise an authenticated mesh endpoint"})),
         )
     })?;
     let endpoint = rampage_mesh::endpoint_addr_from_record(endpoint_record).map_err(|error| {
