@@ -68,7 +68,9 @@ Rampage 0.3.1 is the current Windows x64 recovery and automatic-role release. It
 Remote Assist and fabric-proof foundation, then closes the complete device lifecycle: repair in
 place, return a worker to pairing, revoke a stale enrolled identity from the owner, or factory-reset
 the local Rampage runtime without uninstalling external model stores. A failed native status bridge
-now produces an actionable recovery state instead of an infinite loading surface.
+now produces an actionable recovery state instead of an infinite loading surface. Nearby pairing
+fans out over every active LAN interface and uses local bounded lifetimes, so a VPN adapter or a
+wrong device clock cannot silently strand a laptop on “Looking for your main PC.”
 
 | Proof surface | Validated result |
 | --- | --- |
@@ -82,6 +84,7 @@ now produces an actionable recovery state instead of an infinite loading surface
 | Universal capability contract | Signed offers advertise exact workload domain, adapter, operation, execution pattern, isolation, runtime digest, and qualification status; candidate profiles grant no authority |
 | Autonomous self-scan | Stable evidence digests cover routes, links, failures, denials, thermal/battery pressure, capability gaps, idle capacity, and protected-artifact replication |
 | Compute Strategy | Outcome-first Automatic, Biggest AI, Fastest AI, More Work, and Protect This PC placement previews with exact capacity and qualification blockers |
+| Nearby pairing | Zero-copy X25519 pairing over multicast, global broadcast, and every active directed LAN broadcast; owner-local expiry removes cross-device clock dependence |
 | Lifecycle recovery | One-screen Fix Rampage, Pair again, enrolled-device Forget, redacted receipt, and typed local factory reset; restart replay keeps revoked nodes and offers gone |
 | Remote Assist | Worker opt-in; paired-owner view/control; dedicated authenticated QUIC protocol; request-, node-, controller-, epoch-, size-, frame-rate-, and input-sequence bounds; visible active state; STOP/revoke |
 | Packaged product | Native Tauri shell, role-aware system tray, close-to-tray, start-at-login, governed sidecars, cold-start tolerance, controller-restart recovery, clean explicit shutdown, installer, and automatic desktop launcher |

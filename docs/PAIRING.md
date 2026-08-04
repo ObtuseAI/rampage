@@ -33,6 +33,12 @@ transport identity anchor after the ten-minute discovery record expires; it gran
 authority. The long invitation never appears in the normal UI and is never sent in discovery
 broadcasts.
 
+Rampage sends discovery through multicast, global broadcast, and the directed broadcast address of
+every active non-loopback LAN interface. A VPN or virtual adapter therefore cannot win one routing
+decision and hide the real Wi-Fi or Ethernet path. Each machine uses its own bounded local pairing
+lifetime; remote wall-clock timestamps are advisory and cannot extend the owner's three-minute
+window, so clock drift does not silently reject an otherwise valid nearby machine.
+
 The controller also persists its authenticated UDP port. An upgrade migrates the newest proven
 legacy port from the evidence ledger before selecting the fixed port used by a new installation, so
 an enrolled laptop does not lose its signed route merely because the main app restarts.
@@ -44,8 +50,8 @@ an enrolled laptop does not lose its signed route merely because the main app re
   ephemeral public key.
 - Rampage accepts at most five new requests per source address per minute and sixteen pending
   requests total.
-- Datagram size, labels, clock skew, schemas, and unknown fields are validated before state is
-  created.
+- Datagram size, labels, schemas, request identifiers, and public keys are validated before state
+  is created. Remote timestamps never control the owner-local expiry.
 - Repeated requests reuse the same challenge; repeated approvals resend the same encrypted payload
   so ordinary packet loss does not force the user to start over.
 - The controller and intelligence APIs remain token-protected and bound to loopback.

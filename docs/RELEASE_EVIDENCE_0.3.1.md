@@ -10,7 +10,7 @@ packages, public artifacts, and physical two-machine behavior are separate claim
 | Nine release versions | `scripts/Assert-RampageVersion.ps1 -Tag v0.3.1` | PASS — nine surfaces report 0.3.1 |
 | Rust workspace compile | `cargo check --workspace --all-targets` | PASS |
 | Controller lifecycle | `cargo test -p rampage-controller --bin rampage-controller` | PASS — 20 tests, including restart-safe node revocation |
-| Native desktop recovery | `cargo test --workspace --no-fail-fast` | PASS — 19 desktop tests inside the full workspace campaign |
+| Native desktop recovery and pairing | `cargo test --workspace`; `cargo test -p rampage-desktop` | PASS — 22 desktop tests, including clock-independent loopback enrollment and multi-interface directed-broadcast coverage |
 | Desktop UI and recovery | `pnpm --dir apps/desktop test -- --run` | PASS — 18 tests |
 | TypeScript SDK | `pnpm --dir packages/sdk-ts test -- --run` | PASS — 12 tests |
 | Python SDK | `uv run --project packages/sdk-python --with pytest --with httpx python -m pytest packages/sdk-python/tests -q` | PASS — 11 tests |
@@ -18,7 +18,7 @@ packages, public artifacts, and physical two-machine behavior are separate claim
 | Desktop, edge, and TypeScript builds | `pnpm check` | PASS — desktop 18, edge 2, SDK 12 tests plus all production builds |
 | Proposal-only intelligence | Ruff, mypy, and pytest | PASS — Ruff clean, mypy clean across 9 files, 17 tests |
 | NSIS installer and desktop shortcut | `scripts/Smoke-RampageInstaller.ps1` | PASS — install 0, uninstall 0, six payloads, controller/intelligence ready, one signed node and offer, shortcut created then removed, no leaked sidecars |
-| Public release assets | [`v0.3.1-recovery.2`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.2) | PASS — 12 uploaded assets, three source-bound manifests, three checksum files, and GitHub build-provenance attestation |
+| Public release assets | [`v0.3.1-recovery.2`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.2) | PASS for candidate 2 — candidate 3 publication is pending the source merge and tag-bound rebuild |
 | Physical owner upgrade and recovery | Public candidate 2 on Windows | PASS — exact public hash, install exit 0, runtime preserved, desktop shortcut present, lifecycle consistent, non-destructive repair restart, controller ready, one resident agent, and one fresh signed offer |
 | Physical owner/laptop re-pair | Fresh 0.3.1 installs | PENDING physical laptop action |
 | Physical owner-to-laptop view | `scripts/Qualify-RampageRemoteAssist.ps1 -ExpectedVersion 0.3.1` | PENDING live opted-in worker |
@@ -31,8 +31,8 @@ asset hashes will be recorded separately after publication.
 
 | Package | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `Rampage_0.3.1_x64_en-US.msi` | 79,290,368 | `a02b5995e082eb7be371f675ed80d5b0640a16499eb9de1b8e0f093ac7cd06ee` |
-| `Rampage_0.3.1_x64-setup.exe` | 69,374,688 | `e2fffa0326e6a6e3322b294433911d94f47ef9bbd40e0647857ce52bc899a5a5` |
+| `Rampage_0.3.1_x64_en-US.msi` | 79,314,944 | `9b35e4d9348787d504b2fc5eaa1b8e3dce81111b5ebeb2293a88da184b82e789` |
+| `Rampage_0.3.1_x64-setup.exe` | 69,396,188 | `0056224623f9cd4bdb6d350d0859a103f0647d2e38d9b22257b1feae4a2aa7d8` |
 
 The source-current Recovery Center capture is
 `docs/assets/rampage-recovery-center.png`, SHA-256
@@ -61,6 +61,14 @@ Candidate 1 was superseded after the first physical owner upgrade exposed a fals
 an owner legitimately self-enrolls its own local agent. Candidate 2 accepts that state only when the
 enrollment marker matches the pinned endpoint and the pinned Ed25519 governor key matches this
 owner's local controller. Foreign, incomplete, and mismatched identities remain fail-closed.
+
+Candidate 3 was required after the physical laptop remained on “Looking for your main PC” while the
+owner listener and private firewall rule were healthy. The old worker sent only global broadcast and
+one default-interface multicast packet, so Windows interface selection could hide the actual LAN.
+The corrected worker also sends every active directed LAN broadcast, the owner joins multicast on
+every active LAN address, and neither side trusts the other device's wall clock for expiry. The
+owner's local three-minute window, laptop's local five-minute window, bounded requests, rate limits,
+ephemeral X25519 transcript, matching four-digit code, and encrypted invitation remain intact.
 
 ## Honest boundary
 

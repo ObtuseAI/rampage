@@ -36,6 +36,7 @@ clap = { version = "4.5", features = ["derive"] }
 ed25519-dalek = { version = "2.2", features = ["rand_core", "serde"] }
 hex = "0.4"
 hkdf = "0.12"
+if-addrs = "0.15.0"
 iroh = { version = "=1.0.3", default-features = false, features = ["tls-ring"] }
 iroh-relay = { version = "=1.0.3", default-features = false, features = ["server", "tls-ring"] }
 rand = "0.10"
