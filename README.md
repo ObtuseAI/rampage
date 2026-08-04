@@ -155,6 +155,11 @@ presented as a physical two-machine control receipt. Native Windows capture/inpu
 durable replay-fence, protocol-digest, and UI contract tests are recorded separately. Exact physical
 laptop installation and interactive control remain an explicit release-evidence line item until run.
 
+Once an opted-in worker is live, the owner can produce a fail-closed physical frame receipt with
+`scripts/Qualify-RampageRemoteAssist.ps1`. The command accepts only the loopback protected API,
+requires a fresh shipped Remote Assist offer, verifies the signed lease bounds and JPEG SHA-256, closes
+the session, and proves the controller returns `404` for the revoked session. It never injects input.
+
 ## OnePool: pool the work, not the address space
 
 Remote memory and VRAM do not become magically coherent across commodity networks. Rampage instead
