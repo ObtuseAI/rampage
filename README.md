@@ -21,7 +21,8 @@ the authority to run wild.
 ## [⬇ Download Rampage 0.3.1 for Windows](https://obtuseai.github.io/rampage/download/)
 
 **One installer. Desktop shortcut included.**
-[Release notes and SHA-256](docs/RELEASE_NOTES_0.3.1.md) ·
+[Release notes](docs/RELEASE_NOTES_0.3.1.md) ·
+[SHA-256](docs/SHA256SUMS-0.3.1.txt) ·
 [All releases](https://github.com/ObtuseAI/rampage/releases)
 
 [**Launch the showcase**](https://obtuseai.github.io/rampage/) ·
