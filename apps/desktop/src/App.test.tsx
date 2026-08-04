@@ -4,6 +4,7 @@ import App from "./App";
 import { useRampage } from "./store";
 
 vi.mock("./components/Arena", () => ({ Arena: () => <div>Spatial fabric</div> }));
+const baselineNodes = useRampage.getState().nodes.map((node) => ({ ...node }));
 
 afterEach(cleanup);
 
@@ -28,6 +29,22 @@ beforeEach(() => {
     },
     fabricBenchmark: null,
     fabricBenchmarkPending: false,
+    fabricRole: "owner",
+    remoteAssistStatus: {
+      supported: false,
+      enabled: false,
+      active: false,
+      sessionId: null,
+      mode: null,
+      expiresAt: null,
+    },
+    remoteDesktopSession: null,
+    remoteDesktopFrame: null,
+    remoteDesktopPending: false,
+    killLatch: false,
+    connected: true,
+    nodes: baselineNodes,
+    selectedNode: baselineNodes[0]?.id ?? "",
   });
   globalThis.fetch = vi.fn().mockRejectedValue(new Error("offline"));
 });
@@ -82,4 +99,34 @@ test("shows automatic local AI qualification and the sustained fabric proof", ()
   expect(screen.getByText(/local ai autopilot · ready/i)).toBeInTheDocument();
   expect(screen.getByText(/qwen3:4b is installed and qualified/i)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Prove the fabric" })).toBeEnabled();
+});
+
+test("exposes remote control only for an explicitly capable paired worker", () => {
+  const laptop = useRampage.getState().nodes.find((node) => node.id === "laptop")!;
+  useRampage.setState({
+    fabricRole: "owner",
+    nodes: [{ ...laptop, remoteAssist: true }],
+    selectedNode: laptop.id,
+  });
+  render(<App />);
+  expect(screen.getByRole("button", { name: /view desktop/i })).toBeEnabled();
+  expect(screen.getByRole("button", { name: /control desktop/i })).toBeEnabled();
+});
+
+test("worker surface makes Remote Assist opt-in and active control visible", () => {
+  useRampage.setState({
+    fabricRole: "worker",
+    remoteAssistStatus: {
+      supported: true,
+      enabled: true,
+      active: true,
+      sessionId: "session",
+      mode: "control",
+      expiresAt: new Date(Date.now() + 30_000).toISOString(),
+    },
+  });
+  render(<App />);
+  expect(screen.getByRole("checkbox", { name: /allow owner remote control/i })).toBeChecked();
+  expect(screen.getAllByText(/remote control active/i).length).toBeGreaterThan(0);
+  expect(screen.getByText(/lock screen and admin prompts stay blocked/i)).toBeInTheDocument();
 });

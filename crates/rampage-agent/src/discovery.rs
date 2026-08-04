@@ -192,6 +192,15 @@ pub fn discover_workload_capabilities(
                         shipped_runtime.clone(),
                         true,
                     ),
+                    "rampage.remote-assist.v1" => (
+                        WorkloadDomain::EdgeUtility,
+                        BTreeSet::from(["view".into(), "control".into()]),
+                        BTreeSet::from([ExecutionPattern::StreamingService]),
+                        BTreeSet::from([ResourceClass::CpuCompute, ResourceClass::NetworkRelay]),
+                        WorkloadIsolation::DedicatedProcess,
+                        shipped_runtime.clone(),
+                        true,
+                    ),
                     "rampage.ollama.v1" => {
                         let runtime_digest = model_runtimes
                             .iter()

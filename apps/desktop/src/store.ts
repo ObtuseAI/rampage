@@ -1,10 +1,11 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { CapabilityState, ComputeStrategy, ControllerHealth, FabricDiagnosticReport, FabricNode, LedgerEvent, ModelSessionPlan, ResourceOffer } from "./types";
+import type { CapabilityState, ComputeStrategy, ControllerHealth, FabricDiagnosticReport, FabricNode, LedgerEvent, ModelSessionPlan, RemoteAssistStatus, RemoteDesktopFramePayload, RemoteDesktopSession, RemoteInputEvent, ResourceOffer } from "./types";
 
 const controller = import.meta.env.VITE_RAMPAGE_CONTROLLER ?? "http://127.0.0.1:47831";
 const intelligence = import.meta.env.VITE_RAMPAGE_INTELLIGENCE ?? "http://127.0.0.1:47832";
 let localControllerToken: string | null = null;
+let remoteInputQueue: Promise<void> = Promise.resolve();
 
 const computeStrategies: ComputeStrategy[] = [
   "maximum_model_size",
@@ -105,11 +106,11 @@ const initialLocalAiRuntime: LocalAiRuntime = {
 };
 
 const demoNodes: FabricNode[] = [
-  { id: "home", name: "Command Rig", kind: "desktop", state: "ready", cpu: 31, memory: 46, gpu: 18, storage: 22, storageAvailableGb: 120, modelMemoryAvailableGb: 10, modelRuntimeCount: 1, artifactEndpoint: false, latencyMs: 0, topologyConfidence: "controller_local", x: 0, y: 0, z: 0 },
-  { id: "deck", name: "Steam Deck", kind: "steam_deck", state: "working", cpu: 64, memory: 53, gpu: 72, storage: 35, storageAvailableGb: 18, modelMemoryAvailableGb: 8, modelRuntimeCount: 0, artifactEndpoint: true, latencyMs: 18.4, downlinkMbps: 386, uplinkMbps: 201, topologyConfidence: "measured", x: -3.2, y: -0.4, z: 1.8 },
-  { id: "laptop", name: "Studio Laptop", kind: "laptop", state: "ready", cpu: 22, memory: 38, gpu: 12, storage: 14, storageAvailableGb: 42, modelMemoryAvailableGb: 11, modelRuntimeCount: 0, artifactEndpoint: true, latencyMs: 7.1, downlinkMbps: 932, uplinkMbps: 908, topologyConfidence: "measured", x: 3.4, y: 0.3, z: 1.5 },
-  { id: "phone", name: "Phone", kind: "phone", state: "sleeping", cpu: 0, memory: 0, gpu: 0, storage: 0, storageAvailableGb: 0, artifactEndpoint: false, topologyConfidence: "unmeasured", x: 2.5, y: -0.8, z: -2.5 },
-  { id: "nas", name: "Archive", kind: "storage", state: "ready", cpu: 9, memory: 16, gpu: 0, storage: 48, storageAvailableGb: 540, artifactEndpoint: true, latencyMs: 2.2, downlinkMbps: 941, uplinkMbps: 936, topologyConfidence: "measured", x: -2.6, y: 0.6, z: -2.7 },
+  { id: "home", name: "Command Rig", kind: "desktop", state: "ready", cpu: 31, memory: 46, gpu: 18, storage: 22, storageAvailableGb: 120, modelMemoryAvailableGb: 10, modelRuntimeCount: 1, artifactEndpoint: false, remoteAssist: false, latencyMs: 0, topologyConfidence: "controller_local", x: 0, y: 0, z: 0 },
+  { id: "deck", name: "Steam Deck", kind: "steam_deck", state: "working", cpu: 64, memory: 53, gpu: 72, storage: 35, storageAvailableGb: 18, modelMemoryAvailableGb: 8, modelRuntimeCount: 0, artifactEndpoint: true, remoteAssist: false, latencyMs: 18.4, downlinkMbps: 386, uplinkMbps: 201, topologyConfidence: "measured", x: -3.2, y: -0.4, z: 1.8 },
+  { id: "laptop", name: "Studio Laptop", kind: "laptop", state: "ready", cpu: 22, memory: 38, gpu: 12, storage: 14, storageAvailableGb: 42, modelMemoryAvailableGb: 11, modelRuntimeCount: 0, artifactEndpoint: true, remoteAssist: true, latencyMs: 7.1, downlinkMbps: 932, uplinkMbps: 908, topologyConfidence: "measured", x: 3.4, y: 0.3, z: 1.5 },
+  { id: "phone", name: "Phone", kind: "phone", state: "sleeping", cpu: 0, memory: 0, gpu: 0, storage: 0, storageAvailableGb: 0, artifactEndpoint: false, remoteAssist: false, topologyConfidence: "unmeasured", x: 2.5, y: -0.8, z: -2.5 },
+  { id: "nas", name: "Archive", kind: "storage", state: "ready", cpu: 9, memory: 16, gpu: 0, storage: 48, storageAvailableGb: 540, artifactEndpoint: true, remoteAssist: false, latencyMs: 2.2, downlinkMbps: 941, uplinkMbps: 936, topologyConfidence: "measured", x: -2.6, y: 0.6, z: -2.7 },
 ];
 const initialNodes = import.meta.env.DEV ? demoNodes : [];
 const demoDiagnostic: FabricDiagnosticReport = {
@@ -163,6 +164,11 @@ interface RampageState {
   localAiRuntime: LocalAiRuntime;
   fabricBenchmark: FabricBenchmarkResult | null;
   fabricBenchmarkPending: boolean;
+  remoteAssistStatus: RemoteAssistStatus;
+  remoteDesktopSession: RemoteDesktopSession | null;
+  remoteDesktopFrame: RemoteDesktopFramePayload | null;
+  remoteDesktopPending: boolean;
+  remoteDesktopInputSequence: number;
   setMode: (mode: "arena" | "grid") => void;
   setSelectedNode: (id: string) => void;
   setCommandOpen: (open: boolean) => void;
@@ -190,6 +196,12 @@ interface RampageState {
   localStop: () => void;
   localResume: () => Promise<void>;
   toggleAutostart: () => Promise<void>;
+  refreshRemoteAssistStatus: () => Promise<void>;
+  setRemoteAssistEnabled: (enabled: boolean) => Promise<void>;
+  openRemoteDesktop: (nodeId: string, mode: "view" | "control") => Promise<void>;
+  refreshRemoteDesktopFrame: () => Promise<void>;
+  sendRemoteDesktopInput: (events: RemoteInputEvent[]) => Promise<void>;
+  closeRemoteDesktop: () => Promise<void>;
 }
 
 function offersToNodes(offers: ResourceOffer[]): FabricNode[] {
@@ -220,6 +232,11 @@ function offersToNodes(offers: ResourceOffer[]): FabricNode[] {
       modelMemoryAvailableGb: Math.round((runtimeMemory || gpuMemory?.available || memory?.available || 0) / (1024 ** 3) * 10) / 10,
       modelRuntimeCount: offer.model_runtimes?.length ?? 0,
       artifactEndpoint: Boolean(offer.mesh_endpoint?.signature),
+      remoteAssist: (offer.workload_capabilities ?? []).some((capability) =>
+        capability.adapter === "rampage.remote-assist.v1"
+        && capability.status === "shipped"
+        && capability.operations.includes("control")
+      ),
       latencyMs: offer.mesh_endpoint ? Math.round((offer.link_benchmark?.rtt_micros_p50 ?? 0) / 100) / 10 : 0,
       downlinkMbps: offer.link_benchmark ? Math.round(offer.link_benchmark.downlink_bps / 100_000) / 10 : undefined,
       uplinkMbps: offer.link_benchmark ? Math.round(offer.link_benchmark.uplink_bps / 100_000) / 10 : undefined,
@@ -266,6 +283,18 @@ export const useRampage = create<RampageState>((set, get) => ({
   localAiRuntime: initialLocalAiRuntime,
   fabricBenchmark: null,
   fabricBenchmarkPending: false,
+  remoteAssistStatus: {
+    supported: false,
+    enabled: false,
+    active: false,
+    sessionId: null,
+    mode: null,
+    expiresAt: null,
+  },
+  remoteDesktopSession: null,
+  remoteDesktopFrame: null,
+  remoteDesktopPending: false,
+  remoteDesktopInputSequence: 0,
   setMode: (mode) => set({ mode }),
   setSelectedNode: (selectedNode) => set({ selectedNode }),
   setCommandOpen: (commandOpen) => set({ commandOpen }),
@@ -344,10 +373,11 @@ export const useRampage = create<RampageState>((set, get) => ({
   },
   refresh: async () => {
     try {
-      const [fabricRole, runAtLogin, localAiRuntime] = await Promise.all([
+      const [fabricRole, runAtLogin, localAiRuntime, remoteAssistStatus] = await Promise.all([
         invoke<"owner" | "worker">("fabric_mode").catch(() => "owner" as const),
         invoke<boolean>("autostart_enabled").catch(() => get().runAtLogin),
         invoke<LocalAiRuntime>("local_ai_runtime_status").catch(() => get().localAiRuntime),
+        invoke<RemoteAssistStatus>("remote_assist_status").catch(() => get().remoteAssistStatus),
       ]);
       if (fabricRole === "worker") {
         const workerRuntime = await invoke<WorkerRuntime>("worker_runtime_status").catch(() => ({
@@ -362,6 +392,7 @@ export const useRampage = create<RampageState>((set, get) => ({
           fabricRole,
           workerRuntime,
           localAiRuntime,
+          remoteAssistStatus,
           runAtLogin,
           killLatch: false,
           connected: active,
@@ -381,6 +412,7 @@ export const useRampage = create<RampageState>((set, get) => ({
             modelMemoryAvailableGb: 0,
             modelRuntimeCount: localAiRuntime.state === "ready" ? 1 : 0,
             artifactEndpoint: false,
+            remoteAssist: false,
             x: 0,
             y: 0,
             z: 0,
@@ -416,6 +448,14 @@ export const useRampage = create<RampageState>((set, get) => ({
         fabricRole,
         runAtLogin,
         localAiRuntime,
+        remoteAssistStatus: {
+          supported: false,
+          enabled: false,
+          active: false,
+          sessionId: null,
+          mode: null,
+          expiresAt: null,
+        },
         capability: health.kill_latch
           ? "read_only"
           : intelligenceHealth?.authority === "proposal_only"
@@ -668,6 +708,8 @@ export const useRampage = create<RampageState>((set, get) => ({
       capability: "read_only",
       killLatch: true,
       nodes: state.nodes.map((node) => ({ ...node, state: "offline" })),
+      remoteDesktopSession: null,
+      remoteDesktopFrame: null,
     }));
     void invoke("local_stop").catch(() => undefined).finally(async () => {
       try {
@@ -688,6 +730,110 @@ export const useRampage = create<RampageState>((set, get) => ({
     if (!response.ok) throw new Error(`Resume failed: ${await response.text()}`);
     set({ killLatch: false, lastAction: "Owner-confirmed fabric resume accepted." });
     await get().refresh();
+  },
+  refreshRemoteAssistStatus: async () => {
+    if (get().fabricRole !== "worker") return;
+    try {
+      const remoteAssistStatus = await invoke<RemoteAssistStatus>("remote_assist_status");
+      set({ remoteAssistStatus });
+    } catch {
+      // Browser showcases do not have the native status bridge. The last exact native status stays
+      // visible instead of inventing a transition or surfacing an unhandled polling failure.
+    }
+  },
+  setRemoteAssistEnabled: async (enabled) => {
+    try {
+      const remoteAssistStatus = await invoke<RemoteAssistStatus>("set_remote_assist_enabled", { enabled });
+      set({
+        remoteAssistStatus,
+        lastAction: enabled
+          ? "Remote Assist enabled. Only your paired owner can request short, visible sessions."
+          : "Remote Assist disabled. Active access was revoked immediately.",
+      });
+    } catch (error) {
+      set({
+        lastAction: error instanceof Error ? `Remote Assist failed: ${error.message}` : "Remote Assist could not be changed.",
+      });
+      throw error;
+    }
+  },
+  openRemoteDesktop: async (nodeId, mode) => {
+    if (get().remoteDesktopPending || get().killLatch) return;
+    set({ remoteDesktopPending: true, remoteDesktopFrame: null });
+    try {
+      localControllerToken ??= await invoke<string>("controller_token");
+      const response = await fetch(`${controller}/v1/remote-assist/sessions`, {
+        method: "POST",
+        headers: controllerHeaders(true),
+        body: JSON.stringify({ node_id: nodeId, mode }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const payload = (await response.json()) as { session: RemoteDesktopSession };
+      set({
+        remoteDesktopSession: payload.session,
+        remoteDesktopInputSequence: 0,
+        lastAction: `${mode === "control" ? "Control" : "View"} session opened with a signed 30-second renewable lease.`,
+      });
+    } finally {
+      set({ remoteDesktopPending: false });
+    }
+  },
+  refreshRemoteDesktopFrame: async () => {
+    const session = get().remoteDesktopSession;
+    if (!session || get().remoteDesktopPending) return;
+    set({ remoteDesktopPending: true });
+    try {
+      const response = await fetch(`${controller}/v1/remote-assist/sessions/${session.session_id}/frame`, {
+        headers: controllerHeaders(),
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const remoteDesktopFrame = (await response.json()) as RemoteDesktopFramePayload;
+      if (get().remoteDesktopSession?.session_id === session.session_id) {
+        set({ remoteDesktopFrame });
+      }
+    } catch (error) {
+      set({
+        lastAction: error instanceof Error ? `Remote Assist frame failed: ${error.message}` : "Remote Assist frame failed.",
+      });
+    } finally {
+      set({ remoteDesktopPending: false });
+    }
+  },
+  sendRemoteDesktopInput: async (events) => {
+    const send = async () => {
+      const session = get().remoteDesktopSession;
+      if (!session || session.mode !== "control" || !events.length || events.length > 64) return;
+      const sequence = get().remoteDesktopInputSequence + 1;
+      set({ remoteDesktopInputSequence: sequence });
+      const response = await fetch(`${controller}/v1/remote-assist/sessions/${session.session_id}/input`, {
+        method: "POST",
+        headers: controllerHeaders(true),
+        body: JSON.stringify({ sequence, events }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+    };
+    const queued = remoteInputQueue.then(send, send);
+    remoteInputQueue = queued.catch((error) => {
+      set({
+        lastAction: error instanceof Error ? `Remote input was refused: ${error.message}` : "Remote input was refused.",
+      });
+    });
+    return remoteInputQueue;
+  },
+  closeRemoteDesktop: async () => {
+    const session = get().remoteDesktopSession;
+    set({ remoteDesktopSession: null, remoteDesktopFrame: null, remoteDesktopPending: false });
+    if (!session) return;
+    try {
+      await fetch(`${controller}/v1/remote-assist/sessions/${session.session_id}/close`, {
+        method: "POST",
+        headers: controllerHeaders(),
+      });
+      set({ lastAction: "Remote Assist closed and the worker activity indicator cleared." });
+    } catch {
+      set({ lastAction: "Remote Assist viewer closed. The worker lease will expire within 30 seconds." });
+    }
   },
   toggleAutostart: async () => {
     const requested = !get().runAtLogin;

@@ -5,7 +5,7 @@ binary release claim.
 
 | Platform | Installable package | Controller | Worker | Intended donation profile | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| Windows 11 x64 | MSI and NSIS 0.2.3 fabric-proof candidate | Shipped | Shipped | CPU, RAM cache, NVIDIA GPU/VRAM, disk, exact local Ollama models | Packaged owner/worker lifecycle, zero-copy pairing, durable controller pin, autonomous controller-restart recovery, direct QUIC, owner relay, restart-resumable storage, signed possession receipts, sustained CPU benchmark, and exact local-AI qualification; physical laptop upgrade to 0.2.3 pending |
+| Windows 11 x64 | MSI and NSIS 0.3.0 Remote Assist candidate | Shipped | Shipped | CPU, RAM cache, NVIDIA GPU/VRAM, disk, exact local Ollama models; optional paired-owner desktop view/control | 0.2.3 packaged owner/worker lifecycle proof plus source-qualified 0.3.0 Remote Assist contracts, authenticated transport, worker opt-in, visible active state, short signed leases, replay fencing, and STOP/revoke; exact 0.3.0 package hashes and physical laptop control remain gated by the release evidence |
 | Windows 10 x64 | Not qualified | Source likely portable | Source likely portable | Same as Windows 11, hardware-dependent | Unexecuted |
 | macOS Apple Silicon | Not shipped | Rust source portable | Rust source portable | CPU/GPU whole jobs, RAM cache, disk | Unexecuted; native packaging and discovery adapters required |
 | Linux x64 | Not shipped | Rust source portable | Rust source portable | CPU, vendor GPU/VRAM, RAM cache, disk | Unexecuted; GTK dependency warning must be resolved or accepted before release |
@@ -20,7 +20,7 @@ packaging on its named GitHub-hosted runner; it does not convert an unsigned can
 release. Stable Windows and macOS publication additionally requires real platform credentials and
 independent signature/notarization verification.
 
-The installable column describes the current 0.2.3 candidate artifacts. Later source-qualified capabilities
+The installable column describes the current 0.3.0 candidate lane. Later source-qualified capabilities
 do not become packaged or signed merely because they pass a source campaign; each evidence page
 states that boundary explicitly.
 
@@ -40,3 +40,14 @@ Phones and tablets are useful when their constraints shape the workload. The cur
 ships only foreground-safe hashing and independent evaluation shards; embedding, preprocessing, and
 cache roles remain future adapter work. Edge devices are intentionally excluded from protected
 replicas, latency-critical service, and thermal-unbounded compute.
+
+## Remote Assist boundary
+
+Remote Assist is a Windows-worker capability, not general administrator access. A paired worker must
+enable it locally before advertising the exact capability. The owner then receives at most one visible
+session per worker through Rampage's authenticated mesh, governed by renewable signed leases of no
+more than 30 seconds. Turning the worker toggle off, closing the session, or using STOP revokes access.
+
+The backend captures and injects input only into the current unlocked interactive desktop. Windows
+integrity isolation remains authoritative: Rampage cannot cross UAC, the lock screen, the secure
+desktop, or a higher-integrity application, and it does not expose a shell or elevation primitive.

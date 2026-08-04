@@ -1,0 +1,2 @@
+bef9d4531b3829f776d6f6217788d0f7a0b35a16c155e7d21d0d8c97b57a8ad4  Rampage_0.3.0_x64_en-US.msi
+bb3dbf25ea8485e2c9cee16ceb36d8f07db03ae736265deb0df5295f733b6b52  Rampage_0.3.0_x64-setup.exe

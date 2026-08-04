@@ -6,10 +6,12 @@ use rampage_protocol::{
     ArtifactReplicaReceiptV1, ArtifactTransferOperation, CapabilityLeaseV1, DeviceKind,
     EnrollmentRequestV1, ExecutionReceiptV1, InstalledModelV1, JobSpecV1,
     MAX_ARTIFACT_TRANSFER_BYTES, MAX_MODEL_OUTPUT_TOKENS, MAX_MODEL_PROMPT_BYTES,
+    MAX_REMOTE_DESKTOP_DIMENSION, MAX_REMOTE_DESKTOP_FPS, MAX_REMOTE_DESKTOP_LEASE_SECONDS,
     MeshEndpointRecordV1, ModelBackend, ModelExecutionReceiptV1, ModelParallelism,
     ModelRuntimeOfferV1, ModelRuntimeStatus, ModelSessionLeaseV1, NodeIdentityV1,
     PromotionCanaryLeaseV1, PromotionCandidateV1, PromotionRiskV1, RelayAccessManifestV1,
-    ResourceClass, ResourceOfferV1, StorageClass, StorageLeaseV1,
+    RemoteDesktopLeaseV1, RemoteDesktopModeV1, ResourceClass, ResourceOfferV1, StorageClass,
+    StorageLeaseV1, WorkloadCapabilityStatus,
 };
 use rand::{TryRng as _, rngs::SysRng};
 use serde::{Deserialize, Serialize};
@@ -52,6 +54,7 @@ impl Default for GovernorConfig {
                 "rampage.benchmark.v1".to_string(),
                 "rampage.ollama.v1".to_string(),
                 "rampage.artifact-hash.v1".to_string(),
+                "rampage.remote-assist.v1".to_string(),
             ]),
             mobile_adapters: BTreeSet::from([
                 "rampage.hash.v1".to_string(),
@@ -71,6 +74,13 @@ impl Default for GovernorConfig {
 pub struct ModelSessionLimits {
     pub max_prompt_bytes: u64,
     pub max_output_tokens: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteDesktopLimits {
+    pub max_width: u32,
+    pub max_height: u32,
+    pub max_fps: u16,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -127,6 +137,10 @@ pub enum Denial {
     ModelRuntimeDenied,
     #[error("model session limits are invalid")]
     InvalidModelSession,
+    #[error("remote desktop request is outside the worker's explicit advertised capability")]
+    RemoteDesktopDenied,
+    #[error("remote desktop limits are invalid")]
+    InvalidRemoteDesktopLimits,
 }
 
 pub struct Governor {
@@ -503,6 +517,75 @@ impl Governor {
         Ok(lease)
     }
 
+    pub fn authorize_remote_desktop_at_epoch(
+        &self,
+        offer: &ResourceOfferV1,
+        controller_endpoint_id: &str,
+        session_id: Uuid,
+        mode: RemoteDesktopModeV1,
+        limits: RemoteDesktopLimits,
+        fencing_epoch: u64,
+    ) -> Result<RemoteDesktopLeaseV1, Denial> {
+        let now = Utc::now();
+        if self.config.killed {
+            return Err(Denial::KillLatch);
+        }
+        if offer.expires_at <= now {
+            return Err(Denial::OfferExpired);
+        }
+        if !(1..=MAX_REMOTE_DESKTOP_DIMENSION).contains(&limits.max_width)
+            || !(1..=MAX_REMOTE_DESKTOP_DIMENSION).contains(&limits.max_height)
+            || !(1..=MAX_REMOTE_DESKTOP_FPS).contains(&limits.max_fps)
+        {
+            return Err(Denial::InvalidRemoteDesktopLimits);
+        }
+        let operation = match mode {
+            RemoteDesktopModeV1::View => "view",
+            RemoteDesktopModeV1::Control => "control",
+        };
+        let capability_advertised = offer.workload_capabilities.iter().any(|capability| {
+            capability.status == WorkloadCapabilityStatus::Shipped
+                && capability.is_valid()
+                && capability.authorizes("rampage.remote-assist.v1", operation)
+        });
+        if controller_endpoint_id.is_empty()
+            || !controller_endpoint_id.is_ascii()
+            || offer.mesh_endpoint.is_none()
+            || !offer.adapters.contains("rampage.remote-assist.v1")
+            || !capability_advertised
+            || !offer.availability.foreground_allowed
+        {
+            return Err(Denial::RemoteDesktopDenied);
+        }
+        let mut lease = RemoteDesktopLeaseV1 {
+            schema: RemoteDesktopLeaseV1::SCHEMA.into(),
+            lease_id: Uuid::now_v7(),
+            session_id,
+            node_id: offer.node_id,
+            controller_endpoint_id: controller_endpoint_id.into(),
+            mode,
+            max_width: limits.max_width,
+            max_height: limits.max_height,
+            max_fps: limits.max_fps,
+            issued_at: now,
+            expires_at: now
+                + Duration::seconds(
+                    self.config
+                        .lease_ttl_seconds
+                        .clamp(1, MAX_REMOTE_DESKTOP_LEASE_SECONDS),
+                ),
+            nonce: Uuid::new_v4().simple().to_string(),
+            fencing_epoch,
+            signature: String::new(),
+        };
+        lease.signature = hex::encode(
+            self.signing_key
+                .sign(&remote_desktop_lease_message(&lease))
+                .to_bytes(),
+        );
+        Ok(lease)
+    }
+
     pub fn authorize_storage_at_epoch(
         &self,
         offer: &ResourceOfferV1,
@@ -735,6 +818,23 @@ pub fn verify_model_session_lease_with_key(
         &lease.signature,
         &model_session_lease_message(lease),
     )
+}
+
+pub fn verify_remote_desktop_lease_with_key(
+    public_key: &str,
+    lease: &RemoteDesktopLeaseV1,
+) -> Result<(), Denial> {
+    verify_contract_signature(
+        public_key,
+        &lease.signature,
+        &remote_desktop_lease_message(lease),
+    )
+}
+
+fn remote_desktop_lease_message(lease: &RemoteDesktopLeaseV1) -> Vec<u8> {
+    let mut unsigned = lease.clone();
+    unsigned.signature.clear();
+    contract_message(&unsigned)
 }
 
 fn model_session_lease_message(lease: &ModelSessionLeaseV1) -> Vec<u8> {
@@ -1133,6 +1233,81 @@ mod tests {
         assert_eq!(
             verify_model_session_lease_with_key(&governor_key, &tampered),
             Err(Denial::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn remote_desktop_authority_requires_shipped_opt_in_and_is_tamper_evident() {
+        let governor = Governor::ephemeral(GovernorConfig::default());
+        let (_, mut offer) = fixtures("desktop", true);
+        offer.adapters = BTreeSet::from(["rampage.remote-assist.v1".into()]);
+        offer.mesh_endpoint = Some(MeshEndpointRecordV1 {
+            schema: MeshEndpointRecordV1::SCHEMA.into(),
+            endpoint_id: "worker".into(),
+            direct_addresses: vec!["127.0.0.1:1".into()],
+            relay_urls: Vec::new(),
+            issued_at: Utc::now(),
+            expires_at: offer.expires_at,
+            signature: "signed".into(),
+        });
+        offer.workload_capabilities = vec![WorkloadCapabilityV1 {
+            schema: WorkloadCapabilityV1::SCHEMA.into(),
+            adapter: "rampage.remote-assist.v1".into(),
+            domain: WorkloadDomain::EdgeUtility,
+            operations: BTreeSet::from(["view".into(), "control".into()]),
+            execution_patterns: BTreeSet::from([ExecutionPattern::StreamingService]),
+            resource_classes: BTreeSet::from([
+                ResourceClass::CpuCompute,
+                ResourceClass::NetworkRelay,
+            ]),
+            isolation: WorkloadIsolation::DedicatedProcess,
+            runtime_digest: "shipped-agent:remote-assist-v1".into(),
+            checkpointable: false,
+            preemptible: true,
+            network_allowlist_required: false,
+            status: WorkloadCapabilityStatus::Shipped,
+            qualification_digest: None,
+        }];
+        let lease = governor
+            .authorize_remote_desktop_at_epoch(
+                &offer,
+                "controller",
+                Uuid::now_v7(),
+                RemoteDesktopModeV1::Control,
+                RemoteDesktopLimits {
+                    max_width: 1920,
+                    max_height: 1080,
+                    max_fps: 10,
+                },
+                17,
+            )
+            .unwrap();
+        let public_key = hex::encode(governor.verifying_key().to_bytes());
+        assert!(lease.is_active_at(Utc::now(), 17));
+        assert!(verify_remote_desktop_lease_with_key(&public_key, &lease).is_ok());
+        let mut tampered = lease;
+        tampered.mode = RemoteDesktopModeV1::View;
+        assert_eq!(
+            verify_remote_desktop_lease_with_key(&public_key, &tampered),
+            Err(Denial::InvalidSignature)
+        );
+        offer.workload_capabilities[0].status = WorkloadCapabilityStatus::Candidate;
+        assert_eq!(
+            governor
+                .authorize_remote_desktop_at_epoch(
+                    &offer,
+                    "controller",
+                    Uuid::now_v7(),
+                    RemoteDesktopModeV1::Control,
+                    RemoteDesktopLimits {
+                        max_width: 1920,
+                        max_height: 1080,
+                        max_fps: 10,
+                    },
+                    17,
+                )
+                .unwrap_err(),
+            Denial::RemoteDesktopDenied
         );
     }
 

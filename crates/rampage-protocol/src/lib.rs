@@ -15,6 +15,11 @@ pub const MAX_MODEL_SESSION_BYTES: u64 = 16 * 1024 * 1024 * 1024 * 1024;
 pub const MAX_MODEL_PROMPT_BYTES: u64 = 1024 * 1024;
 pub const MAX_MODEL_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_MODEL_OUTPUT_TOKENS: u32 = 32 * 1024;
+pub const MAX_REMOTE_DESKTOP_FRAME_BYTES: u64 = 4 * 1024 * 1024;
+pub const MAX_REMOTE_DESKTOP_INPUT_EVENTS: usize = 64;
+pub const MAX_REMOTE_DESKTOP_DIMENSION: u32 = 4_096;
+pub const MAX_REMOTE_DESKTOP_FPS: u16 = 15;
+pub const MAX_REMOTE_DESKTOP_LEASE_SECONDS: i64 = 30;
 pub const MAX_RELAY_ENDPOINTS: usize = 4096;
 /// Maximum signed-lease not-before tolerance for ordinary consumer clock skew.
 ///
@@ -776,6 +781,184 @@ pub struct ModelInvocationFrameV1 {
 
 impl ModelInvocationFrameV1 {
     pub const SCHEMA: &'static str = "rampage.model-invocation-frame.v1";
+}
+
+/// The authority granted to an owner for one visible, user-session desktop session.
+///
+/// `Control` includes viewing because input without the contemporaneous screen is intentionally
+/// unsupported. Neither mode grants a shell, elevation, service control, secure-desktop access,
+/// or any authority outside the interactive session owned by the Rampage worker process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteDesktopModeV1 {
+    View,
+    Control,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteDesktopLeaseV1 {
+    pub schema: String,
+    pub lease_id: Uuid,
+    pub session_id: Uuid,
+    pub node_id: Uuid,
+    pub controller_endpoint_id: String,
+    pub mode: RemoteDesktopModeV1,
+    pub max_width: u32,
+    pub max_height: u32,
+    pub max_fps: u16,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub nonce: String,
+    pub fencing_epoch: u64,
+    pub signature: String,
+}
+
+impl RemoteDesktopLeaseV1 {
+    pub const SCHEMA: &'static str = "rampage.remote-desktop-lease.v1";
+
+    pub fn is_active_at(&self, now: DateTime<Utc>, current_epoch: u64) -> bool {
+        self.schema == Self::SCHEMA
+            && lease_has_started(self.issued_at, now)
+            && now < self.expires_at
+            && (self.expires_at - self.issued_at).num_seconds() <= MAX_REMOTE_DESKTOP_LEASE_SECONDS
+            && self.fencing_epoch == current_epoch
+            && !self.controller_endpoint_id.is_empty()
+            && self.controller_endpoint_id.is_ascii()
+            && (1..=MAX_REMOTE_DESKTOP_DIMENSION).contains(&self.max_width)
+            && (1..=MAX_REMOTE_DESKTOP_DIMENSION).contains(&self.max_height)
+            && (1..=MAX_REMOTE_DESKTOP_FPS).contains(&self.max_fps)
+            && !self.nonce.is_empty()
+            && self.nonce.len() <= 128
+            && self.nonce.is_ascii()
+            && !self.signature.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteDesktopActionV1 {
+    Frame,
+    Input,
+    Heartbeat,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteMouseButtonV1 {
+    Left,
+    Right,
+    Middle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RemoteInputEventV1 {
+    /// Absolute coordinates across the complete virtual desktop, normalized to `0..=65535`.
+    MouseMove {
+        x: u16,
+        y: u16,
+    },
+    MouseButton {
+        button: RemoteMouseButtonV1,
+        pressed: bool,
+    },
+    MouseWheel {
+        delta: i16,
+    },
+    /// A Windows virtual-key value. Secure attention is never available through `SendInput`.
+    Key {
+        virtual_key: u16,
+        pressed: bool,
+    },
+}
+
+impl RemoteInputEventV1 {
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Self::MouseMove { .. } | Self::MouseButton { .. } => true,
+            Self::MouseWheel { delta } => *delta != 0 && (-1_920..=1_920).contains(delta),
+            Self::Key { virtual_key, .. } => (1..=254).contains(virtual_key),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteDesktopRequestV1 {
+    pub schema: String,
+    pub request_id: Uuid,
+    pub lease: RemoteDesktopLeaseV1,
+    pub action: RemoteDesktopActionV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<RemoteInputEventV1>,
+}
+
+impl RemoteDesktopRequestV1 {
+    pub const SCHEMA: &'static str = "rampage.remote-desktop-request.v1";
+
+    pub fn is_valid_for(&self, node_id: Uuid, controller_endpoint_id: &str) -> bool {
+        let input_shape = match self.action {
+            RemoteDesktopActionV1::Input => {
+                self.lease.mode == RemoteDesktopModeV1::Control
+                    && self.input_sequence.is_some_and(|sequence| sequence > 0)
+                    && !self.events.is_empty()
+                    && self.events.len() <= MAX_REMOTE_DESKTOP_INPUT_EVENTS
+                    && self.events.iter().all(RemoteInputEventV1::is_valid)
+            }
+            _ => self.input_sequence.is_none() && self.events.is_empty(),
+        };
+        self.schema == Self::SCHEMA
+            && self.lease.node_id == node_id
+            && self.lease.controller_endpoint_id == controller_endpoint_id
+            && input_shape
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteDesktopFrameV1 {
+    pub sequence: u64,
+    pub captured_at: DateTime<Utc>,
+    pub width: u32,
+    pub height: u32,
+    pub media_type: String,
+    pub payload_size: u64,
+    pub payload_digest: String,
+}
+
+impl RemoteDesktopFrameV1 {
+    pub fn is_valid_for(&self, lease: &RemoteDesktopLeaseV1) -> bool {
+        self.sequence > 0
+            && self.width > 0
+            && self.width <= lease.max_width
+            && self.height > 0
+            && self.height <= lease.max_height
+            && self.media_type == "image/jpeg"
+            && self.payload_size > 0
+            && self.payload_size <= MAX_REMOTE_DESKTOP_FRAME_BYTES
+            && is_sha256_digest(&self.payload_digest)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteDesktopResponseV1 {
+    pub schema: String,
+    pub request_id: Uuid,
+    pub status: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<RemoteDesktopFrameV1>,
+    pub applied_events: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl RemoteDesktopResponseV1 {
+    pub const SCHEMA: &'static str = "rampage.remote-desktop-response.v1";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1819,5 +2002,49 @@ mod tests {
         request.lease.operation = ArtifactTransferOperation::Get;
         request.payload_size = 0;
         assert!(request.is_valid());
+    }
+
+    #[test]
+    fn remote_desktop_contract_is_session_scoped_and_input_bounded() {
+        let now = Utc::now();
+        let node_id = Uuid::now_v7();
+        let lease = RemoteDesktopLeaseV1 {
+            schema: RemoteDesktopLeaseV1::SCHEMA.into(),
+            lease_id: Uuid::now_v7(),
+            session_id: Uuid::now_v7(),
+            node_id,
+            controller_endpoint_id: "controller".into(),
+            mode: RemoteDesktopModeV1::Control,
+            max_width: 1920,
+            max_height: 1080,
+            max_fps: 10,
+            issued_at: now,
+            expires_at: now + Duration::seconds(30),
+            nonce: "one-short-lease".into(),
+            fencing_epoch: 4,
+            signature: "signed".into(),
+        };
+        assert!(lease.is_active_at(now, 4));
+        let mut request = RemoteDesktopRequestV1 {
+            schema: RemoteDesktopRequestV1::SCHEMA.into(),
+            request_id: Uuid::now_v7(),
+            lease,
+            action: RemoteDesktopActionV1::Input,
+            input_sequence: Some(1),
+            events: vec![RemoteInputEventV1::MouseMove { x: 123, y: 456 }],
+        };
+        assert!(request.is_valid_for(node_id, "controller"));
+        assert!(!request.is_valid_for(Uuid::now_v7(), "controller"));
+        request.input_sequence = Some(0);
+        assert!(!request.is_valid_for(node_id, "controller"));
+        request.input_sequence = Some(2);
+        request.events = vec![RemoteInputEventV1::Key {
+            virtual_key: 0,
+            pressed: true,
+        }];
+        assert!(!request.is_valid_for(node_id, "controller"));
+        request.events =
+            vec![RemoteInputEventV1::MouseMove { x: 0, y: 0 }; MAX_REMOTE_DESKTOP_INPUT_EVENTS + 1];
+        assert!(!request.is_valid_for(node_id, "controller"));
     }
 }

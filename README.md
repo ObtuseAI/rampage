@@ -18,17 +18,17 @@ the authority to run wild.
 [![Rust 1.91](https://img.shields.io/badge/Rust-1.91%2B-0b0f17?logo=rust&logoColor=67f5c5)](Cargo.toml)
 [![AI authority](https://img.shields.io/badge/AI%20authority-proposals%20only-0b0f17?logo=probot&logoColor=67f5c5)](docs/ARCHITECTURE.md#recursive-improvement)
 
-## [⬇ Download Rampage 0.2.3 for Windows](https://obtuseai.github.io/rampage/download/)
+## [⬇ Download Rampage 0.3.0 for Windows](https://obtuseai.github.io/rampage/download/)
 
 **One installer. Desktop shortcut included.**
-[Release notes and SHA-256](https://github.com/ObtuseAI/rampage/releases/tag/v0.2.3-fabric-proof.1) ·
+[Release notes and SHA-256](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.0-remote-assist.1) ·
 [All releases](https://github.com/ObtuseAI/rampage/releases)
 
 [**Launch the showcase**](https://obtuseai.github.io/rampage/) ·
 [Architecture](docs/ARCHITECTURE.md) ·
 [Easy pairing](docs/PAIRING.md) ·
 [Security](SECURITY.md) ·
-[0.2.3 release evidence](docs/RELEASE_EVIDENCE_0.2.3.md) ·
+[0.3.0 release evidence](docs/RELEASE_EVIDENCE_0.3.0.md) ·
 [Owner-relay evidence](docs/OWNER_RELAY_EVIDENCE.md) ·
 [Resumable-storage evidence](docs/RESUMABLE_STORAGE_EVIDENCE.md) ·
 [Native distribution](docs/DISTRIBUTION.md) ·
@@ -54,6 +54,7 @@ machine that can actually perform it.
 | Donated disks become brittle network mounts | Turn them into encrypted, resumable, content-addressed artifact capacity with independently signed repair evidence |
 | “Autonomy” quietly becomes administrator access | Let intelligence propose; let deterministic Rust policy decide |
 | Distributed systems fail opaquely | Sign leases and receipts, fence stale work, and write every transition to a hash chain |
+| A spare laptop needs attention from across the room | Open a visible, paired-owner Remote Assist session without adding a second account or remote-access service |
 | A kill switch depends on the system it is stopping | Keep STOP local, non-agentic, and independent of the controller and network |
 
 > **The result:** more useful compute, less wasted hardware, and an autonomous system whose ambition
@@ -61,12 +62,12 @@ machine that can actually perform it.
 
 ## Built—not imagined
 
-Rampage 0.2.3 is the current Windows x64 fabric-proof candidate. It adds automatic local-AI
-qualification, a signed sustained-compute benchmark, bounded clock-skew tolerance for real machines,
-owner-local authenticated QUIC enrollment, and autonomous worker recovery after the owner controller
-restarts. The installer can qualify Ollama 0.32.5 and the exact `qwen3:4b` artifact without turning a
-model server into controller authority. Evidence links distinguish packaged and live proof from the
-still-pending exact-0.2.3 laptop upgrade and phone gate.
+Rampage 0.3.0 is the current Windows x64 Remote Assist candidate. It keeps the complete 0.2.3
+fabric-proof foundation, then gives the paired owner an optional live view/control lane for an
+unlocked Windows worker. Access is off by default on the worker, visible in the app and tray while
+active, bounded by renewable 30-second signed leases, authenticated to the pinned controller, and
+revocable from either machine. It does not grant a shell, elevation, UAC, lock-screen, or Windows
+secure-desktop authority.
 
 | Proof surface | Validated result |
 | --- | --- |
@@ -80,11 +81,14 @@ still-pending exact-0.2.3 laptop upgrade and phone gate.
 | Universal capability contract | Signed offers advertise exact workload domain, adapter, operation, execution pattern, isolation, runtime digest, and qualification status; candidate profiles grant no authority |
 | Autonomous self-scan | Stable evidence digests cover routes, links, failures, denials, thermal/battery pressure, capability gaps, idle capacity, and protected-artifact replication |
 | Compute Strategy | Read-only Maximum Model, Speed Boost, Throughput, Efficiency, and Autonomous placement previews with exact capacity and qualification blockers |
+| Remote Assist | Worker opt-in; paired-owner view/control; dedicated authenticated QUIC protocol; request-, node-, controller-, epoch-, size-, frame-rate-, and input-sequence bounds; visible active state; STOP/revoke |
 | Packaged product | Native Tauri shell, role-aware system tray, close-to-tray, start-at-login, governed sidecars, cold-start tolerance, controller-restart recovery, clean explicit shutdown, installer, and automatic desktop launcher |
 | Verification | Rust, desktop, TypeScript SDK, Python intelligence, Python SDK, deterministic universal-gateway, forced-relay mesh, packaging, and lifecycle gates |
 
-The packaged 0.2.3 qualification record—including artifact hashes, live Qwen proof, and the
-unsigned-release boundary—is in [the current release evidence](docs/RELEASE_EVIDENCE_0.2.3.md).
+The 0.3.0 source, package, and physical-device boundary is recorded in
+[the current release evidence](docs/RELEASE_EVIDENCE_0.3.0.md). The immutable packaged 0.2.3
+qualification record—including artifact hashes, live Qwen proof, and its unsigned-release
+boundary—remains in [the 0.2.3 evidence](docs/RELEASE_EVIDENCE_0.2.3.md).
 The 0.2.2 pairing record remains in
 [its immutable evidence page](docs/RELEASE_EVIDENCE_0.2.2.md). The original 0.2 record remains in
 [the original qualification page](docs/RELEASE_EVIDENCE.md). The newer API,
@@ -136,6 +140,21 @@ authority generation and recoverable work. Owner STOP advances the hash-chained 
 controllers reject old claims and receipts, while workers and artifact gateways persist consumed
 nonces and the highest epoch they have observed so replay remains denied after restart.
 
+## Remote Assist: the paired worker is no longer a black box
+
+Select an eligible Windows worker and choose **View desktop** or **Control desktop**. Rampage opens
+the worker inside the owner app, renews a 30-second signed session while it remains active, and
+routes bounded JPEG frames plus ordered mouse/keyboard events over its existing authenticated mesh.
+The worker must first turn on **Allow owner remote control**. That durable opt-in grants no authority
+to any unpaired peer and can be turned off immediately without changing the rest of the fabric.
+
+![Rampage 0.3.0 owner grid with a paired Studio Laptop selected and explicit View desktop and Control desktop actions](docs/assets/rampage-remote-assist-controls.png)
+
+The screenshot is a source-current browser showcase using labeled demonstration topology; it is not
+presented as a physical two-machine control receipt. Native Windows capture/input, signed-heartbeat,
+durable replay-fence, protocol-digest, and UI contract tests are recorded separately. Exact physical
+laptop installation and interactive control remain an explicit release-evidence line item until run.
+
 ## OnePool: pool the work, not the address space
 
 Remote memory and VRAM do not become magically coherent across commodity networks. Rampage instead
@@ -181,7 +200,7 @@ The desktop now defaults to **Maximum Model** and exposes five explicit ways to 
 | Autonomous | Proposal-only strategy adaptation behind Governor gates |
 
 On Windows, Local AI Autopilot now qualifies a pinned Ollama runtime and exact starter model in the
-background. **Prove my speed** runs sustained, lease-bounded work on every capable live 0.2.3 node
+background. **Prove my speed** runs sustained, lease-bounded work on every capable live 0.3.0 node
 and accepts a node only after its signed execution receipt arrives. This measures useful distributed
 work; it does not turn network latency into fictional local VRAM.
 
@@ -233,7 +252,7 @@ never displayed or copied. Capability discovery does the rest.
 
 | Platform lane | Native deliverables | Current qualification boundary |
 | --- | --- | --- |
-| Windows x64 | MSI and NSIS installers; automatic desktop shortcut; Start-menu entry; role-aware tray; bundled sidecars | Packaged 0.2.3 was qualified on Windows 11 x64 but remains unsigned; fresh Windows Server 2022 candidate builds do not substitute for Windows 10 evidence |
+| Windows x64 | MSI and NSIS installers; automatic desktop shortcut; Start-menu entry; role-aware tray; bundled sidecars | 0.3.0 carries forward the packaged 0.2.3 foundation and adds source-qualified Windows Remote Assist; exact package hashes and physical-worker status are in the current release evidence |
 | Linux x64 | Debian package and AppImage with the same Tauri shell and native sidecars | Fresh Ubuntu 24.04 candidate gate; stable repository/AppImage signing remains channel-specific |
 | macOS Apple Silicon | Native app bundle and DMG | Fresh macOS 15/M1 candidate gate; stable publication requires Developer ID signing, Gatekeeper acceptance, notarization, and a stapled ticket |
 | Windows 10 x64 | MSI/NSIS lifecycle, desktop shortcut, tray, sidecars, restart, STOP, and uninstall campaign | Deliberately unqualified until a real self-hosted Windows 10 runner completes the fail-closed workflow |

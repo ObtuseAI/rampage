@@ -43,6 +43,35 @@ struct WorkerRuntimeView {
     message: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteAssistStatusView {
+    supported: bool,
+    enabled: bool,
+    active: bool,
+    session_id: Option<String>,
+    mode: Option<String>,
+    expires_at: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteAssistPolicyDisk {
+    schema: String,
+    enabled: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteAssistActiveDisk {
+    schema: String,
+    session_id: String,
+    mode: String,
+    controller_endpoint_id: String,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Clone)]
 struct WorkerRuntime(Arc<Mutex<WorkerRuntimeView>>);
 
@@ -59,6 +88,8 @@ impl Default for WorkerRuntime {
 const BACKGROUND_ARG: &str = "--background";
 const AUTOSTART_NAME: &str = "Rampage";
 const OWNER_FABRIC_MARKER: &str = "owner-fabric-v1.ready";
+const REMOTE_ASSIST_POLICY_FILE: &str = "remote-assist-policy.json";
+const REMOTE_ASSIST_ACTIVE_FILE: &str = "remote-assist-active.json";
 #[cfg(target_os = "windows")]
 const AUTOSTART_RUN_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
 #[cfg(target_os = "windows")]
@@ -193,6 +224,11 @@ fn local_stop(app: AppHandle) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error.to_string()),
     }
+    match std::fs::remove_file(data_dir.join(REMOTE_ASSIST_ACTIVE_FILE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
     propagate_controller_stop(data_dir);
     Ok(())
 }
@@ -227,6 +263,89 @@ fn fabric_mode(app: AppHandle) -> Result<&'static str, String> {
     } else {
         "owner"
     })
+}
+
+fn remote_assist_enabled_at(data_dir: &std::path::Path) -> bool {
+    let path = data_dir.join(REMOTE_ASSIST_POLICY_FILE);
+    let Ok(bytes) = read_bounded_regular_file(&path, 4 * 1024, "Remote Assist policy") else {
+        return false;
+    };
+    serde_json::from_slice::<RemoteAssistPolicyDisk>(&bytes)
+        .is_ok_and(|policy| policy.schema == "rampage.remote-assist-policy.v1" && policy.enabled)
+}
+
+fn remote_assist_active_at(data_dir: &std::path::Path) -> Option<RemoteAssistActiveDisk> {
+    let path = data_dir.join(REMOTE_ASSIST_ACTIVE_FILE);
+    let bytes = read_bounded_regular_file(&path, 16 * 1024, "Remote Assist activity").ok()?;
+    let active = serde_json::from_slice::<RemoteAssistActiveDisk>(&bytes).ok()?;
+    let now = chrono::Utc::now();
+    (active.schema == "rampage.remote-assist-active.v1"
+        && !active.session_id.is_empty()
+        && !active.controller_endpoint_id.is_empty()
+        && matches!(active.mode.as_str(), "view" | "control")
+        && active.updated_at <= now + chrono::Duration::seconds(5)
+        && active.expires_at > now
+        && active.expires_at - active.updated_at <= chrono::Duration::seconds(35))
+    .then_some(active)
+}
+
+#[tauri::command]
+fn remote_assist_status(app: AppHandle) -> Result<RemoteAssistStatusView, String> {
+    let data_dir = runtime_dir(&app)?;
+    let supported = cfg!(target_os = "windows") && worker_enrollment_exists(&data_dir);
+    let enabled = supported && remote_assist_enabled_at(&data_dir);
+    let active = enabled
+        .then(|| remote_assist_active_at(&data_dir))
+        .flatten();
+    Ok(RemoteAssistStatusView {
+        supported,
+        enabled,
+        active: active.is_some(),
+        session_id: active.as_ref().map(|value| value.session_id.clone()),
+        mode: active.as_ref().map(|value| value.mode.clone()),
+        expires_at: active.map(|value| value.expires_at.to_rfc3339()),
+    })
+}
+
+#[tauri::command]
+fn set_remote_assist_enabled(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<RemoteAssistStatusView, String> {
+    let data_dir = runtime_dir(&app)?;
+    if !cfg!(target_os = "windows") {
+        return Err("Remote Assist is currently qualified only on Windows workers".into());
+    }
+    if !worker_enrollment_exists(&data_dir) {
+        return Err("Remote Assist can only be enabled on a paired worker".into());
+    }
+    std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
+    let path = data_dir.join(REMOTE_ASSIST_POLICY_FILE);
+    if path.exists() {
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("Remote Assist policy path is not a regular non-symlink file".into());
+        }
+    }
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "schema": "rampage.remote-assist-policy.v1",
+        "enabled": enabled
+    }))
+    .map_err(|error| error.to_string())?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    let mut file = options.open(&path).map_err(|error| error.to_string())?;
+    file.write_all(&payload)
+        .map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())?;
+    if !enabled {
+        match std::fs::remove_file(data_dir.join(REMOTE_ASSIST_ACTIVE_FILE)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    remote_assist_status(app)
 }
 
 #[tauri::command]
@@ -969,6 +1088,37 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn schedule_remote_assist_indicator(
+    app: &AppHandle,
+    status_item: MenuItem<tauri::Wry>,
+    role: &'static str,
+) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Ok(data_dir) = runtime_dir(&handle) else {
+            return;
+        };
+        let mut was_active = false;
+        loop {
+            let active =
+                remote_assist_enabled_at(&data_dir) && remote_assist_active_at(&data_dir).is_some();
+            if active != was_active {
+                let status = if active {
+                    "REMOTE CONTROL ACTIVE — Emergency stop ends access"
+                } else {
+                    role
+                };
+                let _ = status_item.set_text(status);
+                if let Some(tray) = handle.tray_by_id("rampage") {
+                    let _ = tray.set_tooltip(Some(format!("Rampage — {status}")));
+                }
+                was_active = active;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
+}
+
 fn install_desktop_lifecycle(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let role = if worker_enrollment_exists(&runtime_dir(app.handle())?) {
         "Worker active"
@@ -1043,6 +1193,7 @@ fn install_desktop_lifecycle(app: &tauri::App) -> Result<(), Box<dyn std::error:
             }
         })
         .build(app)?;
+    schedule_remote_assist_indicator(app.handle(), status.clone(), role);
 
     if let Some(window) = app.get_webview_window("main")
         && launched_in_background(std::env::args())
@@ -1108,7 +1259,9 @@ pub fn run() {
             approve_pairing,
             reject_pairing,
             autostart_enabled,
-            set_autostart
+            set_autostart,
+            remote_assist_status,
+            set_remote_assist_enabled
         ])
         .build(tauri::generate_context!())
         .expect("error while building Rampage");

@@ -1,6 +1,6 @@
 [package]
 name = "rampage-desktop"
-version = "0.2.3"
+version = "0.3.0"
 description = "Rampage personal compute fabric"
 authors = ["ObtuseAI"]
 edition = "2024"
@@ -26,6 +26,7 @@ tauri-plugin-shell = "2"
 reqwest.workspace = true
 rand.workspace = true
 hex.workspace = true
+chrono.workspace = true
 tokio.workspace = true
 sysinfo.workspace = true
 x25519-dalek.workspace = true

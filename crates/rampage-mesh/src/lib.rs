@@ -12,11 +12,12 @@ use iroh::{
 use rampage_protocol::{
     ARTIFACT_TRANSFER_CHUNK_BYTES, ArtifactRefV1, ArtifactReplicaReceiptV1,
     ArtifactTransferActionV2, ArtifactTransferOperation, ArtifactTransferProgressV1,
-    ArtifactTransferRequestV2, ArtifactTransferResponseV2, MeshControlRequestV1,
-    MeshControlResponseV1, MeshEndpointRecordV1, ModelInvocationFrameV1, ModelInvocationRequestV1,
-    StorageLeaseV1,
+    ArtifactTransferRequestV2, ArtifactTransferResponseV2, MAX_REMOTE_DESKTOP_FRAME_BYTES,
+    MeshControlRequestV1, MeshControlResponseV1, MeshEndpointRecordV1, ModelInvocationFrameV1,
+    ModelInvocationRequestV1, RemoteDesktopRequestV1, RemoteDesktopResponseV1, StorageLeaseV1,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use thiserror::Error;
@@ -24,6 +25,7 @@ use thiserror::Error;
 pub const CONTROL_ALPN: &[u8] = b"rampage.mesh.control.v1";
 pub const ARTIFACT_ALPN: &[u8] = b"rampage.mesh.artifact.v2";
 pub const MODEL_ALPN: &[u8] = b"rampage.mesh.model.v1";
+pub const REMOTE_DESKTOP_ALPN: &[u8] = b"rampage.mesh.remote-desktop.v1";
 const MAX_ARTIFACT_HEADER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +82,10 @@ pub enum MeshError {
     InvalidModelFrame,
     #[error("model worker rejected the invocation: {0}")]
     ModelRejected(String),
+    #[error("remote desktop frame or input message is invalid")]
+    InvalidRemoteDesktopMessage,
+    #[error("remote desktop worker rejected the request: {0}")]
+    RemoteDesktopRejected(String),
 }
 
 impl MeshConfig {
@@ -140,6 +146,7 @@ pub async fn bind_endpoint(
             CONTROL_ALPN.to_vec(),
             ARTIFACT_ALPN.to_vec(),
             MODEL_ALPN.to_vec(),
+            REMOTE_DESKTOP_ALPN.to_vec(),
         ])
         .bind()
         .await
@@ -167,6 +174,7 @@ pub async fn bind_endpoint_on_port(
             CONTROL_ALPN.to_vec(),
             ARTIFACT_ALPN.to_vec(),
             MODEL_ALPN.to_vec(),
+            REMOTE_DESKTOP_ALPN.to_vec(),
         ])
         .bind()
         .await
@@ -378,6 +386,95 @@ pub async fn invoke_model(
         receive,
         request_id: request.request_id,
     })
+}
+
+pub async fn read_remote_desktop_request(
+    receive: &mut RecvStream,
+) -> anyhow::Result<RemoteDesktopRequestV1> {
+    let request: RemoteDesktopRequestV1 = read_header(receive).await?;
+    anyhow::ensure!(
+        request.schema == RemoteDesktopRequestV1::SCHEMA,
+        MeshError::InvalidRemoteDesktopMessage
+    );
+    Ok(request)
+}
+
+pub async fn write_remote_desktop_response(
+    send: &mut SendStream,
+    response: &RemoteDesktopResponseV1,
+    payload: &[u8],
+) -> anyhow::Result<()> {
+    let expected_payload = response
+        .frame
+        .as_ref()
+        .map_or(0, |frame| frame.payload_size);
+    anyhow::ensure!(
+        response.schema == RemoteDesktopResponseV1::SCHEMA
+            && expected_payload == payload.len() as u64
+            && expected_payload <= MAX_REMOTE_DESKTOP_FRAME_BYTES,
+        MeshError::InvalidRemoteDesktopMessage
+    );
+    write_header(send, response).await?;
+    if !payload.is_empty() {
+        send.write_all(payload).await?;
+    }
+    send.finish()?;
+    Ok(())
+}
+
+pub async fn remote_desktop_request(
+    endpoint: &Endpoint,
+    destination: EndpointAddr,
+    request: &RemoteDesktopRequestV1,
+) -> anyhow::Result<(RemoteDesktopResponseV1, Vec<u8>)> {
+    anyhow::ensure!(
+        request.schema == RemoteDesktopRequestV1::SCHEMA,
+        MeshError::InvalidRemoteDesktopMessage
+    );
+    let connection = endpoint.connect(destination, REMOTE_DESKTOP_ALPN).await?;
+    let (mut send, mut receive) = connection.open_bi().await?;
+    write_header(&mut send, request).await?;
+    send.finish()?;
+    let response: RemoteDesktopResponseV1 = read_header(&mut receive).await?;
+    anyhow::ensure!(
+        response.schema == RemoteDesktopResponseV1::SCHEMA
+            && response.request_id == request.request_id,
+        MeshError::InvalidRemoteDesktopMessage
+    );
+    let payload_size = response
+        .frame
+        .as_ref()
+        .map_or(0, |frame| frame.payload_size);
+    anyhow::ensure!(
+        payload_size <= MAX_REMOTE_DESKTOP_FRAME_BYTES,
+        MeshError::InvalidRemoteDesktopMessage
+    );
+    let mut payload = vec![0_u8; payload_size as usize];
+    if !payload.is_empty() {
+        receive.read_exact(&mut payload).await?;
+    }
+    if !(200..300).contains(&response.status) {
+        anyhow::ensure!(payload.is_empty(), MeshError::InvalidRemoteDesktopMessage);
+        return Err(MeshError::RemoteDesktopRejected(
+            response
+                .error
+                .clone()
+                .unwrap_or_else(|| "unknown error".into()),
+        )
+        .into());
+    }
+    if let Some(frame) = &response.frame {
+        anyhow::ensure!(
+            frame.is_valid_for(&request.lease)
+                && frame.payload_digest
+                    == format!("sha256:{}", hex::encode(Sha256::digest(&payload))),
+            MeshError::InvalidRemoteDesktopMessage
+        );
+    } else {
+        anyhow::ensure!(payload.is_empty(), MeshError::InvalidRemoteDesktopMessage);
+    }
+    connection.close(0_u8.into(), b"complete");
+    Ok((response, payload))
 }
 
 pub async fn read_artifact_request(
@@ -664,7 +761,8 @@ mod tests {
     use chrono::{Duration, Utc};
     use rampage_protocol::{
         JobState, ModelBackend, ModelChatMessageV1, ModelExecutionReceiptV1,
-        ModelInvocationFrameKind, ModelParallelism, ModelSessionLeaseV1,
+        ModelInvocationFrameKind, ModelParallelism, ModelSessionLeaseV1, RemoteDesktopActionV1,
+        RemoteDesktopFrameV1, RemoteDesktopLeaseV1, RemoteDesktopModeV1,
     };
 
     #[test]
@@ -860,6 +958,85 @@ mod tests {
             response.next_frame().await.unwrap().kind,
             ModelInvocationFrameKind::Complete
         );
+        server.await.unwrap();
+        controller.close().await;
+        worker.close().await;
+    }
+
+    #[tokio::test]
+    async fn remote_desktop_frame_is_request_scoped_and_digest_checked() {
+        let controller = bind_endpoint([101_u8; 32], &MeshConfig::default())
+            .await
+            .unwrap();
+        let worker = bind_endpoint([102_u8; 32], &MeshConfig::default())
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let request_id = uuid::Uuid::now_v7();
+        let lease = RemoteDesktopLeaseV1 {
+            schema: RemoteDesktopLeaseV1::SCHEMA.into(),
+            lease_id: uuid::Uuid::now_v7(),
+            session_id: uuid::Uuid::now_v7(),
+            node_id: uuid::Uuid::now_v7(),
+            controller_endpoint_id: controller.id().to_string(),
+            mode: RemoteDesktopModeV1::View,
+            max_width: 1920,
+            max_height: 1080,
+            max_fps: 10,
+            issued_at: now,
+            expires_at: now + Duration::seconds(30),
+            nonce: "one-short-lease".into(),
+            fencing_epoch: 3,
+            signature: "signed".into(),
+        };
+        let request = RemoteDesktopRequestV1 {
+            schema: RemoteDesktopRequestV1::SCHEMA.into(),
+            request_id,
+            lease,
+            action: RemoteDesktopActionV1::Frame,
+            input_sequence: None,
+            events: Vec::new(),
+        };
+        let payload = b"bounded-jpeg-test-payload".to_vec();
+        let payload_digest = format!("sha256:{}", hex::encode(Sha256::digest(&payload)));
+        let server_payload = payload.clone();
+        let worker_server = worker.clone();
+        let server = tokio::spawn(async move {
+            let connection = worker_server.accept().await.unwrap().await.unwrap();
+            assert_eq!(connection.alpn(), REMOTE_DESKTOP_ALPN);
+            let (mut send, mut receive) = connection.accept_bi().await.unwrap();
+            let received = read_remote_desktop_request(&mut receive).await.unwrap();
+            assert_eq!(received.request_id, request_id);
+            write_remote_desktop_response(
+                &mut send,
+                &RemoteDesktopResponseV1 {
+                    schema: RemoteDesktopResponseV1::SCHEMA.into(),
+                    request_id,
+                    status: 200,
+                    frame: Some(RemoteDesktopFrameV1 {
+                        sequence: 1,
+                        captured_at: now,
+                        width: 800,
+                        height: 450,
+                        media_type: "image/jpeg".into(),
+                        payload_size: server_payload.len() as u64,
+                        payload_digest,
+                    }),
+                    applied_events: 0,
+                    error: None,
+                },
+                &server_payload,
+            )
+            .await
+            .unwrap();
+            let _ = send.stopped().await;
+        });
+        let (response, received_payload) =
+            remote_desktop_request(&controller, worker.addr(), &request)
+                .await
+                .unwrap();
+        assert_eq!(response.frame.unwrap().sequence, 1);
+        assert_eq!(received_payload, payload);
         server.await.unwrap();
         controller.close().await;
         worker.close().await;
