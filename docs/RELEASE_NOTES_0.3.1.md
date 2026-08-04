@@ -4,6 +4,10 @@ Rampage 0.3.1 closes the device lifecycle that a real multi-machine desktop prod
 stale, or interrupted pairing no longer requires uninstalling the app or finding hidden runtime
 files. Recovery is available from both first-run setup and the main header.
 
+Candidate 2 also recognizes an owner's cryptographically matching self-enrolled local agent without
+confusing it for a worker-role conflict. The fix was added after a physical in-place owner upgrade,
+and foreign-controller pins remain fail-closed.
+
 ## What changed
 
 - **Fix Rampage** safely restarts a consistent native installation without erasing identity or work.
