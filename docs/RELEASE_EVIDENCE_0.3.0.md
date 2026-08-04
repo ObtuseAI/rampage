@@ -28,7 +28,7 @@ the lock screen, the secure desktop, higher-integrity applications, a shell, or 
 | Full source campaign | `scripts/Test-Rampage.ps1 -SkipOllama` | PASS — uninterrupted Rust, clippy, desktop, edge, TypeScript SDK, Python lint/type/test, fresh sidecar build, controller lifecycle, mesh/storage, and universal model-gateway campaign |
 | Native Windows package | `scripts/Build-Rampage.ps1 -Profile release` and `scripts/Smoke-RampageInstaller.ps1` | PASS — MSI + NSIS built; NSIS installed six payloads, created both shortcuts, started a ready local fabric, closed cleanly, uninstalled cleanly, and leaked no sidecar |
 | Public release artifacts | [v0.3.0-remote-assist.1](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.0-remote-assist.1) | PASS — published against merged commit `26f1a6cf455ab6efb90f6c99181965d77cec924b`; all four assets independently downloaded and rehashed |
-| Physical owner-to-laptop view/control | Requires 0.3.0 on both physical machines | PENDING — not replaced by the showcase image |
+| Physical owner-to-laptop view/control | `scripts/Qualify-RampageRemoteAssist.ps1` after 0.3.0 is live and opted in on the laptop | PENDING — qualifier is fail-closed and ready; a real remote frame and worker-visible indicator are not replaced by the showcase image |
 
 ## Source-current showcase
 
@@ -36,6 +36,13 @@ the lock screen, the secure desktop, higher-integrity applications, a shell, or 
 
 This image was rendered from the current desktop source with labeled demonstration topology. It proves
 the current UI contract and presentation, not physical packet transport or Windows input injection.
+
+The physical qualifier selects a fresh enrolled worker that advertises the shipped `view` capability,
+opens a signed lease, fetches a real JPEG frame, independently verifies its byte count, bounds, JPEG
+markers, and SHA-256 digest, closes the session, and requires the revoked session to return HTTP 404.
+It deliberately sends no input. A PASS receipt plus observation of the worker's visible activity
+indicator will close the physical view boundary; interactive control remains a separately witnessed
+step so an automated test never moves another machine's pointer without an operator present.
 
 ## Packaging and publication
 
