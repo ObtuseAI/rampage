@@ -18,7 +18,7 @@ packages, public artifacts, and physical two-machine behavior are separate claim
 | Desktop, edge, and TypeScript builds | `pnpm check` | PASS — desktop 18, edge 2, SDK 12 tests plus all production builds |
 | Proposal-only intelligence | Ruff, mypy, and pytest | PASS — Ruff clean, mypy clean across 9 files, 17 tests |
 | NSIS installer and desktop shortcut | `scripts/Smoke-RampageInstaller.ps1` | PASS — install 0, uninstall 0, six payloads, controller/intelligence ready, one signed node and offer, shortcut created then removed, no leaked sidecars |
-| Public release assets | [`v0.3.1-recovery.2`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.2) | PASS for candidate 2 — candidate 3 publication is pending the source merge and tag-bound rebuild |
+| Public release assets | [`v0.3.1-recovery.3`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.3) | PASS — 12 assets, three source-bound manifests, three checksum files, and verified Sigstore/SLSA provenance |
 | Physical owner upgrade and recovery | Public candidate 2 on Windows | PASS — exact public hash, install exit 0, runtime preserved, desktop shortcut present, lifecycle consistent, non-destructive repair restart, controller ready, one resident agent, and one fresh signed offer |
 | Physical owner/laptop re-pair | Fresh 0.3.1 installs | PENDING physical laptop action |
 | Physical owner-to-laptop view | `scripts/Qualify-RampageRemoteAssist.ps1 -ExpectedVersion 0.3.1` | PENDING live opted-in worker |
@@ -40,19 +40,19 @@ The source-current Recovery Center capture is
 
 ## Public candidate artifacts
 
-The candidate-2 tag-bound GitHub Actions run rebuilt every package from merged commit
-`a6b608e4585ddf84702c288c73872a6d1a5f695c`. Its Windows manifest reports version 0.3.1,
-and the recommended Windows download returned HTTP 200 with the expected byte length after the
-release was published.
+The candidate-3 tag-bound GitHub Actions run `30940450467` rebuilt every package from merged commit
+`41a091dd02232a92238515996fee9387f40223c8`. Every manifest reports that exact source commit and
+version 0.3.1. `gh attestation verify` bound all 12 subjects to the public repository, release tag,
+distribution workflow, GitHub-hosted runner, and merged commit.
 
 | Package | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `Rampage_0.3.1_x64-setup.exe` | 69,113,786 | `ee7872088b6a9c72aea7c3c01157d8090cf9db020090a8b8078444d4aa3de38f` |
-| `Rampage_0.3.1_x64_en-US.msi` | 78,999,552 | `7973ea3e9a9d53fd576eaba7872cf5683ec0c7b9e3d1eeddcf779a1b12a22ce8` |
-| `Rampage_0.3.1_amd64.AppImage` | 168,905,208 | `c27e050e6c9993fcc9e1715506c1d2e2f3eaf89efcb8352251ec9d8ede853ae3` |
-| `Rampage_0.3.1_amd64.deb` | 98,046,092 | `7480b85d9f6f155f5dfc49f42b4dbbd873acf0fbc81be940c8e56c741fab68ad` |
-| `Rampage_0.3.1_aarch64.dmg` | 86,246,925 | `1c31ece2407183c0952b2e35fbfcd7c96487a34e2dc7537f4dc6f5eec9a5f1a6` |
-| `Rampage.app.zip` | 84,285,483 | `46474441e098ffa3af77ef260adb92041c789e503209aac5a6ddb2f82a674190` |
+| `Rampage_0.3.1_x64-setup.exe` | 69,125,163 | `793cab7cd16e3c40d8ffe7e91e48729548c8f0b40fe124bf73c4ff0591ccf115` |
+| `Rampage_0.3.1_x64_en-US.msi` | 79,003,648 | `8c1510ee0b857e7140a2f90e43120d400c4623e262124f4a6cd0ec552c54db4b` |
+| `Rampage_0.3.1_amd64.AppImage` | 168,917,496 | `33bafb0c548ff8f3c538844a47b41aae72e311f0bdb274b92fd1fbcdde8b3add` |
+| `Rampage_0.3.1_amd64.deb` | 98,061,312 | `b6c3f4521ad9058d092fb4c386226a73cc5b5126f0090b0a71dd92db89ef5786` |
+| `Rampage_0.3.1_aarch64.dmg` | 86,264,888 | `48685fe630b23ea451dc035d46ff83c729e01c0a6855eee35c74acb6a7fdccad` |
+| `Rampage.app.zip` | 84,303,262 | `8b1f0a5ea7f7c1de2ea6cb3846e3184e0a8274ec7609e8ef08308adf17d7ef77` |
 
 Candidate Windows and macOS packages are intentionally identified as unsigned/not notarized; the
 workflow keeps production-signing gates reserved for a future stable channel.
