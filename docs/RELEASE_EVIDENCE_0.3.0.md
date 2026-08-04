@@ -27,7 +27,7 @@ the lock screen, the secure desktop, higher-integrity applications, a shell, or 
 | Version coherence | `scripts/Assert-RampageVersion.ps1 -Tag v0.3.0` | PASS — nine release surfaces |
 | Full source campaign | `scripts/Test-Rampage.ps1 -SkipOllama` | PASS — uninterrupted Rust, clippy, desktop, edge, TypeScript SDK, Python lint/type/test, fresh sidecar build, controller lifecycle, mesh/storage, and universal model-gateway campaign |
 | Native Windows package | `scripts/Build-Rampage.ps1 -Profile release` and `scripts/Smoke-RampageInstaller.ps1` | PASS — MSI + NSIS built; NSIS installed six payloads, created both shortcuts, started a ready local fabric, closed cleanly, uninstalled cleanly, and leaked no sidecar |
-| Public release artifacts | Pending publication | PENDING |
+| Public release artifacts | [v0.3.0-remote-assist.1](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.0-remote-assist.1) | PASS — published against merged commit `26f1a6cf455ab6efb90f6c99181965d77cec924b`; all four assets independently downloaded and rehashed |
 | Physical owner-to-laptop view/control | Requires 0.3.0 on both physical machines | PENDING — not replaced by the showcase image |
 
 ## Source-current showcase
@@ -53,6 +53,12 @@ sidecar. The MSI was assembled and hashed but was not installed in this local ca
 source-current screenshot, and architecture graph present. `scripts/Assert-RampageVersion.ps1 -Tag
 v0.3.0` passed all nine release surfaces.
 
-These are local candidate hashes. The release row remains PENDING until the clean merged revision is
-staged and the public assets are independently downloaded and rehashed. The release remains unsigned
-unless Authenticode verification independently succeeds.
+The clean distribution stage binds the artifacts to merged commit
+`26f1a6cf455ab6efb90f6c99181965d77cec924b`. The public release was independently downloaded after
+publication: both installer byte sizes and SHA-256 values matched the table, the checksum file was 190
+bytes with SHA-256 `f6fe2f18d26486a8f5483a71c34ef4556ef5d4843dd4e872ced9a9a201cc9bf4`, and the 666-byte distribution
+manifest had SHA-256 `9ed0f8345cd78ed9badc8ecc8a43edc72e542d425af9e26b387bd0bb87602445`.
+
+The release is public, non-draft, and non-prerelease. It remains unsigned because Authenticode
+credentials were not configured and the distribution manifest correctly records
+`platform_signature_verified: false`.
