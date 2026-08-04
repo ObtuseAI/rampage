@@ -4653,7 +4653,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rampage-agent"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -4683,7 +4683,7 @@ dependencies = [
 
 [[package]]
 name = "rampage-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4699,7 +4699,7 @@ dependencies = [
 
 [[package]]
 name = "rampage-controller"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -4731,7 +4731,7 @@ dependencies = [
 
 [[package]]
 name = "rampage-desktop"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes-gcm 0.11.0",
  "base64 0.22.1",
@@ -4757,7 +4757,7 @@ dependencies = [
 
 [[package]]
 name = "rampage-edge"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4779,7 +4779,7 @@ dependencies = [
 
 [[package]]
 name = "rampage-edge-app"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rampage-edge",
  "serde",
@@ -4791,7 +4791,7 @@ dependencies = [
 
 [[package]]
 name = "rampage-ledger"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "hex",
@@ -4804,7 +4804,7 @@ dependencies = [
 
 [[package]]
 name = "rampage-mesh"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4823,7 +4823,7 @@ dependencies = [
 
 [[package]]
 name = "rampage-policy"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "ed25519-dalek 2.2.0",
@@ -4839,7 +4839,7 @@ dependencies = [
 
 [[package]]
 name = "rampage-project"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4852,7 +4852,7 @@ dependencies = [
 
 [[package]]
 name = "rampage-protocol"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "serde",
@@ -4863,7 +4863,7 @@ dependencies = [
 
 [[package]]
 name = "rampage-relay"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4887,7 +4887,7 @@ dependencies = [
 
 [[package]]
 name = "rampage-sdk"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4901,7 +4901,7 @@ dependencies = [
 
 [[package]]
 name = "rampage-storage"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes-gcm 0.11.0",
  "chrono",
@@ -6366,7 +6366,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-rampage-edge"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "tauri",

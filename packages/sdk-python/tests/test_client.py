@@ -81,6 +81,33 @@ def test_topology_uses_the_token_protected_offer_route() -> None:
     assert client.topology() == []
 
 
+def test_node_revocation_is_exact_and_token_protected() -> None:
+    node_id = "0198f1aa-9f18-7dc3-81a3-d78f22efb662"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-rampage-token"] == "local-token"
+        assert request.url.path == f"/v1/nodes/{node_id}/revoke"
+        assert request.content == f'{{"confirmation":"FORGET {node_id}"}}'.encode()
+        return httpx.Response(
+            200,
+            json={
+                "schema": "rampage.node-revocation-receipt.v1",
+                "node_id": node_id,
+                "revoked": True,
+                "remote_assist_sessions_closed": 0,
+            },
+        )
+
+    client = RampageClient(token="local-token")
+    client._client.close()
+    client._client = httpx.Client(
+        base_url="http://127.0.0.1:47831",
+        headers={"x-rampage-token": "local-token"},
+        transport=httpx.MockTransport(handler),
+    )
+    assert client.revoke_node(node_id)["revoked"] is True
+
+
 def test_capability_inventory_and_self_scan_are_token_protected() -> None:
     requests: list[str] = []
 

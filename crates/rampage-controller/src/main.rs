@@ -265,6 +265,12 @@ struct RemoteDesktopInputRequest {
     events: Vec<RemoteInputEventV1>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevokeNodeRequest {
+    confirmation: String,
+}
+
 const DEFAULT_MESH_UDP_PORT: u16 = 47_838;
 
 #[tokio::main]
@@ -389,6 +395,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/resume", post(local_resume))
         .route("/v1/enrollment/invites", post(create_invite))
         .route("/v1/nodes", get(list_nodes))
+        .route("/v1/nodes/{node_id}/revoke", post(revoke_node))
         .route("/v1/nodes/enroll", post(enroll_node))
         .route("/v1/offers", get(list_offers).post(register_offer))
         .route("/v1/workload-capabilities", get(list_workload_capabilities))
@@ -614,6 +621,103 @@ async fn list_nodes(
             .values()
             .cloned()
             .collect(),
+    ))
+}
+
+async fn revoke_node(
+    State(state): State<AppState>,
+    Path(node_id): Path<Uuid>,
+    Json(request): Json<RevokeNodeRequest>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    if request.confirmation != format!("FORGET {node_id}") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "exact device revocation confirmation is required"})),
+        ));
+    }
+    let _admission_guard = state.admission_gate.lock().await;
+    let identity = state
+        .nodes
+        .read()
+        .map_err(lock_error)?
+        .get(&node_id)
+        .cloned()
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "node is not enrolled"})),
+            )
+        })?;
+    let remote_sessions_closed = state
+        .remote_desktop_sessions
+        .read()
+        .map_err(lock_error)?
+        .values()
+        .filter(|session| session.lease.node_id == node_id)
+        .count();
+    state
+        .ledger
+        .append(
+            "node.revoked",
+            &node_id.to_string(),
+            &json!({
+                "node_id": node_id,
+                "display_name": identity.display_name,
+                "public_key": identity.public_key,
+                "remote_assist_sessions_closed": remote_sessions_closed,
+                "revoked_at": chrono::Utc::now()
+            }),
+        )
+        .map_err(internal_error)?;
+    state.nodes.write().map_err(lock_error)?.remove(&node_id);
+    state.offers.write().map_err(lock_error)?.remove(&node_id);
+    state
+        .assignments
+        .write()
+        .map_err(lock_error)?
+        .retain(|_, assignment| assignment.lease.node_id != node_id);
+    state
+        .reservations
+        .write()
+        .map_err(lock_error)?
+        .retain(|reservation| reservation.node_id != node_id);
+    state
+        .shard_sets
+        .write()
+        .map_err(lock_error)?
+        .retain(|_, shard| shard.leases.iter().all(|lease| lease.node_id != node_id));
+    state
+        .remote_desktop_sessions
+        .write()
+        .map_err(lock_error)?
+        .retain(|_, session| session.lease.node_id != node_id);
+    state
+        .artifact_replicas
+        .write()
+        .map_err(lock_error)?
+        .retain(|(_, replica_node), _| *replica_node != node_id);
+    state
+        .replica_evidence
+        .write()
+        .map_err(lock_error)?
+        .retain(|(_, replica_node), _| *replica_node != node_id);
+    for cancellation in state.model_cancellations.lock().await.values() {
+        let _ = cancellation.send(true);
+    }
+    refresh_diagnostics(&state).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        )
+    })?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "schema": "rampage.node-revocation-receipt.v1",
+            "node_id": node_id,
+            "revoked": true,
+            "remote_assist_sessions_closed": remote_sessions_closed
+        })),
     ))
 }
 
@@ -5335,7 +5439,7 @@ fn restore_state(ledger: &Ledger, fencing_epoch: u64) -> anyhow::Result<Restored
     let mut proposed_jobs: HashMap<Uuid, JobSpecV1> = HashMap::new();
     let mut assignments: HashMap<Uuid, Assignment> = HashMap::new();
     let mut completed_receipts = HashMap::new();
-    let mut shard_sets = HashMap::new();
+    let mut shard_sets: HashMap<Uuid, ShardSetRecord> = HashMap::new();
     let mut artifact_replicas = HashMap::new();
     let mut replica_evidence = HashMap::new();
     let now = chrono::Utc::now();
@@ -5351,6 +5455,19 @@ fn restore_state(ledger: &Ledger, fencing_epoch: u64) -> anyhow::Result<Restored
                 "node.enrolled" => {
                     let identity: NodeIdentityV1 = serde_json::from_value(event.payload)?;
                     nodes.insert(identity.node_id, identity);
+                }
+                "node.revoked" => {
+                    let Ok(node_id) = Uuid::parse_str(&event.subject_id) else {
+                        continue;
+                    };
+                    nodes.remove(&node_id);
+                    offers.remove(&node_id);
+                    assignments.retain(|_, assignment| assignment.lease.node_id != node_id);
+                    shard_sets.retain(|_, shard| {
+                        shard.leases.iter().all(|lease| lease.node_id != node_id)
+                    });
+                    artifact_replicas.retain(|(_, replica_node), _| *replica_node != node_id);
+                    replica_evidence.retain(|(_, replica_node), _| *replica_node != node_id);
                 }
                 "resource.offer.registered" => {
                     let offer: ResourceOfferV1 = serde_json::from_value(event.payload)?;
@@ -5877,6 +5994,44 @@ mod tests {
         assert_eq!(validate_model_runtime_contracts(&offer), Ok(()));
         offer.model_runtimes[0].available_model_bytes += 1;
         assert!(validate_model_runtime_contracts(&offer).is_err());
+    }
+
+    #[test]
+    fn revoked_node_and_its_live_offer_do_not_return_after_restart() {
+        let ledger = Ledger::in_memory().unwrap();
+        let offer = valid_model_offer();
+        let identity = NodeIdentityV1 {
+            schema: NodeIdentityV1::SCHEMA.into(),
+            node_id: offer.node_id,
+            owner_id: Uuid::now_v7(),
+            display_name: "retired laptop".into(),
+            device_kind: DeviceKind::Desktop,
+            platform: "windows-x86_64".into(),
+            public_key: "b".repeat(64),
+            enrolled_at: chrono::Utc::now(),
+            fencing_epoch: 0,
+        };
+        ledger
+            .append("node.enrolled", &identity.node_id.to_string(), &identity)
+            .unwrap();
+        ledger
+            .append(
+                "resource.offer.registered",
+                &identity.node_id.to_string(),
+                &offer,
+            )
+            .unwrap();
+        ledger
+            .append(
+                "node.revoked",
+                &identity.node_id.to_string(),
+                &json!({"node_id": identity.node_id}),
+            )
+            .unwrap();
+
+        let (nodes, offers, ..) = restore_state(&ledger, 0).unwrap();
+        assert!(!nodes.contains_key(&identity.node_id));
+        assert!(!offers.contains_key(&identity.node_id));
     }
 
     #[test]

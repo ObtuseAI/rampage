@@ -63,10 +63,10 @@ test("local stop does not depend on controller", () => {
   expect(useRampage.getState().capability).toBe("read_only");
 });
 
-test("separates maximum model size from measured speed boost", () => {
+test("separates the biggest AI outcome from the fastest AI outcome", () => {
   render(<App />);
-  expect(screen.getByRole("button", { name: /maximum model/i })).toHaveAttribute("aria-pressed", "true");
-  fireEvent.click(screen.getByRole("button", { name: /speed boost/i }));
+  expect(screen.getByRole("button", { name: /biggest ai/i })).toHaveAttribute("aria-pressed", "true");
+  fireEvent.click(screen.getByRole("button", { name: /fastest ai/i }));
   expect(useRampage.getState().computeStrategy).toBe("speed_boost");
   expect(screen.getByText(/use tensor peers only when measured links predict faster tokens/i)).toBeInTheDocument();
   expect(localStorage.getItem("rampage.compute-strategy")).toBe("speed_boost");

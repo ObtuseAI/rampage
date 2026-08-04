@@ -5,7 +5,7 @@ binary release claim.
 
 | Platform | Installable package | Controller | Worker | Intended donation profile | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| Windows 11 x64 | MSI and NSIS 0.3.0 Remote Assist candidate | Shipped | Shipped | CPU, RAM cache, NVIDIA GPU/VRAM, disk, exact local Ollama models; optional paired-owner desktop view/control | 0.2.3 packaged owner/worker lifecycle proof plus source-qualified 0.3.0 Remote Assist contracts, authenticated transport, worker opt-in, visible active state, short signed leases, replay fencing, and STOP/revoke; exact 0.3.0 package hashes and physical laptop control remain gated by the release evidence |
+| Windows 11 x64 | MSI and NSIS 0.3.1 recovery candidate | Shipped | Shipped | CPU, RAM cache, NVIDIA GPU/VRAM, disk, exact local Ollama models; optional paired-owner desktop view/control | 0.3.1 adds repair, pair-again, owner Forget, factory reset, restart-safe revocation replay, and an outcome-first automatic strategy UI to the qualified 0.3.0 Remote Assist contracts; exact package hashes and physical laptop control remain gated by the release evidence |
 | Windows 10 x64 | Not qualified | Source likely portable | Source likely portable | Same as Windows 11, hardware-dependent | Unexecuted |
 | macOS Apple Silicon | Not shipped | Rust source portable | Rust source portable | CPU/GPU whole jobs, RAM cache, disk | Unexecuted; native packaging and discovery adapters required |
 | Linux x64 | Not shipped | Rust source portable | Rust source portable | CPU, vendor GPU/VRAM, RAM cache, disk | Unexecuted; GTK dependency warning must be resolved or accepted before release |
@@ -20,7 +20,7 @@ packaging on its named GitHub-hosted runner; it does not convert an unsigned can
 release. Stable Windows and macOS publication additionally requires real platform credentials and
 independent signature/notarization verification.
 
-The installable column describes the current 0.3.0 candidate lane. Later source-qualified capabilities
+The installable column describes the current 0.3.1 candidate lane. Later source-qualified capabilities
 do not become packaged or signed merely because they pass a source campaign; each evidence page
 states that boundary explicitly.
 

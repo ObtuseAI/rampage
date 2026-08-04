@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -25,6 +25,19 @@ class RampageClient:
 
     def invite(self) -> dict[str, Any]:
         return self._post("/v1/enrollment/invites", {})
+
+    def nodes(self) -> list[dict[str, Any]]:
+        response = self._client.get("/v1/nodes")
+        response.raise_for_status()
+        payload: list[dict[str, Any]] = response.json()
+        return payload
+
+    def revoke_node(self, node_id: str) -> dict[str, Any]:
+        """Revoke one exact enrolled identity and all authority derived from it."""
+        return self._post(
+            f"/v1/nodes/{quote(node_id, safe='')}/revoke",
+            {"confirmation": f"FORGET {node_id}"},
+        )
 
     def discover(self, path: str) -> dict[str, Any]:
         return self._post("/v1/projects/discover", {"path": path})

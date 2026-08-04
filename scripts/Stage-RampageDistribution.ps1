@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $root = Split-Path -Parent $PSScriptRoot
 $bundleRoot = Join-Path $root 'target/release/bundle'
 $sourceChanges = @(& git -C $root status --porcelain=v1 --untracked-files=all)
@@ -113,7 +114,11 @@ $assets = Get-ChildItem -LiteralPath $stageRoot -File | Sort-Object Name | ForEa
     }
 }
 $checksumLines = $assets | ForEach-Object { "$($_.sha256)  $($_.name)" }
-Set-Content -LiteralPath (Join-Path $stageRoot "SHA256SUMS-$Platform") -Value $checksumLines -Encoding utf8NoBOM
+[IO.File]::WriteAllLines(
+    (Join-Path $stageRoot "SHA256SUMS-$Platform"),
+    [string[]]$checksumLines,
+    $utf8NoBom
+)
 
 $sourceCommit = (& git -C $root rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'could not resolve source commit' }
@@ -127,7 +132,11 @@ $manifest = [ordered]@{
     platform_signature_verified = $signatureVerified
     assets = @($assets)
 }
-$manifest | ConvertTo-Json -Depth 6 |
-    Set-Content -LiteralPath (Join-Path $stageRoot "distribution-manifest-$Platform.json") -Encoding utf8NoBOM
+$manifestJson = $manifest | ConvertTo-Json -Depth 6
+[IO.File]::WriteAllText(
+    (Join-Path $stageRoot "distribution-manifest-$Platform.json"),
+    $manifestJson + [Environment]::NewLine,
+    $utf8NoBom
+)
 
-$manifest | ConvertTo-Json -Depth 6
+$manifestJson

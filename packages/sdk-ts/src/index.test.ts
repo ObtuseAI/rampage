@@ -39,6 +39,23 @@ describe("RampageClient", () => {
     vi.unstubAllGlobals();
   });
 
+  it("revokes one exact enrolled identity with the required confirmation", async () => {
+    const nodeId = "0198f1aa-9f18-7dc3-81a3-d78f22efb662";
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      schema: "rampage.node-revocation-receipt.v1",
+      node_id: nodeId,
+      revoked: true,
+      remote_assist_sessions_closed: 1,
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new RampageClient(undefined, "local-token");
+    expect((await client.revokeNode(nodeId)).revoked).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`http://127.0.0.1:47831/v1/nodes/${nodeId}/revoke`);
+    expect(JSON.parse(init.body as string)).toEqual({ confirmation: `FORGET ${nodeId}` });
+    vi.unstubAllGlobals();
+  });
+
   it("previews model strategy without implying execution authority", async () => {
     const payload = {
       schema: "rampage.model-session-plan.v1",

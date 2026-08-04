@@ -1,4 +1,4 @@
-import { Activity, Boxes, BrainCircuit, CircleStop, Command, Eye, Grid2X2, MonitorUp, MousePointer2, Orbit, Play, RefreshCw, Rocket, ShieldCheck, UserPlus } from "lucide-react";
+import { Activity, Boxes, BrainCircuit, CircleStop, Command, Eye, Grid2X2, MonitorUp, MousePointer2, Orbit, Play, RefreshCw, Rocket, ShieldCheck, UserPlus, Wrench } from "lucide-react";
 import { lazy, Suspense, useEffect } from "react";
 import { CommandPalette } from "./components/CommandPalette";
 import { ComputeStrategyPanel } from "./components/ComputeStrategyPanel";
@@ -7,6 +7,7 @@ import { PairingPanel } from "./components/PairingPanel";
 import { Onboarding } from "./components/Onboarding";
 import { OpsGrid } from "./components/OpsGrid";
 import { RemoteAssistPanel } from "./components/RemoteAssistPanel";
+import { RecoveryCenter } from "./components/RecoveryCenter";
 import { useRampage } from "./store";
 
 const Arena = lazy(() => import("./components/Arena").then((module) => ({ default: module.Arena })));
@@ -37,11 +38,13 @@ export default function App() {
       {state.onboarding && <Onboarding />}
       <CommandPalette />
       <RemoteAssistPanel />
+      <RecoveryCenter />
       <header className="topbar">
         <div className="identity"><div className="brand-mark">R</div><div><strong>RAMPAGE</strong><span>PERSONAL COMPUTE FABRIC</span></div></div>
         <div className={`status-ribbon ${state.remoteAssistStatus.active ? "remote-active" : ""}`} role="status"><i className={state.connected && !state.killLatch ? "online" : "reduced"} /><strong>{state.killLatch ? "OWNER STOPPED" : state.remoteAssistStatus.active ? "REMOTE CONTROL ACTIVE" : state.fabricRole === "worker" ? state.workerRuntime.state === "active" ? "WORKER ACTIVE" : state.workerRuntime.state === "starting" ? "WORKER CONNECTING" : "WORKER ATTENTION" : state.connected ? "FABRIC LIVE" : "LOCAL REDUCED"}</strong><span>{state.nodes.length} nodes</span><span>{state.meshMode.replace("_", " ")}</span><span>{state.diagnostic ? `self-scan ${state.diagnostic.health_score}/100` : state.capability.replaceAll("_", " ")}</span></div>
         <div className="header-actions">
           <button className="icon-button" onClick={() => void state.refresh()} aria-label="Refresh fabric"><RefreshCw size={17} /></button>
+          <button className="icon-button" onClick={() => state.setRecoveryOpen(true)} aria-label="Open Recovery Center" title="Fix connection or start over"><Wrench size={17} /></button>
           {state.fabricRole === "owner" && <button className="command-button" onClick={() => void state.openPairingWindow().catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Pairing could not start." }))}><UserPlus size={15} /> Add machine</button>}
           <button className={`autostart-button ${state.runAtLogin ? "active" : ""}`} onClick={() => void state.toggleAutostart()} aria-label={state.runAtLogin ? "Stop launching Rampage with Windows" : "Start Rampage with Windows"} title="Keep your fabric available after sign-in"><Rocket size={15} /> {state.runAtLogin ? "AUTO-START ON" : "AUTO-START OFF"}</button>
           <button className="command-button" onClick={() => state.setCommandOpen(true)}><Command size={16} /> Command <kbd>Ctrl K</kbd></button>

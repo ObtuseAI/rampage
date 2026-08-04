@@ -7,7 +7,7 @@ use rand::{TryRng as _, rngs::SysRng};
 use std::{
     io::{Read, Write},
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -54,6 +54,19 @@ struct RemoteAssistStatusView {
     expires_at: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryStatusView {
+    schema: &'static str,
+    version: &'static str,
+    role: &'static str,
+    state: &'static str,
+    healthy: bool,
+    issues: Vec<String>,
+    can_leave_fabric: bool,
+    can_factory_reset: bool,
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RemoteAssistPolicyDisk {
@@ -88,8 +101,11 @@ impl Default for WorkerRuntime {
 const BACKGROUND_ARG: &str = "--background";
 const AUTOSTART_NAME: &str = "Rampage";
 const OWNER_FABRIC_MARKER: &str = "owner-fabric-v1.ready";
+const SETUP_REQUIRED_MARKER: &str = "setup-required-v1.ready";
 const REMOTE_ASSIST_POLICY_FILE: &str = "remote-assist-policy.json";
 const REMOTE_ASSIST_ACTIVE_FILE: &str = "remote-assist-active.json";
+const LEAVE_FABRIC_CONFIRMATION: &str = "LEAVE FABRIC";
+const FACTORY_RESET_CONFIRMATION: &str = "RESET RAMPAGE";
 #[cfg(target_os = "windows")]
 const AUTOSTART_RUN_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
 #[cfg(target_os = "windows")]
@@ -181,6 +197,22 @@ fn kill_process_tree(child: CommandChild) {
     let _ = child.kill();
 }
 
+fn stop_all_sidecars(app: &AppHandle) -> Result<usize, String> {
+    let children = {
+        let state = app.state::<Sidecars>();
+        let mut sidecars = state
+            .0
+            .lock()
+            .map_err(|_| "sidecar state lock poisoned".to_string())?;
+        sidecars.drain(..).collect::<Vec<_>>()
+    };
+    let count = children.len();
+    for child in children {
+        kill_process_tree(child);
+    }
+    Ok(count)
+}
+
 fn runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("RAMPAGE_DATA_DIR") {
         return Ok(PathBuf::from(path));
@@ -204,6 +236,188 @@ fn controller_bind() -> Result<SocketAddr, String> {
 
 fn controller_origin() -> Result<String, String> {
     Ok(format!("http://{}", controller_bind()?))
+}
+
+fn setup_required(data_dir: &Path) -> bool {
+    data_dir.join(SETUP_REQUIRED_MARKER).is_file()
+}
+
+fn fabric_role_at(data_dir: &Path) -> &'static str {
+    if setup_required(data_dir) {
+        "setup"
+    } else if worker_enrollment_exists(data_dir) {
+        "worker"
+    } else {
+        "owner"
+    }
+}
+
+fn enrollment_file_state(data_dir: &Path) -> (&'static str, Vec<String>) {
+    let setup = setup_required(data_dir);
+    let owner = data_dir.join(OWNER_FABRIC_MARKER).is_file();
+    let invite = data_dir.join("remote-invite.json").is_file();
+    let pin = data_dir.join("agent.controller-pin.json").is_file();
+    let enrolled = data_dir.join("agent.enrolled").is_file();
+    let identity = data_dir.join("agent.identity.json").is_file();
+    let key = data_dir.join("agent.key").is_file();
+    let mut issues = Vec::new();
+
+    if setup {
+        if owner || invite || pin || enrolled || identity || key {
+            issues.push(
+                "Setup mode still contains fabric credentials; run Reset Rampage again.".into(),
+            );
+            return ("cleanup_required", issues);
+        }
+        return ("ready_to_configure", issues);
+    }
+    if owner {
+        if invite || pin {
+            issues.push("Owner and worker enrollment markers conflict on this device.".into());
+            return ("repair_required", issues);
+        }
+        return ("owner_active", issues);
+    }
+    if pin {
+        if !enrolled || !identity || !key {
+            issues.push(
+                "The paired-worker identity is incomplete or was interrupted during an update."
+                    .into(),
+            );
+            return ("repair_required", issues);
+        }
+        return ("worker_paired", issues);
+    }
+    if invite {
+        return ("enrollment_pending", issues);
+    }
+    if enrolled || identity || key {
+        issues.push("Local worker identity exists without a pinned owner.".into());
+        return ("repair_required", issues);
+    }
+    ("owner_starting", issues)
+}
+
+fn recovery_status_at(data_dir: &Path) -> RecoveryStatusView {
+    let role = fabric_role_at(data_dir);
+    let (state, issues) = enrollment_file_state(data_dir);
+    RecoveryStatusView {
+        schema: "rampage.recovery-status.v1",
+        version: env!("CARGO_PKG_VERSION"),
+        role,
+        state,
+        healthy: issues.is_empty(),
+        issues,
+        can_leave_fabric: role == "worker",
+        can_factory_reset: true,
+    }
+}
+
+fn validate_runtime_reset_target(data_dir: &Path) -> Result<(), String> {
+    if !data_dir.is_absolute()
+        || data_dir.file_name().and_then(|value| value.to_str()) != Some("runtime")
+        || data_dir
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            .is_none_or(|value| !value.eq_ignore_ascii_case("ai.obtuse.rampage"))
+    {
+        return Err("refusing to reset a path outside the Rampage runtime directory".into());
+    }
+    if data_dir.exists() {
+        let metadata = std::fs::symlink_metadata(data_dir).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("Rampage runtime path is not a regular directory".into());
+        }
+    }
+    Ok(())
+}
+
+fn remove_runtime_entry(path: &Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        std::fs::remove_file(path).map_err(|error| error.to_string())
+    } else if metadata.is_dir() {
+        std::fs::remove_dir_all(path).map_err(|error| error.to_string())
+    } else {
+        Err(format!(
+            "refusing to reset unsupported runtime entry {}",
+            path.display()
+        ))
+    }
+}
+
+fn reset_runtime_to_setup(data_dir: &Path) -> Result<(), String> {
+    validate_runtime_reset_target(data_dir)?;
+    std::fs::create_dir_all(data_dir).map_err(|error| error.to_string())?;
+    for entry in std::fs::read_dir(data_dir).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        remove_runtime_entry(&entry.path())?;
+    }
+    write_new_marker(
+        &data_dir.join(SETUP_REQUIRED_MARKER),
+        b"rampage.setup-required.v1\n",
+    )
+}
+
+#[tauri::command]
+fn recovery_status(app: AppHandle) -> Result<RecoveryStatusView, String> {
+    Ok(recovery_status_at(&runtime_dir(&app)?))
+}
+
+#[tauri::command]
+fn repair_connection(app: AppHandle) -> Result<(), String> {
+    let data_dir = runtime_dir(&app)?;
+    let (_, issues) = enrollment_file_state(&data_dir);
+    if !issues.is_empty() {
+        return Err("Enrollment files are inconsistent; use Leave fabric or Reset Rampage.".into());
+    }
+    app.restart()
+}
+
+#[tauri::command]
+fn leave_fabric(app: AppHandle, confirmation: String) -> Result<(), String> {
+    if confirmation != LEAVE_FABRIC_CONFIRMATION {
+        return Err("exact LEAVE FABRIC confirmation is required".into());
+    }
+    let data_dir = runtime_dir(&app)?;
+    if fabric_role_at(&data_dir) != "worker" {
+        return Err("Leave fabric is available only on a paired worker".into());
+    }
+    stop_all_sidecars(&app)?;
+    reset_runtime_to_setup(&data_dir)?;
+    app.restart()
+}
+
+#[tauri::command]
+fn factory_reset(app: AppHandle, confirmation: String) -> Result<(), String> {
+    if confirmation != FACTORY_RESET_CONFIRMATION {
+        return Err("exact RESET RAMPAGE confirmation is required".into());
+    }
+    let data_dir = runtime_dir(&app)?;
+    stop_all_sidecars(&app)?;
+    platform_set_autostart(&app, false)?;
+    reset_runtime_to_setup(&data_dir)?;
+    app.restart()
+}
+
+#[tauri::command]
+fn activate_owner_fabric(app: AppHandle) -> Result<(), String> {
+    let data_dir = runtime_dir(&app)?;
+    if worker_enrollment_exists(&data_dir) {
+        return Err("this device is still paired as a worker".into());
+    }
+    let setup_marker = data_dir.join(SETUP_REQUIRED_MARKER);
+    if setup_marker.is_file() {
+        let owner_marker = data_dir.join(OWNER_FABRIC_MARKER);
+        write_new_marker(&owner_marker, b"rampage.owner-fabric.v1\n")?;
+        if let Err(error) = std::fs::remove_file(setup_marker) {
+            let _ = std::fs::remove_file(owner_marker);
+            return Err(format!("could not activate the owner fabric: {error}"));
+        }
+        app.restart();
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -258,11 +472,7 @@ fn propagate_controller_stop(data_dir: PathBuf) {
 
 #[tauri::command]
 fn fabric_mode(app: AppHandle) -> Result<&'static str, String> {
-    Ok(if worker_enrollment_exists(&runtime_dir(&app)?) {
-        "worker"
-    } else {
-        "owner"
-    })
+    Ok(fabric_role_at(&runtime_dir(&app)?))
 }
 
 fn remote_assist_enabled_at(data_dir: &std::path::Path) -> bool {
@@ -584,6 +794,15 @@ fn persist_remote_invite(app: &AppHandle, invitation: &str) -> Result<(), String
         let _ = std::fs::remove_file(&temporary);
     }
     write_result?;
+    let setup_marker = data_dir.join(SETUP_REQUIRED_MARKER);
+    if setup_marker.is_file()
+        && let Err(error) = std::fs::remove_file(&setup_marker)
+    {
+        let _ = std::fs::remove_file(&destination);
+        return Err(format!(
+            "could not leave setup mode after enrollment: {error}"
+        ));
+    }
     Ok(())
 }
 
@@ -816,7 +1035,8 @@ async fn run_fabric_benchmark(app: AppHandle) -> Result<serde_json::Value, Strin
 }
 
 fn worker_enrollment_exists(data_dir: &std::path::Path) -> bool {
-    !data_dir.join(OWNER_FABRIC_MARKER).is_file()
+    !data_dir.join(SETUP_REQUIRED_MARKER).is_file()
+        && !data_dir.join(OWNER_FABRIC_MARKER).is_file()
         && (data_dir.join("remote-invite.json").is_file()
             || data_dir.join("agent.controller-pin.json").is_file())
 }
@@ -908,6 +1128,9 @@ fn configured_private_relay(data_dir: &std::path::Path) -> Result<Option<String>
 fn launch_fabric(app: &AppHandle) -> Result<(), String> {
     let data_dir = runtime_dir(app)?;
     std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
+    if setup_required(&data_dir) {
+        return Ok(());
+    }
     if worker_enrollment_exists(&data_dir) {
         return launch_remote_worker(app, &data_dir);
     }
@@ -1120,7 +1343,10 @@ fn schedule_remote_assist_indicator(
 }
 
 fn install_desktop_lifecycle(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let role = if worker_enrollment_exists(&runtime_dir(app.handle())?) {
+    let data_dir = runtime_dir(app.handle())?;
+    let role = if setup_required(&data_dir) {
+        "Setup required"
+    } else if worker_enrollment_exists(&data_dir) {
         "Worker active"
     } else {
         "Owner fabric active"
@@ -1234,11 +1460,14 @@ pub fn run() {
         .manage(LocalAiRuntime::default())
         .manage(PairingManager::default())
         .setup(|app| {
+            let setup_required = setup_required(&runtime_dir(app.handle())?);
             launch_fabric(app.handle()).map_err(std::io::Error::other)?;
-            local_ai::schedule(
-                app.state::<LocalAiRuntime>().inner().clone(),
-                diagnostic_instance_is_bounded(),
-            );
+            if !setup_required {
+                local_ai::schedule(
+                    app.state::<LocalAiRuntime>().inner().clone(),
+                    diagnostic_instance_is_bounded(),
+                );
+            }
             install_desktop_lifecycle(app)?;
             schedule_diagnostic_exit(app.handle());
             Ok(())
@@ -1260,6 +1489,11 @@ pub fn run() {
             reject_pairing,
             autostart_enabled,
             set_autostart,
+            recovery_status,
+            repair_connection,
+            leave_fabric,
+            factory_reset,
+            activate_owner_fabric,
             remote_assist_status,
             set_remote_assist_enabled
         ])
@@ -1372,5 +1606,52 @@ mod tests {
         )
         .unwrap();
         assert!(!worker_enrollment_exists(temp.path()));
+    }
+
+    fn recovery_runtime() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("ai.obtuse.rampage/runtime")).unwrap();
+        root
+    }
+
+    #[test]
+    fn recovery_detects_incomplete_worker_identity() {
+        let root = recovery_runtime();
+        let runtime = root.path().join("ai.obtuse.rampage/runtime");
+        std::fs::write(runtime.join("agent.controller-pin.json"), b"pinned").unwrap();
+        let status = recovery_status_at(&runtime);
+        assert_eq!(status.role, "worker");
+        assert_eq!(status.state, "repair_required");
+        assert!(!status.healthy);
+        assert!(status.can_leave_fabric);
+    }
+
+    #[test]
+    fn reset_rotates_to_clean_setup_without_following_unrelated_paths() {
+        let root = recovery_runtime();
+        let runtime = root.path().join("ai.obtuse.rampage/runtime");
+        std::fs::write(runtime.join("agent.key"), b"secret").unwrap();
+        std::fs::write(runtime.join("agent.controller-pin.json"), b"pinned").unwrap();
+        std::fs::create_dir(runtime.join("cas")).unwrap();
+        std::fs::write(runtime.join("cas/object"), b"encrypted").unwrap();
+        reset_runtime_to_setup(&runtime).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(runtime.join(SETUP_REQUIRED_MARKER)).unwrap(),
+            "rampage.setup-required.v1\n"
+        );
+        assert_eq!(std::fs::read_dir(&runtime).unwrap().count(), 1);
+        let status = recovery_status_at(&runtime);
+        assert_eq!(status.role, "setup");
+        assert_eq!(status.state, "ready_to_configure");
+        assert!(status.healthy);
+    }
+
+    #[test]
+    fn reset_refuses_broad_or_renamed_targets() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(reset_runtime_to_setup(root.path()).is_err());
+        let wrong = root.path().join("not-rampage/runtime");
+        std::fs::create_dir_all(&wrong).unwrap();
+        assert!(reset_runtime_to_setup(&wrong).is_err());
     }
 }

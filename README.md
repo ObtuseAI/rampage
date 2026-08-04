@@ -18,17 +18,18 @@ the authority to run wild.
 [![Rust 1.91](https://img.shields.io/badge/Rust-1.91%2B-0b0f17?logo=rust&logoColor=67f5c5)](Cargo.toml)
 [![AI authority](https://img.shields.io/badge/AI%20authority-proposals%20only-0b0f17?logo=probot&logoColor=67f5c5)](docs/ARCHITECTURE.md#recursive-improvement)
 
-## [⬇ Download Rampage 0.3.0 for Windows](https://obtuseai.github.io/rampage/download/)
+## [⬇ Download Rampage 0.3.1 for Windows](https://obtuseai.github.io/rampage/download/)
 
 **One installer. Desktop shortcut included.**
-[Release notes and SHA-256](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.0-remote-assist.1) ·
+[Release notes and SHA-256](docs/RELEASE_NOTES_0.3.1.md) ·
 [All releases](https://github.com/ObtuseAI/rampage/releases)
 
 [**Launch the showcase**](https://obtuseai.github.io/rampage/) ·
 [Architecture](docs/ARCHITECTURE.md) ·
+[Universal fabric blueprint](docs/UNIVERSAL_FABRIC_BLUEPRINT.md) ·
 [Easy pairing](docs/PAIRING.md) ·
 [Security](SECURITY.md) ·
-[0.3.0 release evidence](docs/RELEASE_EVIDENCE_0.3.0.md) ·
+[0.3.1 release evidence](docs/RELEASE_EVIDENCE_0.3.1.md) ·
 [Owner-relay evidence](docs/OWNER_RELAY_EVIDENCE.md) ·
 [Resumable-storage evidence](docs/RESUMABLE_STORAGE_EVIDENCE.md) ·
 [Native distribution](docs/DISTRIBUTION.md) ·
@@ -62,12 +63,11 @@ machine that can actually perform it.
 
 ## Built—not imagined
 
-Rampage 0.3.0 is the current Windows x64 Remote Assist candidate. It keeps the complete 0.2.3
-fabric-proof foundation, then gives the paired owner an optional live view/control lane for an
-unlocked Windows worker. Access is off by default on the worker, visible in the app and tray while
-active, bounded by renewable 30-second signed leases, authenticated to the pinned controller, and
-revocable from either machine. It does not grant a shell, elevation, UAC, lock-screen, or Windows
-secure-desktop authority.
+Rampage 0.3.1 is the current Windows x64 recovery and automatic-role release. It preserves the
+Remote Assist and fabric-proof foundation, then closes the complete device lifecycle: repair in
+place, return a worker to pairing, revoke a stale enrolled identity from the owner, or factory-reset
+the local Rampage runtime without uninstalling external model stores. A failed native status bridge
+now produces an actionable recovery state instead of an infinite loading surface.
 
 | Proof surface | Validated result |
 | --- | --- |
@@ -80,13 +80,15 @@ secure-desktop authority.
 | Signed fabric benchmark | One bounded CPU grant per capable live node; deterministic SHA-256 chains; node-pinned placement; signed receipts; aggregate and scale-over-fastest results in the desktop |
 | Universal capability contract | Signed offers advertise exact workload domain, adapter, operation, execution pattern, isolation, runtime digest, and qualification status; candidate profiles grant no authority |
 | Autonomous self-scan | Stable evidence digests cover routes, links, failures, denials, thermal/battery pressure, capability gaps, idle capacity, and protected-artifact replication |
-| Compute Strategy | Read-only Maximum Model, Speed Boost, Throughput, Efficiency, and Autonomous placement previews with exact capacity and qualification blockers |
+| Compute Strategy | Outcome-first Automatic, Biggest AI, Fastest AI, More Work, and Protect This PC placement previews with exact capacity and qualification blockers |
+| Lifecycle recovery | One-screen Fix Rampage, Pair again, enrolled-device Forget, redacted receipt, and typed local factory reset; restart replay keeps revoked nodes and offers gone |
 | Remote Assist | Worker opt-in; paired-owner view/control; dedicated authenticated QUIC protocol; request-, node-, controller-, epoch-, size-, frame-rate-, and input-sequence bounds; visible active state; STOP/revoke |
 | Packaged product | Native Tauri shell, role-aware system tray, close-to-tray, start-at-login, governed sidecars, cold-start tolerance, controller-restart recovery, clean explicit shutdown, installer, and automatic desktop launcher |
 | Verification | Rust, desktop, TypeScript SDK, Python intelligence, Python SDK, deterministic universal-gateway, forced-relay mesh, packaging, and lifecycle gates |
 
-The 0.3.0 source, package, and physical-device boundary is recorded in
-[the current release evidence](docs/RELEASE_EVIDENCE_0.3.0.md). The immutable packaged 0.2.3
+The 0.3.1 source, package, and physical-device boundary is recorded in
+[the current release evidence](docs/RELEASE_EVIDENCE_0.3.1.md). The previous 0.3.0 Remote Assist
+record remains immutable in [its release evidence](docs/RELEASE_EVIDENCE_0.3.0.md). The packaged 0.2.3
 qualification record—including artifact hashes, live Qwen proof, and its unsigned-release
 boundary—remains in [the 0.2.3 evidence](docs/RELEASE_EVIDENCE_0.2.3.md).
 The 0.2.2 pairing record remains in
@@ -160,6 +162,20 @@ Once an opted-in worker is live, the owner can produce a fail-closed physical fr
 requires a fresh shipped Remote Assist offer, verifies the signed lease bounds and JPEG SHA-256, closes
 the session, and proves the controller returns `404` for the revoked session. It never injects input.
 
+## Recovery Center: nobody gets trapped in a broken pairing
+
+The wrench in the app header—and **Already paired or stuck? Fix Rampage** on first-run setup—opens a
+single recovery surface. **Fix Rampage** safely restarts a consistent installation. **Pair again**
+removes only the worker's old fabric identity and returns it to nearby pairing. On the owner PC,
+**Forget** revokes the selected identity, live offer, outstanding work, Remote Assist sessions,
+artifact locations, and replay state. **Factory reset** is deliberately separate and requires the
+full `RESET RAMPAGE` phrase.
+
+![Rampage 0.3.1 Recovery Center showing one-click repair, enrolled machines, stale-device Forget, and factory reset](docs/assets/rampage-recovery-center.png)
+
+This image is a source-current browser showcase of the real Recovery Center. Native deletion,
+restart, auto-start, and sidecar behavior is verified separately in the packaged Windows campaign.
+
 ## OnePool: pool the work, not the address space
 
 Remote memory and VRAM do not become magically coherent across commodity networks. Rampage instead
@@ -194,20 +210,21 @@ Apple-silicon iOS simulator build proof, artifact identities, checksums, and rel
 
 ## Model Fabric: biggest model and fastest chat are different lanes
 
-The desktop now defaults to **Maximum Model** and exposes five explicit ways to use added compute:
+The desktop defaults to **Automatic** and exposes five outcome choices while assigning technical
+device roles itself:
 
 | Toggle | What Rampage optimizes |
 | --- | --- |
-| Maximum Model | Largest compatible aggregate model-memory placement |
-| Speed Boost | Fastest evidence-supported single chat; slow distributed links are rejected |
-| Throughput | Independent replicas for many concurrent users or agents |
-| Efficiency | Smallest qualified placement that fits |
-| Autonomous | Proposal-only strategy adaptation behind Governor gates |
+| Automatic | Measure the work, devices, and paths; continuously choose the safest high-value role |
+| Biggest AI | Largest compatible model placement; engine-native cross-node layouts only after qualification |
+| Fastest AI | Fastest evidence-supported chat; slow distributed links are rejected |
+| More Work | Independent replicas and shards for concurrent users, agents, builds, renders, and batches |
+| Protect This PC | Preserve the foreground game, call, or production session by spending remote capacity first |
 
 On Windows, Local AI Autopilot now qualifies a pinned Ollama runtime and exact starter model in the
-background. **Prove my speed** runs sustained, lease-bounded work on every capable live 0.3.0 node
+background. **Prove my speed** runs sustained, lease-bounded work on every capable live 0.3.1 node
 and accepts a node only after its signed execution receipt arrives. This measures useful distributed
-work; it does not turn network latency into fictional local VRAM.
+work; it does not imply remotely addressable local VRAM.
 
 The planner reports visible versus compatible memory, requested weights plus KV cache, selected
 ranks, parallelism, predicted speedup, and the exact missing qualification. Planning remains
@@ -257,7 +274,7 @@ never displayed or copied. Capability discovery does the rest.
 
 | Platform lane | Native deliverables | Current qualification boundary |
 | --- | --- | --- |
-| Windows x64 | MSI and NSIS installers; automatic desktop shortcut; Start-menu entry; role-aware tray; bundled sidecars | 0.3.0 carries forward the packaged 0.2.3 foundation and adds source-qualified Windows Remote Assist; exact package hashes and physical-worker status are in the current release evidence |
+| Windows x64 | MSI and NSIS installers; automatic desktop shortcut; Start-menu entry; role-aware tray; bundled sidecars | 0.3.1 adds complete recovery and enrolled-device revocation to the Remote Assist foundation; exact package hashes and physical-worker status are in the current release evidence |
 | Linux x64 | Debian package and AppImage with the same Tauri shell and native sidecars | Fresh Ubuntu 24.04 candidate gate; stable repository/AppImage signing remains channel-specific |
 | macOS Apple Silicon | Native app bundle and DMG | Fresh macOS 15/M1 candidate gate; stable publication requires Developer ID signing, Gatekeeper acceptance, notarization, and a stapled ticket |
 | Windows 10 x64 | MSI/NSIS lifecycle, desktop shortcut, tray, sidecars, restart, STOP, and uninstall campaign | Deliberately unqualified until a real self-hosted Windows 10 runner completes the fail-closed workflow |
@@ -305,6 +322,9 @@ ambiguous evidence fails closed.
 4. On the laptop, choose **Join my fabric** and **Find my fabric**. It can wait while you move back to the main PC.
 5. On the main PC, choose **Add machine**. Confirm the same four digits and press **Codes match—approve**.
 6. Rampage securely enrolls and restarts the laptop automatically. Leave contribution limits on automatic or tune them. Press **STOP** whenever you want the node back.
+
+If setup is ever interrupted, open **Fix Rampage**. A worker can return to pairing in two clicks;
+the owner can forget the stale identity before approving the replacement.
 
 The nearby flow uses only the private LAN. If Windows asks, allow Rampage on **private networks**.
 The complete invite remains available under **Advanced** for segmented networks where local
