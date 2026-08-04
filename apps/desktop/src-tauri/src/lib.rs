@@ -9,7 +9,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use sysinfo::{Pid, System};
 use tauri::{
@@ -116,6 +116,9 @@ const OWNER_FABRIC_MARKER: &str = "owner-fabric-v1.ready";
 const SETUP_REQUIRED_MARKER: &str = "setup-required-v1.ready";
 const REMOTE_ASSIST_POLICY_FILE: &str = "remote-assist-policy.json";
 const REMOTE_ASSIST_ACTIVE_FILE: &str = "remote-assist-active.json";
+#[cfg(target_os = "windows")]
+const FIREWALL_MARKER_FILE: &str = "firewall-private-v2.ready";
+const SIDECAR_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const LEAVE_FABRIC_CONFIRMATION: &str = "LEAVE FABRIC";
 const FACTORY_RESET_CONFIRMATION: &str = "RESET RAMPAGE";
 #[cfg(target_os = "windows")]
@@ -189,12 +192,41 @@ fn descendant_pids(system: &System, root: Pid, output: &mut Vec<Pid>) {
     }
 }
 
-fn kill_process_tree(child: CommandChild) {
+fn wait_for_process_exit(pids: &[Pid], timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let system = System::new_all();
+        let remaining = pids
+            .iter()
+            .copied()
+            .filter(|pid| system.process(*pid).is_some())
+            .collect::<Vec<_>>();
+        if remaining.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "sidecar processes did not exit before the recovery deadline: {}",
+                remaining
+                    .iter()
+                    .map(|pid| pid.as_u32().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn kill_process_tree(child: CommandChild) -> Result<(), String> {
     // PyInstaller's one-file launcher supervises a child process. Terminate descendants first so
     // closing Rampage cannot strand an intelligence server or any future sidecar subprocess.
     let system = System::new_all();
     let mut descendants = Vec::new();
-    descendant_pids(&system, Pid::from_u32(child.pid()), &mut descendants);
+    let root = Pid::from_u32(child.pid());
+    descendant_pids(&system, root, &mut descendants);
+    let mut watched = descendants.clone();
+    watched.push(root);
     for pid in descendants {
         if let Some(process) = system.process(pid) {
             let _ = process.kill();
@@ -207,6 +239,7 @@ fn kill_process_tree(child: CommandChild) {
         let _ = process.kill();
     }
     let _ = child.kill();
+    wait_for_process_exit(&watched, SIDECAR_STOP_TIMEOUT)
 }
 
 fn stop_all_sidecars(app: &AppHandle) -> Result<usize, String> {
@@ -220,7 +253,7 @@ fn stop_all_sidecars(app: &AppHandle) -> Result<usize, String> {
     };
     let count = children.len();
     for child in children {
-        kill_process_tree(child);
+        kill_process_tree(child)?;
     }
     Ok(count)
 }
@@ -436,6 +469,44 @@ fn reset_runtime_to_setup(data_dir: &Path) -> Result<(), String> {
         &data_dir.join(SETUP_REQUIRED_MARKER),
         b"rampage.setup-required.v1\n",
     )
+}
+
+fn remove_stale_worker_credentials_in_setup(data_dir: &Path) -> Result<usize, String> {
+    if !setup_required(data_dir) {
+        return Ok(0);
+    }
+    let mut removed = 0;
+    for name in [
+        "remote-invite.json",
+        "agent.controller-pin.json",
+        "agent.enrolled",
+        "agent.identity.json",
+        "agent.key",
+        REMOTE_ASSIST_POLICY_FILE,
+        REMOTE_ASSIST_ACTIVE_FILE,
+    ] {
+        let path = data_dir.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(format!(
+                    "refusing to replace non-regular stale pairing entry {}",
+                    path.display()
+                ));
+            }
+            Ok(_) => {
+                std::fs::remove_file(&path).map_err(|error| {
+                    format!(
+                        "could not remove stale pairing entry {}: {error}",
+                        path.display()
+                    )
+                })?;
+                removed += 1;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(removed)
 }
 
 #[tauri::command]
@@ -845,6 +916,12 @@ fn persist_remote_invite(app: &AppHandle, invitation: &str) -> Result<(), String
     }
     let data_dir = runtime_dir(app)?;
     std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
+    // Setup mode is the user's explicit decision to abandon the previous worker identity. A
+    // retiring sidecar from an older build could previously recreate its pin after Pair again,
+    // trapping the user in an endless "already enrolled" loop. Clear only the bounded worker
+    // credential allowlist while the setup marker is authoritative; never do this for an active
+    // owner or worker runtime.
+    remove_stale_worker_credentials_in_setup(&data_dir)?;
     let destination = data_dir.join("remote-invite.json");
     if destination.exists() || data_dir.join("agent.controller-pin.json").exists() {
         return Err("this machine is already enrolled; remove it from the current fabric before enrolling again".into());
@@ -984,15 +1061,24 @@ fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(
 #[cfg(target_os = "windows")]
 fn ensure_private_network_firewall(app: &AppHandle) -> Result<(), String> {
     let data_dir = runtime_dir(app)?;
-    let marker = data_dir.join("firewall-private-v1.ready");
-    if marker.is_file() {
-        return Ok(());
-    }
     let install_dir = std::env::current_exe()
         .map_err(|error| error.to_string())?
         .parent()
         .ok_or_else(|| "Rampage installation directory is unavailable".to_string())?
         .to_path_buf();
+    let marker = data_dir.join(FIREWALL_MARKER_FILE);
+    let marker_body = format!(
+        "rampage.firewall-private.v2\ninstall_dir={}\n",
+        install_dir.to_string_lossy()
+    );
+    match read_bounded_regular_file(&marker, 4096, "private-network firewall marker") {
+        Ok(bytes) if bytes == marker_body.as_bytes() => return Ok(()),
+        Ok(_) => std::fs::remove_file(&marker).map_err(|error| error.to_string())?,
+        Err(_) if marker.exists() => {
+            return Err("private-network firewall marker is not a bounded regular file".into());
+        }
+        Err(_) => {}
+    }
     let escaped = |path: PathBuf| path.to_string_lossy().replace('\'', "''");
     let desktop = escaped(install_dir.join("rampage-desktop.exe"));
     let controller = escaped(install_dir.join("rampage-controller.exe"));
@@ -1027,7 +1113,11 @@ fn ensure_private_network_firewall(app: &AppHandle) -> Result<(), String> {
         return Err("Windows did not approve Rampage for this private network.".into());
     }
     std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
-    write_new_marker(&marker, b"rampage.firewall-private.v1\n")?;
+    write_new_marker(&marker, marker_body.as_bytes())?;
+    let previous = data_dir.join("firewall-private-v1.ready");
+    if previous.is_file() {
+        let _ = std::fs::remove_file(previous);
+    }
     Ok(())
 }
 
@@ -1582,7 +1672,7 @@ pub fn run() {
             && let Ok(mut sidecars) = handle.state::<Sidecars>().0.lock()
         {
             for child in sidecars.drain(..) {
-                kill_process_tree(child);
+                let _ = kill_process_tree(child);
             }
         }
     });
@@ -1780,6 +1870,50 @@ mod tests {
         assert_eq!(status.role, "setup");
         assert_eq!(status.state, "ready_to_configure");
         assert!(status.healthy);
+    }
+
+    #[test]
+    fn setup_pairing_removes_only_stale_worker_credentials() {
+        let root = recovery_runtime();
+        let runtime = root.path().join("ai.obtuse.rampage/runtime");
+        std::fs::write(
+            runtime.join(SETUP_REQUIRED_MARKER),
+            b"rampage.setup-required.v1\n",
+        )
+        .unwrap();
+        for name in [
+            "remote-invite.json",
+            "agent.controller-pin.json",
+            "agent.enrolled",
+            "agent.identity.json",
+            "agent.key",
+            REMOTE_ASSIST_POLICY_FILE,
+            REMOTE_ASSIST_ACTIVE_FILE,
+        ] {
+            std::fs::write(runtime.join(name), b"stale").unwrap();
+        }
+        std::fs::write(runtime.join("pairing-diagnostic.keep"), b"preserved").unwrap();
+
+        assert_eq!(
+            remove_stale_worker_credentials_in_setup(&runtime).unwrap(),
+            7
+        );
+        assert!(runtime.join(SETUP_REQUIRED_MARKER).is_file());
+        assert!(runtime.join("pairing-diagnostic.keep").is_file());
+        assert!(!runtime.join("agent.controller-pin.json").exists());
+        assert!(!runtime.join("remote-invite.json").exists());
+    }
+
+    #[test]
+    fn active_worker_credentials_are_never_self_deleted() {
+        let root = recovery_runtime();
+        let runtime = root.path().join("ai.obtuse.rampage/runtime");
+        std::fs::write(runtime.join("agent.controller-pin.json"), b"active").unwrap();
+        assert_eq!(
+            remove_stale_worker_credentials_in_setup(&runtime).unwrap(),
+            0
+        );
+        assert!(runtime.join("agent.controller-pin.json").is_file());
     }
 
     #[test]
