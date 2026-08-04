@@ -68,6 +68,18 @@ struct RecoveryStatusView {
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct RecoveryControllerEndpointDisk {
+    endpoint_id: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RecoveryControllerPinDisk {
+    schema: String,
+    endpoint: RecoveryControllerEndpointDisk,
+    governor_public_key: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RemoteAssistPolicyDisk {
     schema: String,
@@ -252,6 +264,53 @@ fn fabric_role_at(data_dir: &Path) -> &'static str {
     }
 }
 
+fn validate_owner_local_enrollment(data_dir: &Path) -> Result<(), String> {
+    let pin_bytes = read_bounded_regular_file(
+        &data_dir.join("agent.controller-pin.json"),
+        64 * 1024,
+        "local controller pin",
+    )?;
+    let pin: RecoveryControllerPinDisk = serde_json::from_slice(&pin_bytes)
+        .map_err(|error| format!("local controller pin is invalid: {error}"))?;
+    if pin.schema != "rampage.pinned-controller.v1" {
+        return Err("local controller pin has an unexpected schema".into());
+    }
+
+    let enrollment = String::from_utf8(read_bounded_regular_file(
+        &data_dir.join("agent.enrolled"),
+        4 * 1024,
+        "local enrollment marker",
+    )?)
+    .map_err(|error| format!("local enrollment marker is invalid UTF-8: {error}"))?;
+    if enrollment.trim() != pin.endpoint.endpoint_id {
+        return Err("local enrollment marker does not match its pinned controller".into());
+    }
+
+    let governor_secret = String::from_utf8(read_bounded_regular_file(
+        &data_dir.join("governor.key"),
+        128,
+        "local governor key",
+    )?)
+    .map_err(|error| format!("local governor key is invalid UTF-8: {error}"))?;
+    let governor_bytes = hex::decode(governor_secret.trim())
+        .map_err(|error| format!("local governor key is invalid: {error}"))?;
+    let governor_bytes: [u8; 32] = governor_bytes
+        .try_into()
+        .map_err(|_| "local governor key must contain exactly 32 bytes".to_string())?;
+    let expected_public_key = hex::encode(
+        ed25519_dalek::SigningKey::from_bytes(&governor_bytes)
+            .verifying_key()
+            .to_bytes(),
+    );
+    if !pin
+        .governor_public_key
+        .eq_ignore_ascii_case(&expected_public_key)
+    {
+        return Err("local agent is pinned to a different owner controller".into());
+    }
+    Ok(())
+}
+
 fn enrollment_file_state(data_dir: &Path) -> (&'static str, Vec<String>) {
     let setup = setup_required(data_dir);
     let owner = data_dir.join(OWNER_FABRIC_MARKER).is_file();
@@ -272,8 +331,27 @@ fn enrollment_file_state(data_dir: &Path) -> (&'static str, Vec<String>) {
         return ("ready_to_configure", issues);
     }
     if owner {
-        if invite || pin {
-            issues.push("Owner and worker enrollment markers conflict on this device.".into());
+        if invite {
+            issues.push("Owner runtime still contains a pending worker invitation.".into());
+            return ("repair_required", issues);
+        }
+        if pin {
+            if !enrolled || !identity || !key {
+                issues.push("The owner's local worker identity is incomplete.".into());
+                return ("repair_required", issues);
+            }
+            if let Err(error) = validate_owner_local_enrollment(data_dir) {
+                issues.push(format!(
+                    "The owner's local worker identity is inconsistent: {error}."
+                ));
+                return ("repair_required", issues);
+            }
+            return ("owner_active", issues);
+        }
+        if enrolled {
+            issues.push(
+                "The owner has an enrollment marker without a pinned local controller.".into(),
+            );
             return ("repair_required", issues);
         }
         return ("owner_active", issues);
@@ -1612,6 +1690,64 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("ai.obtuse.rampage/runtime")).unwrap();
         root
+    }
+
+    fn write_owner_local_enrollment(runtime: &Path, governor_secret: [u8; 32]) {
+        let governor = ed25519_dalek::SigningKey::from_bytes(&governor_secret);
+        std::fs::write(
+            runtime.join(OWNER_FABRIC_MARKER),
+            b"rampage.owner-fabric.v1\n",
+        )
+        .unwrap();
+        std::fs::write(runtime.join("governor.key"), hex::encode(governor_secret)).unwrap();
+        std::fs::write(runtime.join("agent.enrolled"), b"local-controller\n").unwrap();
+        std::fs::write(runtime.join("agent.identity.json"), b"{}").unwrap();
+        std::fs::write(runtime.join("agent.key"), b"agent-secret").unwrap();
+        std::fs::write(
+            runtime.join("agent.controller-pin.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "rampage.pinned-controller.v1",
+                "endpoint": { "endpoint_id": "local-controller" },
+                "governor_public_key": hex::encode(governor.verifying_key().to_bytes())
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn recovery_accepts_owner_self_enrolled_local_agent() {
+        let root = recovery_runtime();
+        let runtime = root.path().join("ai.obtuse.rampage/runtime");
+        write_owner_local_enrollment(&runtime, [31_u8; 32]);
+        let status = recovery_status_at(&runtime);
+        assert_eq!(status.role, "owner");
+        assert_eq!(status.state, "owner_active");
+        assert!(status.healthy);
+        assert!(!status.can_leave_fabric);
+    }
+
+    #[test]
+    fn recovery_rejects_owner_agent_pinned_to_another_controller() {
+        let root = recovery_runtime();
+        let runtime = root.path().join("ai.obtuse.rampage/runtime");
+        write_owner_local_enrollment(&runtime, [31_u8; 32]);
+        let foreign = ed25519_dalek::SigningKey::from_bytes(&[47_u8; 32]);
+        std::fs::write(
+            runtime.join("agent.controller-pin.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "rampage.pinned-controller.v1",
+                "endpoint": { "endpoint_id": "local-controller" },
+                "governor_public_key": hex::encode(foreign.verifying_key().to_bytes())
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let status = recovery_status_at(&runtime);
+        assert_eq!(status.role, "owner");
+        assert_eq!(status.state, "repair_required");
+        assert!(!status.healthy);
+        assert!(status.issues[0].contains("different owner controller"));
     }
 
     #[test]
