@@ -70,7 +70,9 @@ place, return a worker to pairing, revoke a stale enrolled identity from the own
 the local Rampage runtime without uninstalling external model stores. A failed native status bridge
 now produces an actionable recovery state instead of an infinite loading surface. Nearby pairing
 fans out over every active LAN interface and uses local bounded lifetimes, so a VPN adapter or a
-wrong device clock cannot silently strand a laptop on “Looking for your main PC.”
+wrong device clock cannot silently strand a laptop on “Looking for your main PC.” Pair again now
+waits for the retiring worker process tree before rotating identity, and setup mode can remove only
+its bounded stale worker credentials before accepting a new encrypted invitation.
 
 | Proof surface | Validated result |
 | --- | --- |
@@ -85,7 +87,7 @@ wrong device clock cannot silently strand a laptop on “Looking for your main P
 | Autonomous self-scan | Stable evidence digests cover routes, links, failures, denials, thermal/battery pressure, capability gaps, idle capacity, and protected-artifact replication |
 | Compute Strategy | Outcome-first Automatic, Biggest AI, Fastest AI, More Work, and Protect This PC placement previews with exact capacity and qualification blockers |
 | Nearby pairing | Zero-copy X25519 pairing over multicast, global broadcast, and every active directed LAN broadcast; owner-local expiry removes cross-device clock dependence |
-| Lifecycle recovery | One-screen Fix Rampage, Pair again, enrolled-device Forget, redacted receipt, and typed local factory reset; restart replay keeps revoked nodes and offers gone |
+| Lifecycle recovery | One-screen Fix Rampage, race-proof Pair again, setup-only stale-credential healing, enrolled-device Forget, redacted receipt, and typed local factory reset; restart replay keeps revoked nodes and offers gone |
 | Remote Assist | Worker opt-in; paired-owner view/control; dedicated authenticated QUIC protocol; request-, node-, controller-, epoch-, size-, frame-rate-, and input-sequence bounds; visible active state; STOP/revoke |
 | Packaged product | Native Tauri shell, role-aware system tray, close-to-tray, start-at-login, governed sidecars, cold-start tolerance, controller-restart recovery, clean explicit shutdown, installer, and automatic desktop launcher |
 | Verification | Rust, desktop, TypeScript SDK, Python intelligence, Python SDK, deterministic universal-gateway, forced-relay mesh, packaging, and lifecycle gates |

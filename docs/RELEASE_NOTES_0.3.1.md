@@ -13,11 +13,20 @@ LAN interface instead of trusting Windows to choose one path for global broadcas
 lifetimes are bounded independently on each device instead of requiring synchronized wall clocks.
 The normal flow remains one **Find my fabric** action on the laptop and **Add machine** on the owner.
 
+Candidate 4 closes a worker-lifecycle race found during the physical re-pair. Pair again now waits
+for every managed sidecar process to exit before rotating the runtime. While the authoritative setup
+marker is present, accepting a new invitation can remove only a fixed allowlist of stale worker
+credentials left by an older retiring process; active owner and worker identities are never
+self-deleted. The Windows firewall marker is also bound to the current installation directory, so
+an upgrade cannot silently retain private-network rules for obsolete binaries.
+
 ## What changed
 
 - **Fix Rampage** safely restarts a consistent native installation without erasing identity or work.
 - **Pair again** stops the worker sidecars, removes its old fabric runtime, and returns the device to
   the two-button nearby-pairing screen.
+- Sidecar shutdown has a bounded exit barrier, and setup-only invitation persistence clears a fixed
+  stale-worker allowlist so an older process cannot trap the next attempt in “already enrolled.”
 - Owner **Forget** revokes one exact enrolled identity and removes its offer, outstanding assignments,
   reservations, shard sets, Remote Assist sessions, artifact locations, and possession evidence.
 - Revocation is appended to the hash-chained ledger and replayed after controller restart, so a stale
@@ -31,6 +40,8 @@ The normal flow remains one **Find my fabric** action on the laptop and **Add ma
   while excluding loopback, link-local, and point-to-point tunnel interfaces.
 - The owner derives request expiry from its own open window and the laptop displays its own bounded
   countdown. Remote clocks cannot extend the window or silently prevent discovery.
+- Private-network firewall readiness records the exact installation directory and regenerates the
+  three scoped Windows rules when that directory changes.
 
 ## Simpler compute outcomes
 
