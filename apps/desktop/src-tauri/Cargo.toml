@@ -27,6 +27,7 @@ reqwest.workspace = true
 rand.workspace = true
 hex.workspace = true
 chrono.workspace = true
+ed25519-dalek.workspace = true
 tokio.workspace = true
 sysinfo.workspace = true
 x25519-dalek.workspace = true
