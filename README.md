@@ -43,8 +43,8 @@ the authority to run wild.
 
 ## This is what personal compute should feel like
 
-Install Rampage on an owner PC. Install it on another machine. Choose **Join my fabric**, compare
-the same four digits on both screens, and approve once on the owner PC. There are no addresses,
+Install Rampage on an owner PC. Install it on another machine. Choose **Join my fabric**; the owner
+PC detects the nearby request automatically and asks for one device approval. There are no addresses,
 accounts, terminals, or secrets to copy. Rampage discovers usable CPU, GPU/VRAM, RAM, storage,
 power, thermals, runtimes, and local Ollama models automatically—then moves bounded work to the
 machine that can actually perform it.
@@ -72,7 +72,10 @@ now produces an actionable recovery state instead of an infinite loading surface
 fans out over every active LAN interface and uses local bounded lifetimes, so a VPN adapter or a
 wrong device clock cannot silently strand a laptop on “Looking for your main PC.” Pair again now
 waits for the retiring worker process tree before rotating identity, and setup mode can remove only
-its bounded stale worker credentials before accepting a new encrypted invitation.
+its bounded stale worker credentials before accepting a new encrypted invitation. A genuinely empty
+runtime now stays authority-free until the person chooses Create or Join. The owner listens for
+nearby requests automatically, and a joining machine needs only one owner-side device approval—no
+code, address, account, or copied secret.
 
 | Proof surface | Validated result |
 | --- | --- |
@@ -86,7 +89,7 @@ its bounded stale worker credentials before accepting a new encrypted invitation
 | Universal capability contract | Signed offers advertise exact workload domain, adapter, operation, execution pattern, isolation, runtime digest, and qualification status; candidate profiles grant no authority |
 | Autonomous self-scan | Stable evidence digests cover routes, links, failures, denials, thermal/battery pressure, capability gaps, idle capacity, and protected-artifact replication |
 | Compute Strategy | Outcome-first Automatic, Biggest AI, Fastest AI, More Work, and Protect This PC placement previews with exact capacity and qualification blockers |
-| Nearby pairing | Zero-copy X25519 pairing over multicast, global broadcast, and every active directed LAN broadcast; owner-local expiry removes cross-device clock dependence |
+| Nearby pairing | Always-listening private-LAN discovery over multicast, global broadcast, and every active directed LAN broadcast; one owner-side device approval; protected join transaction; owner-local expiry |
 | Lifecycle recovery | One-screen Fix Rampage, race-proof Pair again, setup-only stale-credential healing, enrolled-device Forget, redacted receipt, and typed local factory reset; restart replay keeps revoked nodes and offers gone |
 | Remote Assist | Worker opt-in; paired-owner view/control; dedicated authenticated QUIC protocol; request-, node-, controller-, epoch-, size-, frame-rate-, and input-sequence bounds; visible active state; STOP/revoke |
 | Packaged product | Native Tauri shell, role-aware system tray, close-to-tray, start-at-login, governed sidecars, cold-start tolerance, controller-restart recovery, clean explicit shutdown, installer, and automatic desktop launcher |
@@ -274,8 +277,8 @@ runtime evidence before the Governor can lease it.
 
 Rampage owns the complete desktop lifecycle: sidecars, policy state, local discovery, the system
 tray, start-at-login, emergency STOP, explicit shutdown, and the desktop launcher. A normal user
-installs the app, creates a fabric, lets each new machine wait nearby, compares four digits, and
-approves it once. The full signed invite is encrypted directly between ephemeral device keys and is
+installs the app, creates a fabric, and lets each new machine wait nearby. The owner PC detects the
+request automatically and asks once before admitting it. The full signed invite is encrypted directly between ephemeral device keys and is
 never displayed or copied. Capability discovery does the rest.
 
 | Platform lane | Native deliverables | Current qualification boundary |
@@ -326,7 +329,7 @@ ambiguous evidence fails closed.
 2. Open the **Rampage** shortcut created on the Windows desktop.
 3. Choose **Create my fabric** on the main machine.
 4. On the laptop, choose **Join my fabric** and **Find my fabric**. It can wait while you move back to the main PC.
-5. On the main PC, choose **Add machine**. Confirm the same four digits and press **Codes match—approve**.
+5. Rampage automatically shows the laptop on the main PC. Press **Approve this machine**.
 6. Rampage securely enrolls and restarts the laptop automatically. Leave contribution limits on automatic or tune them. Press **STOP** whenever you want the node back.
 
 If setup is ever interrupted, open **Fix Rampage**. A worker can return to pairing in two clicks;
