@@ -5,7 +5,7 @@ import { useRampage } from "../store";
 const steps = [
   { icon: Sparkles, title: "Name your fabric", body: "Rampage discovers this machine first. Nothing is shared publicly." },
   { icon: ShieldCheck, title: "Your machine stays yours", body: "Rampage keeps at least one CPU core, 512 MiB memory, and a 10% safety guardband outside the shared pool." },
-  { icon: Zap, title: "Invite when ready", body: "Add trusted devices with a short-lived invite and local confirmation on both screens." },
+  { icon: Zap, title: "Invite when ready", body: "Nearby devices announce themselves automatically. You approve the device once on this PC." },
 ];
 
 export function Onboarding() {
@@ -43,10 +43,10 @@ export function Onboarding() {
             ? <input aria-label="Fabric name" defaultValue="My Rampage" autoFocus />
             : <div className="join-flow">
               {pairing.state === "idle" && <div className="join-state"><Laptop size={24} /><strong>This laptop will wait for your main PC.</strong><span>Nothing needs to be copied, typed, or configured. Keep both machines on the same private network.</span></div>}
-              {pairing.state === "searching" && <div className="join-state active"><Radar size={24} /><strong>Looking for your main PC…</strong><span>On the main PC open Rampage and choose <b>Add machine</b>. If Windows asks, allow Rampage on private networks only.</span><i className="pairing-pulse" aria-hidden="true" /></div>}
-              {pairing.state === "waiting_approval" && <div className="join-state active"><ShieldCheck size={24} /><strong>Compare this code on the main PC</strong><output aria-label={`Verification code ${pairing.verification_code.split("").join(" ")}`}>{pairing.verification_code}</output><span>Leave this laptop here. Approve only when both screens show the same digits.</span></div>}
+              {pairing.state === "searching" && <div className="join-state active"><Radar size={24} /><strong>Looking for your main PC…</strong><span>Keep Rampage open on the main PC. It will announce this laptop automatically—nothing needs to be typed.</span><i className="pairing-pulse" aria-hidden="true" /></div>}
+              {pairing.state === "waiting_approval" && <div className="join-state active"><ShieldCheck size={24} /><strong>Main PC found</strong><span>Approve <b>this laptop</b> on {pairing.owner_name}. The encrypted enrollment will finish here automatically.</span></div>}
               {pairing.state === "approved" && <div className="join-state success"><Check size={24} /><strong>Approved</strong><span>Rampage is securely enrolling this laptop and will restart automatically.</span></div>}
-              {pairing.state === "failed" && <div className="join-state failed"><X size={24} /><strong>Pairing needs another try</strong><span>{pairing.message}</span><ul><li>Keep both machines on the same Wi-Fi or Ethernet network.</li><li>Choose <b>Add machine</b> on the main PC.</li><li>Allow Rampage on private networks if Windows asks.</li></ul></div>}
+              {pairing.state === "failed" && <div className="join-state failed"><X size={24} /><strong>Pairing needs another try</strong><span>{pairing.message}</span><ul><li>Keep both machines on the same Wi-Fi or Ethernet network.</li><li>Keep Rampage open on the main PC.</li><li>Allow Rampage on private networks if Windows asks.</li></ul></div>}
               {(pairing.state === "searching" || pairing.state === "waiting_approval") && <button type="button" className="cancel-join" onClick={() => void cancelPairing()}>Cancel</button>}
               <details className="manual-invite">
                 <summary>Advanced: use a complete invite</summary>

@@ -6,6 +6,7 @@ const controller = import.meta.env.VITE_RAMPAGE_CONTROLLER ?? "http://127.0.0.1:
 const intelligence = import.meta.env.VITE_RAMPAGE_INTELLIGENCE ?? "http://127.0.0.1:47832";
 let localControllerToken: string | null = null;
 let remoteInputQueue: Promise<void> = Promise.resolve();
+let ownerPairingListenerAttempted = false;
 
 const computeStrategies: ComputeStrategy[] = [
   "maximum_model_size",
@@ -494,6 +495,15 @@ export const useRampage = create<RampageState>((set, get) => ({
           lastSync: new Date(),
         });
         return;
+      }
+      if (!ownerPairingListenerAttempted) {
+        ownerPairingListenerAttempted = true;
+        if (localStorage.getItem("rampage.onboarded") === "true") {
+          await invoke("confirm_owner_fabric").catch(() => undefined);
+        }
+        void invoke<PairingWindow>("open_pairing_window")
+          .then((pairingWindow) => set({ pairingWindow }))
+          .catch(() => undefined);
       }
       localControllerToken ??= await invoke<string>("controller_token").catch(() => null);
       const [healthResponse, offersResponse, eventsResponse, modelsResponse, diagnosticResponse, intelligenceResponse] = await Promise.all([

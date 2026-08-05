@@ -44,7 +44,7 @@ test("makes nearby pairing the zero-copy default for a new laptop", () => {
   expect(screen.getByLabelText("Signed Rampage invite")).not.toBeVisible();
 });
 
-test("shows the same readable four-digit code on the waiting laptop", () => {
+test("asks for one approval on the main PC without showing or typing a code", () => {
   useRampage.setState({
     workerPairing: {
       state: "waiting_approval",
@@ -57,11 +57,14 @@ test("shows the same readable four-digit code on the waiting laptop", () => {
   render(<Onboarding />);
   fireEvent.click(screen.getByRole("button", { name: "Join my fabric" }));
 
-  expect(screen.getByLabelText("Verification code 4 7 2 1")).toHaveTextContent("4721");
-  expect(screen.getByText(/approve only when both screens show the same digits/i)).toBeVisible();
+  expect(screen.getByText(/main pc found/i)).toBeVisible();
+  expect(screen.getByText((_, element) =>
+    element?.tagName === "SPAN" && /approve this laptop on main-pc/i.test(element.textContent ?? ""),
+  )).toBeVisible();
+  expect(screen.queryByText("4721")).not.toBeInTheDocument();
 });
 
-test("uses the code-match button as the single explicit owner approval", async () => {
+test("uses one device approval on the automatically detected owner request", async () => {
   useRampage.setState({ pairingWindow: pendingWindow });
   vi.mocked(invoke).mockImplementation(async (command) => {
     if (command === "pairing_window") return pendingWindow;
@@ -70,7 +73,8 @@ test("uses the code-match button as the single explicit owner approval", async (
   });
   render(<PairingPanel />);
 
-  fireEvent.click(screen.getByRole("button", { name: /codes match—approve/i }));
+  expect(screen.queryByText("4721")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /approve this machine/i }));
 
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("approve_pairing", {
     requestId: pendingWindow.requests[0].request_id,
@@ -87,5 +91,5 @@ test("reports authenticated enrollment completion on the owner PC", () => {
   render(<PairingPanel />);
 
   expect(screen.getByText(/connected securely/i)).toBeVisible();
-  expect(screen.queryByRole("button", { name: /codes match/i })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /approve this machine/i })).not.toBeInTheDocument();
 });
