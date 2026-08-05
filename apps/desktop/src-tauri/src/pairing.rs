@@ -21,7 +21,10 @@ use x25519_dalek::{PublicKey, StaticSecret};
 const PAIRING_SCHEMA: &str = "rampage.lan-pairing.v1";
 const PAIRING_PORT: u16 = 47_839;
 const PAIRING_MULTICAST: Ipv4Addr = Ipv4Addr::new(239, 255, 73, 82);
-const PAIRING_WINDOW_MS: u64 = 3 * 60 * 1_000;
+// The owner listener is a passive, private-LAN inbox. Requests remain rate-limited, short-lived,
+// encrypted, and approval-gated, while the listener itself stays available for the app lifetime
+// so a contributor never has to coordinate an "Add machine" button with the owner.
+const PAIRING_WINDOW_MS: u64 = 365 * 24 * 60 * 60 * 1_000;
 const WORKER_WAIT_MS: u64 = 5 * 60 * 1_000;
 const MAX_DATAGRAM_BYTES: usize = 8 * 1_024;
 const MAX_INVITATION_BYTES: usize = 5 * 1_024;

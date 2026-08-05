@@ -1,4 +1,4 @@
-import { Activity, Boxes, BrainCircuit, CircleStop, Command, Eye, Grid2X2, MonitorUp, MousePointer2, Orbit, Play, RefreshCw, Rocket, ShieldCheck, UserPlus, Wrench } from "lucide-react";
+import { Activity, Boxes, BrainCircuit, CircleStop, Command, Eye, Grid2X2, MonitorUp, MousePointer2, Orbit, Play, RefreshCw, Rocket, ShieldCheck, Wrench } from "lucide-react";
 import { lazy, Suspense, useEffect } from "react";
 import { CommandPalette } from "./components/CommandPalette";
 import { ComputeStrategyPanel } from "./components/ComputeStrategyPanel";
@@ -20,12 +20,12 @@ export default function App() {
     return () => window.clearInterval(interval);
   }, []);
   useEffect(() => {
-    const active = state.onboarding || state.pairingWindow?.open || state.workerPairing.state !== "idle";
+    const active = state.onboarding || state.fabricRole === "owner" || state.workerPairing.state !== "idle";
     if (!active) return;
     void state.refreshPairing();
     const interval = window.setInterval(() => void useRampage.getState().refreshPairing(), 1_000);
     return () => window.clearInterval(interval);
-  }, [state.onboarding, state.pairingWindow?.open, state.workerPairing.state]);
+  }, [state.onboarding, state.fabricRole, state.workerPairing.state]);
   useEffect(() => {
     if (state.fabricRole !== "worker") return;
     void state.refreshRemoteAssistStatus();
@@ -45,7 +45,6 @@ export default function App() {
         <div className="header-actions">
           <button className="icon-button" onClick={() => void state.refresh()} aria-label="Refresh fabric"><RefreshCw size={17} /></button>
           <button className="icon-button" onClick={() => state.setRecoveryOpen(true)} aria-label="Open Recovery Center" title="Fix connection or start over"><Wrench size={17} /></button>
-          {state.fabricRole === "owner" && <button className="command-button" onClick={() => void state.openPairingWindow().catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Pairing could not start." }))}><UserPlus size={15} /> Add machine</button>}
           <button className={`autostart-button ${state.runAtLogin ? "active" : ""}`} onClick={() => void state.toggleAutostart()} aria-label={state.runAtLogin ? "Stop launching Rampage with Windows" : "Start Rampage with Windows"} title="Keep your fabric available after sign-in"><Rocket size={15} /> {state.runAtLogin ? "AUTO-START ON" : "AUTO-START OFF"}</button>
           <button className="command-button" onClick={() => state.setCommandOpen(true)}><Command size={16} /> Command <kbd>Ctrl K</kbd></button>
           {state.killLatch
@@ -92,7 +91,7 @@ export default function App() {
           {state.fabricRole === "owner" && selected.remoteAssist && <div className="remote-launch-actions"><button disabled={state.remoteDesktopPending || state.killLatch} onClick={() => void state.openRemoteDesktop(selected.id, "view").catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Remote view failed." }))}><Eye size={16} /> View desktop</button><button className="control" disabled={state.remoteDesktopPending || state.killLatch} onClick={() => void state.openRemoteDesktop(selected.id, "control").catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Remote control failed." }))}><MousePointer2 size={16} /> Control desktop</button></div>}
           {state.fabricRole === "owner" && <label className="secondary file-action">{selected.artifactEndpoint ? "Encrypt + replicate file" : "Encrypt file locally"}<input type="file" onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void state.storeFile(file, selected.id).catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Artifact transfer failed." })); event.currentTarget.value = ""; }} /></label>}
           {state.inviteCode && <div className="explanation"><ShieldCheck size={18} /><div><strong>One-time invite</strong><p>{state.inviteCode}</p>{state.inviteBundle && <button className="secondary" onClick={() => void navigator.clipboard.writeText(state.inviteBundle!)}>Copy complete invite</button>}</div></div>}
-          </> : <div className="empty-fabric"><p className="eyebrow">NO ACTIVE NODES</p><h2>Add your first machine</h2><p>Rampage will show only enrolled machines with fresh signed offers. Showcase devices never appear in production.</p><button className="secondary" onClick={() => void state.openPairingWindow().catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Pairing could not start." }))}><UserPlus size={16} /> Find nearby laptop</button></div>}
+          </> : <div className="empty-fabric"><p className="eyebrow">NO ACTIVE NODES</p><h2>Ready for your next machine</h2><p>On another PC choose “Join my fabric.” Rampage detects it here automatically and asks once before admitting it.</p></div>}
         </aside>
       </main>
       <footer className="evidence-spine"><span><i /> EVIDENCE SPINE</span><strong>{state.lastAction ?? (state.events.length ? `${state.events.length} verified events` : "No controller evidence yet")}</strong><span>{state.lastSync ? `Synced ${state.lastSync.toLocaleTimeString()}` : "Discovering…"}</span><span className="push">THRESHOLDED AUTONOMY · NO PER-CHANGE APPROVAL</span></footer>

@@ -113,7 +113,9 @@ impl Default for WorkerRuntime {
 const BACKGROUND_ARG: &str = "--background";
 const AUTOSTART_NAME: &str = "Rampage";
 const OWNER_FABRIC_MARKER: &str = "owner-fabric-v1.ready";
+const OWNER_CONFIRMED_MARKER: &str = "owner-confirmed-v1.ready";
 const SETUP_REQUIRED_MARKER: &str = "setup-required-v1.ready";
+const WORKER_PAIRING_INTENT_MARKER: &str = "worker-pairing-v1.pending";
 const REMOTE_ASSIST_POLICY_FILE: &str = "remote-assist-policy.json";
 const REMOTE_ASSIST_ACTIVE_FILE: &str = "remote-assist-active.json";
 #[cfg(target_os = "windows")]
@@ -285,6 +287,34 @@ fn controller_origin() -> Result<String, String> {
 
 fn setup_required(data_dir: &Path) -> bool {
     data_dir.join(SETUP_REQUIRED_MARKER).is_file()
+}
+
+fn ensure_neutral_first_run(data_dir: &Path) -> Result<bool, String> {
+    std::fs::create_dir_all(data_dir).map_err(|error| error.to_string())?;
+    let has_fabric_state = [
+        SETUP_REQUIRED_MARKER,
+        OWNER_FABRIC_MARKER,
+        "remote-invite.json",
+        "agent.controller-pin.json",
+        "agent.enrolled",
+        "agent.identity.json",
+        "agent.key",
+        "controller.token",
+        "controller.db",
+        "governor.key",
+        "mesh.key",
+        "storage.key",
+    ]
+    .iter()
+    .any(|name| data_dir.join(name).exists());
+    if has_fabric_state {
+        return Ok(false);
+    }
+    write_new_marker(
+        &data_dir.join(SETUP_REQUIRED_MARKER),
+        b"rampage.setup-required.v1\n",
+    )?;
+    Ok(true)
 }
 
 fn fabric_role_at(data_dir: &Path) -> &'static str {
@@ -509,6 +539,39 @@ fn remove_stale_worker_credentials_in_setup(data_dir: &Path) -> Result<usize, St
     Ok(removed)
 }
 
+fn prepare_worker_pairing_files(data_dir: &Path) -> Result<(), String> {
+    match fabric_role_at(data_dir) {
+        "worker" => return Err("this machine is already enrolled as a worker".into()),
+        "owner" if data_dir.join(OWNER_CONFIRMED_MARKER).is_file() => {
+            return Err(
+                "this machine owns a configured fabric; use Reset Rampage before joining another owner"
+                    .into(),
+            );
+        }
+        "owner" => {
+            #[cfg(target_os = "windows")]
+            let firewall_marker = read_bounded_regular_file(
+                &data_dir.join(FIREWALL_MARKER_FILE),
+                4096,
+                "private-network firewall marker",
+            )
+            .ok();
+            reset_runtime_to_setup(data_dir)?;
+            #[cfg(target_os = "windows")]
+            if let Some(marker) = firewall_marker {
+                write_new_marker(&data_dir.join(FIREWALL_MARKER_FILE), &marker)?;
+            }
+        }
+        "setup" => {}
+        _ => return Err("Rampage could not determine this machine's fabric role".into()),
+    }
+    remove_stale_worker_credentials_in_setup(data_dir)?;
+    write_new_marker(
+        &data_dir.join(WORKER_PAIRING_INTENT_MARKER),
+        b"rampage.worker-pairing.v1\n",
+    )
+}
+
 #[tauri::command]
 fn recovery_status(app: AppHandle) -> Result<RecoveryStatusView, String> {
     Ok(recovery_status_at(&runtime_dir(&app)?))
@@ -559,14 +622,32 @@ fn activate_owner_fabric(app: AppHandle) -> Result<(), String> {
     let setup_marker = data_dir.join(SETUP_REQUIRED_MARKER);
     if setup_marker.is_file() {
         let owner_marker = data_dir.join(OWNER_FABRIC_MARKER);
+        let confirmed_marker = data_dir.join(OWNER_CONFIRMED_MARKER);
         write_new_marker(&owner_marker, b"rampage.owner-fabric.v1\n")?;
+        if let Err(error) = write_new_marker(&confirmed_marker, b"rampage.owner-confirmed.v1\n") {
+            let _ = std::fs::remove_file(owner_marker);
+            return Err(error);
+        }
         if let Err(error) = std::fs::remove_file(setup_marker) {
             let _ = std::fs::remove_file(owner_marker);
+            let _ = std::fs::remove_file(confirmed_marker);
             return Err(format!("could not activate the owner fabric: {error}"));
         }
         app.restart();
     }
     Ok(())
+}
+
+#[tauri::command]
+fn confirm_owner_fabric(app: AppHandle) -> Result<(), String> {
+    let data_dir = runtime_dir(&app)?;
+    if fabric_role_at(&data_dir) != "owner" || !data_dir.join(OWNER_FABRIC_MARKER).is_file() {
+        return Err("only an active owner fabric can be confirmed".into());
+    }
+    write_new_marker(
+        &data_dir.join(OWNER_CONFIRMED_MARKER),
+        b"rampage.owner-confirmed.v1\n",
+    )
 }
 
 #[tauri::command]
@@ -834,9 +915,17 @@ async fn begin_pairing(
     app: AppHandle,
     pairing: State<'_, PairingManager>,
 ) -> Result<WorkerPairingView, String> {
-    if fabric_mode(app.clone())? == "worker" {
-        return Err("this machine is already enrolled as a worker".into());
+    let data_dir = runtime_dir(&app)?;
+    if fabric_role_at(&data_dir) == "owner" {
+        if data_dir.join(OWNER_CONFIRMED_MARKER).is_file() {
+            return Err(
+                "this machine owns a configured fabric; use Reset Rampage before joining another owner"
+                    .into(),
+            );
+        }
+        stop_all_sidecars(&app)?;
     }
+    prepare_worker_pairing_files(&data_dir)?;
     let firewall_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || ensure_private_network_firewall(&firewall_app))
         .await
@@ -850,8 +939,14 @@ fn pairing_status(pairing: State<'_, PairingManager>) -> Result<WorkerPairingVie
 }
 
 #[tauri::command]
-fn cancel_pairing(pairing: State<'_, PairingManager>) -> Result<(), String> {
-    pairing::cancel_worker(&pairing)
+fn cancel_pairing(app: AppHandle, pairing: State<'_, PairingManager>) -> Result<(), String> {
+    pairing::cancel_worker(&pairing)?;
+    let intent = runtime_dir(&app)?.join(WORKER_PAIRING_INTENT_MARKER);
+    match std::fs::remove_file(intent) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("could not cancel the pairing transaction: {error}")),
+    }
 }
 
 #[tauri::command]
@@ -894,11 +989,26 @@ async fn reject_pairing(
 
 #[tauri::command]
 fn join_remote(app: AppHandle, invitation: String) -> Result<(), String> {
+    let data_dir = runtime_dir(&app)?;
+    if fabric_role_at(&data_dir) == "owner" {
+        if data_dir.join(OWNER_CONFIRMED_MARKER).is_file() {
+            return Err(
+                "this machine owns a configured fabric; use Reset Rampage before joining another owner"
+                    .into(),
+            );
+        }
+        stop_all_sidecars(&app)?;
+    }
+    prepare_worker_pairing_files(&data_dir)?;
     persist_remote_invite(&app, &invitation)?;
     app.restart()
 }
 
 fn persist_remote_invite(app: &AppHandle, invitation: &str) -> Result<(), String> {
+    persist_remote_invite_at(&runtime_dir(app)?, invitation)
+}
+
+fn persist_remote_invite_at(data_dir: &Path, invitation: &str) -> Result<(), String> {
     let parsed: serde_json::Value = serde_json::from_str(invitation)
         .map_err(|error| format!("invite is not valid JSON: {error}"))?;
     if parsed.get("schema").and_then(serde_json::Value::as_str)
@@ -914,14 +1024,14 @@ fn persist_remote_invite(app: &AppHandle, invitation: &str) -> Result<(), String
     {
         return Err("invite is missing its signed Rampage mesh endpoint".into());
     }
-    let data_dir = runtime_dir(app)?;
-    std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
-    // Setup mode is the user's explicit decision to abandon the previous worker identity. A
-    // retiring sidecar from an older build could previously recreate its pin after Pair again,
-    // trapping the user in an endless "already enrolled" loop. Clear only the bounded worker
-    // credential allowlist while the setup marker is authoritative; never do this for an active
-    // owner or worker runtime.
-    remove_stale_worker_credentials_in_setup(&data_dir)?;
+    std::fs::create_dir_all(data_dir).map_err(|error| error.to_string())?;
+    if !setup_required(data_dir) || !data_dir.join(WORKER_PAIRING_INTENT_MARKER).is_file() {
+        return Err(
+            "the protected nearby-pairing transaction is not active; start Join my fabric again"
+                .into(),
+        );
+    }
+    remove_stale_worker_credentials_in_setup(data_dir)?;
     let destination = data_dir.join("remote-invite.json");
     if destination.exists() || data_dir.join("agent.controller-pin.json").exists() {
         return Err("this machine is already enrolled; remove it from the current fabric before enrolling again".into());
@@ -956,6 +1066,17 @@ fn persist_remote_invite(app: &AppHandle, invitation: &str) -> Result<(), String
         let _ = std::fs::remove_file(&destination);
         return Err(format!(
             "could not leave setup mode after enrollment: {error}"
+        ));
+    }
+    let intent_marker = data_dir.join(WORKER_PAIRING_INTENT_MARKER);
+    if let Err(error) = std::fs::remove_file(&intent_marker) {
+        let _ = std::fs::remove_file(&destination);
+        let _ = write_new_marker(
+            &data_dir.join(SETUP_REQUIRED_MARKER),
+            b"rampage.setup-required.v1\n",
+        );
+        return Err(format!(
+            "could not commit the protected pairing transaction: {error}"
         ));
     }
     Ok(())
@@ -1296,6 +1417,7 @@ fn configured_private_relay(data_dir: &std::path::Path) -> Result<Option<String>
 fn launch_fabric(app: &AppHandle) -> Result<(), String> {
     let data_dir = runtime_dir(app)?;
     std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
+    ensure_neutral_first_run(&data_dir)?;
     if setup_required(&data_dir) {
         return Ok(());
     }
@@ -1628,8 +1750,8 @@ pub fn run() {
         .manage(LocalAiRuntime::default())
         .manage(PairingManager::default())
         .setup(|app| {
-            let setup_required = setup_required(&runtime_dir(app.handle())?);
             launch_fabric(app.handle()).map_err(std::io::Error::other)?;
+            let setup_required = setup_required(&runtime_dir(app.handle())?);
             if !setup_required {
                 local_ai::schedule(
                     app.state::<LocalAiRuntime>().inner().clone(),
@@ -1662,6 +1784,7 @@ pub fn run() {
             leave_fabric,
             factory_reset,
             activate_owner_fabric,
+            confirm_owner_fabric,
             remote_assist_status,
             set_remote_assist_enabled
         ])
@@ -1780,6 +1903,22 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("ai.obtuse.rampage/runtime")).unwrap();
         root
+    }
+
+    #[test]
+    fn empty_runtime_boots_into_neutral_setup_instead_of_implicit_owner() {
+        let root = recovery_runtime();
+        let runtime = root.path().join("ai.obtuse.rampage/runtime");
+        std::fs::write(
+            runtime.join("firewall-private-v2.ready"),
+            b"installer-owned",
+        )
+        .unwrap();
+
+        assert!(ensure_neutral_first_run(&runtime).unwrap());
+        assert_eq!(fabric_role_at(&runtime), "setup");
+        assert!(runtime.join(SETUP_REQUIRED_MARKER).is_file());
+        assert!(!runtime.join(OWNER_FABRIC_MARKER).exists());
     }
 
     fn write_owner_local_enrollment(runtime: &Path, governor_secret: [u8; 32]) {
@@ -1914,6 +2053,59 @@ mod tests {
             0
         );
         assert!(runtime.join("agent.controller-pin.json").is_file());
+    }
+
+    #[test]
+    fn explicit_join_retires_unconfirmed_legacy_owner_and_commits_invite() {
+        let root = recovery_runtime();
+        let runtime = root.path().join("ai.obtuse.rampage/runtime");
+        write_owner_local_enrollment(&runtime, [31_u8; 32]);
+        std::fs::write(runtime.join("controller.db"), b"legacy bootstrap").unwrap();
+        #[cfg(target_os = "windows")]
+        std::fs::write(
+            runtime.join(FIREWALL_MARKER_FILE),
+            b"rampage.firewall-private.v2\ninstall_dir=C:\\Rampage\n",
+        )
+        .unwrap();
+
+        prepare_worker_pairing_files(&runtime).unwrap();
+        assert_eq!(fabric_role_at(&runtime), "setup");
+        assert!(runtime.join(WORKER_PAIRING_INTENT_MARKER).is_file());
+        assert!(!runtime.join(OWNER_FABRIC_MARKER).exists());
+        assert!(!runtime.join("agent.controller-pin.json").exists());
+        #[cfg(target_os = "windows")]
+        assert!(runtime.join(FIREWALL_MARKER_FILE).is_file());
+
+        let invite = serde_json::json!({
+            "schema": "rampage.enrollment-invite.v1",
+            "controller_mesh": { "signature": "signed-mesh-endpoint" },
+            "governor_public_key": "owner-key"
+        })
+        .to_string();
+        persist_remote_invite_at(&runtime, &invite).unwrap();
+
+        assert_eq!(fabric_role_at(&runtime), "worker");
+        assert!(runtime.join("remote-invite.json").is_file());
+        assert!(!runtime.join(SETUP_REQUIRED_MARKER).exists());
+        assert!(!runtime.join(WORKER_PAIRING_INTENT_MARKER).exists());
+    }
+
+    #[test]
+    fn explicit_join_never_erases_a_confirmed_owner() {
+        let root = recovery_runtime();
+        let runtime = root.path().join("ai.obtuse.rampage/runtime");
+        write_owner_local_enrollment(&runtime, [31_u8; 32]);
+        std::fs::write(
+            runtime.join(OWNER_CONFIRMED_MARKER),
+            b"rampage.owner-confirmed.v1\n",
+        )
+        .unwrap();
+
+        let error = prepare_worker_pairing_files(&runtime).unwrap_err();
+        assert!(error.contains("configured fabric"));
+        assert!(runtime.join(OWNER_FABRIC_MARKER).is_file());
+        assert!(runtime.join("agent.controller-pin.json").is_file());
+        assert!(!runtime.join(SETUP_REQUIRED_MARKER).exists());
     }
 
     #[test]
