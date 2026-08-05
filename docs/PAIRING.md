@@ -12,7 +12,8 @@ copied invitation, or verification code.
 3. On the laptop, choose **Join my fabric**, then **Find my fabric**. Leave it waiting.
 4. The main PC automatically shows a **New machine found** card with the laptop name. If Rampage is
    hidden in the system tray, it restores the window and labels the tray with the waiting machine;
-   retransmitted discovery packets do not repeatedly interrupt the owner.
+   retransmitted discovery packets do not repeatedly interrupt the owner, and the alert clears
+   after approval, rejection, or expiry.
 5. Choose **Approve this machine** on the main PC.
 6. The main PC reports **Connected securely**. The laptop stores its enrollment durably and restarts
    automatically into a contributor status screen. **Worker active** appears only after the owner

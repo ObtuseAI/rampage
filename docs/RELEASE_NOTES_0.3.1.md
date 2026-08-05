@@ -32,7 +32,7 @@ for one device approval on the main PC with no verification code to type or comp
 Candidate 6 closes the last owner-notification gap. A newly discovered laptop now restores a
 tray-hidden owner window and names the waiting machine in the tray tooltip. The alert fires once per
 pending request, so the laptop's normal discovery retransmissions cannot repeatedly interrupt the
-owner's foreground work.
+owner's foreground work, and it returns to the normal owner state when no approval remains pending.
 
 ## What changed
 
