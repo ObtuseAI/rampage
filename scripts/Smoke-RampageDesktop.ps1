@@ -54,6 +54,17 @@ try {
 # run. Neutral onboarding above owns the role decision; this marker pair exercises the packaged
 # controller, agent, intelligence service, tray lifecycle, and signed local offer after that
 # decision has been made.
+if ($env:OS -eq 'Windows_NT') {
+    # Installer smoke runs beside a real user installation on developer machines. It is not a
+    # firewall test, so mark this isolated runtime as already allowed instead of replacing the
+    # machine-wide Rampage rules with paths under the temporary smoke directory.
+    $candidateInstallDirectory = Split-Path -Parent $resolvedExecutable
+    [IO.File]::WriteAllText(
+        (Join-Path $smokeRoot 'firewall-private-v2.ready'),
+        "rampage.firewall-private.v2`ninstall_dir=$candidateInstallDirectory`n",
+        [Text.UTF8Encoding]::new($false)
+    )
+}
 [IO.File]::WriteAllText(
     (Join-Path $smokeRoot 'owner-fabric-v1.ready'),
     "rampage.owner-fabric.v1`n",

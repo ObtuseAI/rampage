@@ -566,10 +566,19 @@ fn prepare_worker_pairing_files(data_dir: &Path) -> Result<(), String> {
         _ => return Err("Rampage could not determine this machine's fabric role".into()),
     }
     remove_stale_worker_credentials_in_setup(data_dir)?;
-    write_new_marker(
-        &data_dir.join(WORKER_PAIRING_INTENT_MARKER),
-        b"rampage.worker-pairing.v1\n",
-    )
+    let intent = data_dir.join(WORKER_PAIRING_INTENT_MARKER);
+    let expected = b"rampage.worker-pairing.v1\n";
+    match read_bounded_regular_file(&intent, 128, "worker pairing intent") {
+        Ok(bytes) if bytes == expected => Ok(()),
+        Ok(_) => Err(
+            "worker pairing intent has unexpected contents; use Fix Rampage before retrying".into(),
+        ),
+        Err(_) if intent.exists() => Err(
+            "worker pairing intent is not a bounded regular file; use Fix Rampage before retrying"
+                .into(),
+        ),
+        Err(_) => write_new_marker(&intent, expected),
+    }
 }
 
 #[tauri::command]
@@ -2053,6 +2062,21 @@ mod tests {
             0
         );
         assert!(runtime.join("agent.controller-pin.json").is_file());
+    }
+
+    #[test]
+    fn failed_nearby_pairing_can_retry_the_same_protected_transaction() {
+        let root = recovery_runtime();
+        let runtime = root.path().join("ai.obtuse.rampage/runtime");
+
+        prepare_worker_pairing_files(&runtime).unwrap();
+        prepare_worker_pairing_files(&runtime).unwrap();
+
+        assert!(runtime.join(SETUP_REQUIRED_MARKER).is_file());
+        assert_eq!(
+            std::fs::read(runtime.join(WORKER_PAIRING_INTENT_MARKER)).unwrap(),
+            b"rampage.worker-pairing.v1\n"
+        );
     }
 
     #[test]
