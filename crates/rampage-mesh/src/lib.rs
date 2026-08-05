@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::time::Duration;
 use thiserror::Error;
 
 pub const CONTROL_ALPN: &[u8] = b"rampage.mesh.control.v1";
@@ -27,6 +28,9 @@ pub const ARTIFACT_ALPN: &[u8] = b"rampage.mesh.artifact.v2";
 pub const MODEL_ALPN: &[u8] = b"rampage.mesh.model.v1";
 pub const REMOTE_DESKTOP_ALPN: &[u8] = b"rampage.mesh.remote-desktop.v1";
 const MAX_ARTIFACT_HEADER_BYTES: usize = 64 * 1024;
+/// A control-plane operation must never leave a desktop worker stuck in "connecting" forever.
+/// Bulk model and artifact streams use their own protocols and are not constrained by this bound.
+pub const CONTROL_REQUEST_DEADLINE: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
@@ -274,6 +278,24 @@ fn endpoint_addr_from_record_inner(
 }
 
 pub async fn control_request(
+    endpoint: &Endpoint,
+    destination: EndpointAddr,
+    request: &MeshControlRequestV1,
+) -> anyhow::Result<MeshControlResponseV1> {
+    tokio::time::timeout(
+        CONTROL_REQUEST_DEADLINE,
+        control_request_within_deadline(endpoint, destination, request),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "mesh control request exceeded the {} second deadline",
+            CONTROL_REQUEST_DEADLINE.as_secs()
+        )
+    })?
+}
+
+async fn control_request_within_deadline(
     endpoint: &Endpoint,
     destination: EndpointAddr,
     request: &MeshControlRequestV1,
@@ -764,6 +786,11 @@ mod tests {
         ModelInvocationFrameKind, ModelParallelism, ModelSessionLeaseV1, RemoteDesktopActionV1,
         RemoteDesktopFrameV1, RemoteDesktopLeaseV1, RemoteDesktopModeV1,
     };
+
+    #[test]
+    fn control_deadline_cannot_outlive_a_worker_offer() {
+        assert!(CONTROL_REQUEST_DEADLINE < std::time::Duration::from_secs(45));
+    }
 
     #[test]
     fn never_falls_back_to_a_public_default_relay() {
