@@ -16,7 +16,7 @@ use std::{
 };
 use tauri::AppHandle;
 #[cfg(not(test))]
-use tauri::{Manager, UserAttentionType};
+use tauri::{Emitter, Manager, UserAttentionType};
 use tokio::net::UdpSocket;
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -33,7 +33,7 @@ const MAX_INVITATION_BYTES: usize = 5 * 1_024;
 const MAX_PENDING_REQUESTS: usize = 16;
 const MAX_NEW_REQUESTS_PER_IP_PER_MINUTE: usize = 5;
 
-type OwnerRequestNotifier = Arc<dyn Fn(Option<&str>) + Send + Sync>;
+type OwnerRequestNotifier = Arc<dyn Fn(Option<PairingRequestView>) + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub(crate) struct PairingManager {
@@ -200,8 +200,8 @@ pub(crate) async fn open_owner_window(
         if inner.owner_socket.is_none() {
             inner.owner_socket = Some(socket.clone());
             let background_manager = manager.clone();
-            let notifier: OwnerRequestNotifier = Arc::new(move |device_name| {
-                signal_owner_pairing_request(&app, device_name);
+            let notifier: OwnerRequestNotifier = Arc::new(move |request| {
+                signal_owner_pairing_request(&app, request);
             });
             inner.owner_notifier = Some(notifier.clone());
             tauri::async_runtime::spawn(async move {
@@ -257,6 +257,24 @@ pub(crate) fn owner_window(manager: &PairingManager) -> Result<PairingWindowView
         notifier(None);
     }
     Ok(view)
+}
+
+fn deactivate_owner_window(manager: &PairingManager) -> Result<(), String> {
+    let notifier = {
+        let mut inner = manager
+            .inner
+            .lock()
+            .map_err(|_| "pairing state lock poisoned".to_string())?;
+        inner.owner_open_until_ms = 0;
+        inner.pending.clear();
+        inner.attempts.clear();
+        inner.owner_attention_active = false;
+        inner.owner_notifier.clone()
+    };
+    if let Some(notifier) = notifier {
+        notifier(None);
+    }
+    Ok(())
 }
 
 pub(crate) async fn approve(
@@ -348,6 +366,11 @@ pub(crate) fn begin_worker(
     device_name: String,
 ) -> Result<WorkerPairingView, String> {
     let device_name = bounded_label(&device_name, "device name")?;
+    // A machine that was previously initialized as an owner can still have an in-memory UDP
+    // inbox even after its durable role files have been cleared. Disable that inbox before the
+    // worker broadcasts, otherwise the laptop can challenge itself and falsely report that the
+    // main PC was found.
+    deactivate_owner_window(manager)?;
     let generation = {
         let mut inner = manager
             .inner
@@ -395,33 +418,34 @@ pub(crate) fn begin_worker(
 }
 
 #[cfg(not(test))]
-fn signal_owner_pairing_request(app: &AppHandle, device_name: Option<&str>) {
+fn signal_owner_pairing_request(app: &AppHandle, request: Option<PairingRequestView>) {
     if let Some(tray) = app.tray_by_id("rampage") {
-        let tooltip = device_name.map_or_else(
+        let tooltip = request.as_ref().map_or_else(
             || "Rampage — Owner fabric active".to_string(),
-            |name| format!("Rampage — {name} is waiting for approval"),
+            |request| format!("Rampage — {} is waiting for approval", request.device_name),
         );
         let _ = tray.set_tooltip(Some(tooltip));
     }
-    if device_name.is_some()
-        && let Some(window) = app.get_webview_window("main")
-    {
-        // Nearby discovery should never require the owner to remember an Add-machine ritual.
-        // Surface the already approval-gated request, but do not steal keyboard focus from the
-        // owner's foreground work.
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.request_user_attention(Some(UserAttentionType::Informational));
-    }
-    if device_name.is_none()
-        && let Some(window) = app.get_webview_window("main")
-    {
-        let _ = window.request_user_attention(None);
+    if let Some(window) = app.get_webview_window("main") {
+        // Deliver the request itself to the owner UI. The periodic IPC refresh remains a
+        // reconciliation path, but admission can no longer disappear when one poll is delayed
+        // or fails alongside an unrelated worker-status read.
+        let _ = window.emit("rampage://pairing-request", request.clone());
+        if request.is_some() {
+            // Nearby discovery should never require the owner to remember an Add-machine ritual.
+            // Surface the already approval-gated request, but do not steal keyboard focus from the
+            // owner's foreground work.
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.request_user_attention(Some(UserAttentionType::Informational));
+        } else {
+            let _ = window.request_user_attention(None);
+        }
     }
 }
 
 #[cfg(test)]
-fn signal_owner_pairing_request(_app: &AppHandle, _device_name: Option<&str>) {}
+fn signal_owner_pairing_request(_app: &AppHandle, _request: Option<PairingRequestView>) {}
 
 async fn owner_receive_loop(
     manager: PairingManager,
@@ -483,6 +507,7 @@ async fn owner_receive_loop(
             || !valid_request_id(&request_id)
             || bounded_label(&device_name, "device name").is_err()
             || device_kind != "desktop"
+            || source_is_local(source.ip())
         {
             continue;
         }
@@ -546,31 +571,29 @@ async fn owner_receive_loop(
                 let Ok(challenge_payload) = serde_json::to_vec(&challenge) else {
                     continue;
                 };
-                let signal_device = device_name.clone();
-                inner.pending.insert(
-                    request_id.clone(),
-                    PendingPair {
-                        request_id,
-                        device_name,
-                        device_kind,
-                        peer_addr: source,
-                        peer_public_key: ephemeral_public_key,
-                        verification_code,
-                        key,
-                        aad,
-                        expires_at_ms: effective_expiry,
-                        challenge_payload: challenge_payload.clone(),
-                        approval_payload: None,
-                        state: PairingRequestState::AwaitingApproval,
-                    },
-                );
+                let pending = PendingPair {
+                    request_id: request_id.clone(),
+                    device_name,
+                    device_kind,
+                    peer_addr: source,
+                    peer_public_key: ephemeral_public_key,
+                    verification_code,
+                    key,
+                    aad,
+                    expires_at_ms: effective_expiry,
+                    challenge_payload: challenge_payload.clone(),
+                    approval_payload: None,
+                    state: PairingRequestState::AwaitingApproval,
+                };
+                let signal_request = PairingRequestView::from(&pending);
+                inner.pending.insert(request_id.clone(), pending);
                 inner.owner_attention_active = true;
-                (challenge_payload, Some(signal_device))
+                (challenge_payload, Some(signal_request))
             }
         };
         let _ = socket.send_to(&payload, source).await;
-        if let (Some(notifier), Some(device_name)) = (&notifier, newly_pending_device) {
-            notifier(Some(&device_name));
+        if let (Some(notifier), Some(request)) = (&notifier, newly_pending_device) {
+            notifier(Some(request));
         }
     }
 }
@@ -864,6 +887,19 @@ fn active_ipv4_interfaces() -> Vec<Ifv4Addr> {
     interfaces
 }
 
+fn source_is_local(source: IpAddr) -> bool {
+    source_is_local_on(source, active_ipv4_interfaces())
+}
+
+fn source_is_local_on(source: IpAddr, interfaces: impl IntoIterator<Item = Ifv4Addr>) -> bool {
+    let IpAddr::V4(source) = source else {
+        return false;
+    };
+    interfaces
+        .into_iter()
+        .any(|interface| interface.ip == source)
+}
+
 fn pairing_destinations() -> Vec<SocketAddr> {
     pairing_destinations_for(active_ipv4_interfaces())
 }
@@ -1105,10 +1141,10 @@ mod tests {
             let notification_count = notification_count.clone();
             let attention_clear_count = attention_clear_count.clone();
             let notified_device = notified_device.clone();
-            Arc::new(move |device_name| {
-                if let Some(device_name) = device_name {
+            Arc::new(move |request| {
+                if let Some(request) = request {
                     notification_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    *notified_device.lock().unwrap() = device_name.to_string();
+                    *notified_device.lock().unwrap() = request.device_name;
                 } else {
                     attention_clear_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
@@ -1241,6 +1277,43 @@ mod tests {
         assert!(bounded_label("Laptop", "device").is_ok());
         assert!(bounded_label("Laptop\nInjected", "device").is_err());
         assert!(bounded_label(&"x".repeat(65), "device").is_err());
+    }
+
+    #[test]
+    fn worker_transition_deactivates_a_stale_owner_inbox() {
+        let manager = PairingManager::default();
+        {
+            let mut inner = manager.inner.lock().unwrap();
+            inner.owner_open_until_ms = now_ms() + 60_000;
+            let pending = pending_fixture();
+            inner.pending.insert(pending.request_id.clone(), pending);
+            inner.owner_attention_active = true;
+        }
+
+        deactivate_owner_window(&manager).unwrap();
+
+        let inner = manager.inner.lock().unwrap();
+        assert_eq!(inner.owner_open_until_ms, 0);
+        assert!(inner.pending.is_empty());
+        assert!(!inner.owner_attention_active);
+    }
+
+    #[test]
+    fn discovery_rejects_a_request_from_its_own_interface() {
+        let local = Ifv4Addr {
+            ip: "192.168.86.44".parse().unwrap(),
+            netmask: "255.255.255.0".parse().unwrap(),
+            prefixlen: 24,
+            broadcast: Some("192.168.86.255".parse().unwrap()),
+        };
+        assert!(source_is_local_on(
+            "192.168.86.44".parse().unwrap(),
+            [local.clone()]
+        ));
+        assert!(!source_is_local_on(
+            "192.168.86.45".parse().unwrap(),
+            [local]
+        ));
     }
 
     #[test]

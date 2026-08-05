@@ -607,11 +607,12 @@ export const useRampage = create<RampageState>((set, get) => ({
   },
   refreshPairing: async () => {
     try {
-      const [pairingWindow, workerPairing] = await Promise.all([
-        invoke<PairingWindow>("pairing_window"),
-        invoke<WorkerPairing>("pairing_status"),
-      ]);
-      set({ pairingWindow, workerPairing });
+      // Owner admission is the critical path. Publish it as soon as the native command returns
+      // instead of discarding a valid request when the unrelated worker-status read fails.
+      const pairingWindow = await invoke<PairingWindow>("pairing_window");
+      set({ pairingWindow });
+      const workerPairing = await invoke<WorkerPairing>("pairing_status");
+      set({ workerPairing });
     } catch {
       // Browser showcases and an app that is still starting have no native pairing bridge.
     }
@@ -1029,3 +1030,28 @@ export const useRampage = create<RampageState>((set, get) => ({
     }
   },
 }));
+
+export function surfaceNativePairingRequest(request: PairingRequest | null) {
+  if (!request) {
+    void useRampage.getState().refreshPairing();
+    return;
+  }
+  useRampage.setState((state) => {
+    const requests = state.pairingWindow?.requests.filter(
+      (candidate) => candidate.request_id !== request.request_id,
+    ) ?? [];
+    requests.push(request);
+    return {
+      pairingWindow: {
+        schema: "rampage.pairing-window.v1",
+        open: true,
+        open_until_ms: Math.max(
+          state.pairingWindow?.open_until_ms ?? 0,
+          request.expires_at_ms,
+        ),
+        requests,
+      },
+      lastAction: `${request.device_name} found nearby. Approve it once to add it to this fabric.`,
+    };
+  });
+}

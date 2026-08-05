@@ -1,4 +1,5 @@
 import { Activity, Boxes, BrainCircuit, CircleStop, Command, Eye, Grid2X2, MonitorUp, MousePointer2, Orbit, Play, RefreshCw, Rocket, ShieldCheck, Wrench } from "lucide-react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { lazy, Suspense, useEffect } from "react";
 import { CommandPalette } from "./components/CommandPalette";
 import { ComputeStrategyPanel } from "./components/ComputeStrategyPanel";
@@ -8,12 +9,26 @@ import { Onboarding } from "./components/Onboarding";
 import { OpsGrid } from "./components/OpsGrid";
 import { RemoteAssistPanel } from "./components/RemoteAssistPanel";
 import { RecoveryCenter } from "./components/RecoveryCenter";
-import { useRampage } from "./store";
+import { type PairingRequest, surfaceNativePairingRequest, useRampage } from "./store";
 
 const Arena = lazy(() => import("./components/Arena").then((module) => ({ default: module.Arena })));
 
 export default function App() {
   const state = useRampage();
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: UnlistenFn | undefined;
+    void listen<PairingRequest | null>("rampage://pairing-request", (event) => {
+      surfaceNativePairingRequest(event.payload);
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
   useEffect(() => {
     void state.refresh();
     const interval = window.setInterval(() => void useRampage.getState().refresh(), 8_000);
