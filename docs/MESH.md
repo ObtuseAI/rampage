@@ -14,14 +14,19 @@ capability leases, and payload protocols. This is analogous to using rustls inst
 new cryptography: it avoids a product dependency without creating an unsafe home-grown protocol.
 
 Nearby enrollment is separate from the workload mesh. The joining device repeatedly announces an
-ephemeral X25519 public key over bounded UDP broadcast and local multicast. The owner listens only
-during an explicit three-minute **Add machine** window. HKDF-SHA-256 binds the request and both
-ephemeral keys into an AES-256-GCM invitation key and the four-digit short authentication string
-shown on both screens. The four digits verify the encrypted channel; they are not the enrollment
-secret. Approval carries the complete signed invite only as authenticated ciphertext, and the
+ephemeral X25519 public key over bounded UDP broadcast and local multicast. The owner keeps a
+passive, rate-limited private-LAN inbox available while the app runs and displays a device card only
+after a valid bounded request arrives. HKDF-SHA-256 binds the request and both ephemeral keys into
+an AES-256-GCM invitation key. One explicit owner-side device approval carries the complete signed
+invite only as authenticated ciphertext, and the
 joining device returns an authenticated completion receipt before restarting. Requests expire,
 unknown fields are rejected, labels and datagrams are bounded, and per-source plus global pending
 limits constrain discovery abuse. No controller API becomes LAN-accessible.
+
+The code-free nearby flow is trust-on-first-approval on a private LAN; the advertised device label
+is not a hardware attestation. A hostile peer already on that LAN can attempt to spoof or race a
+request. For that threat model, transfer the complete signed invite through a separately trusted
+channel instead of using nearby discovery.
 
 The transport supports two policy modes:
 

@@ -11,7 +11,8 @@ and foreign-controller pins remain fail-closed.
 Candidate 3 fixes the next physical-laptop discovery failure. Rampage now advertises on every active
 LAN interface instead of trusting Windows to choose one path for global broadcast, and pairing
 lifetimes are bounded independently on each device instead of requiring synchronized wall clocks.
-The normal flow remains one **Find my fabric** action on the laptop and **Add machine** on the owner.
+The normal flow is one **Find my fabric** action on the laptop; the owner detects that request
+automatically and asks for one device approval.
 
 Candidate 4 closes a worker-lifecycle race found during the physical re-pair. Pair again now waits
 for every managed sidecar process to exit before rotating the runtime. While the authoritative setup
@@ -19,6 +20,14 @@ marker is present, accepting a new invitation can remove only a fixed allowlist 
 credentials left by an older retiring process; active owner and worker identities are never
 self-deleted. The Windows firewall marker is also bound to the current installation directory, so
 an upgrade cannot silently retain private-network rules for obsolete binaries.
+
+Candidate 5 fixes the first-run role transition that caused the repeated “already enrolled” loop.
+An empty runtime previously started a complete owner fabric before the Create/Join choice, so a
+laptop could hold an owner marker and legitimate local controller pin while its UI still offered
+**Join my fabric**. First run is now neutral and authority-free. Choosing Join creates a protected
+transaction that may retire only an unconfirmed legacy bootstrap; confirmed owners and active
+workers remain protected. The owner listens for nearby requests automatically, and pairing now asks
+for one device approval on the main PC with no verification code to type or compare.
 
 ## What changed
 
@@ -42,6 +51,11 @@ an upgrade cannot silently retain private-network rules for obsolete binaries.
   countdown. Remote clocks cannot extend the window or silently prevent discovery.
 - Private-network firewall readiness records the exact installation directory and regenerates the
   three scoped Windows rules when that directory changes.
+- Empty runtimes launch no controller, agent, or fabric authority before the person chooses a role.
+- **Join my fabric** is transaction-bound: invitation persistence is rejected unless the protected
+  join intent is active, and a confirmed owner fabric cannot be erased by the join path.
+- The owner app keeps its bounded private-LAN listener ready automatically and surfaces only active
+  device requests. The laptop needs no copied value, address, or verification code.
 
 ## Simpler compute outcomes
 
@@ -72,7 +86,7 @@ separate lanes with separate qualification gates. The research and delivery sequ
 1. Install Rampage on the owner PC and laptop with the Windows installer. The installer creates the
    desktop shortcut.
 2. Create the fabric on the owner, then choose **Join my fabric** and **Find my fabric** on the laptop.
-3. Approve the matching four digits on the owner.
+3. Rampage automatically shows the laptop on the owner. Choose **Approve this machine**.
 4. If the laptop ever retains a stale identity, choose **Fix Rampage → Pair again**, then approve it
    again. On the owner, use **Advanced recovery → Forget** for the stale enrolled entry.
 

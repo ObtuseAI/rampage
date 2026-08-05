@@ -10,8 +10,67 @@ $executablePath = if ([System.IO.Path]::IsPathRooted($Executable)) {
     Join-Path $root $Executable
 }
 $resolvedExecutable = (Resolve-Path $executablePath).Path
+$neutralRoot = Join-Path $root ('output\desktop-neutral-smoke-' + [guid]::NewGuid().ToString('N'))
 $smokeRoot = Join-Path $root ('output\desktop-smoke-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $neutralRoot | Out-Null
 New-Item -ItemType Directory -Path $smokeRoot | Out-Null
+
+$oldData = $env:RAMPAGE_DATA_DIR
+$oldDiagnosticExit = $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS
+$neutralStdout = Join-Path $neutralRoot 'desktop.stdout.log'
+$neutralStderr = Join-Path $neutralRoot 'desktop.stderr.log'
+$neutralDesktop = $null
+try {
+    $env:RAMPAGE_DATA_DIR = $neutralRoot
+    $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = '5000'
+    $neutralDesktop = Start-Process -FilePath $resolvedExecutable -PassThru `
+        -RedirectStandardOutput $neutralStdout -RedirectStandardError $neutralStderr
+} finally {
+    $env:RAMPAGE_DATA_DIR = $oldData
+    $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = $oldDiagnosticExit
+}
+try {
+    $neutralMarker = Join-Path $neutralRoot 'setup-required-v1.ready'
+    for ($attempt = 0; $attempt -lt 100 -and -not (Test-Path -LiteralPath $neutralMarker); $attempt++) {
+        if ($neutralDesktop.HasExited) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not (Test-Path -LiteralPath $neutralMarker -PathType Leaf)) {
+        $neutralError = Get-Content -Raw $neutralStderr -ErrorAction SilentlyContinue
+        throw "empty runtime did not enter neutral setup: $neutralError"
+    }
+    foreach ($forbidden in @('owner-fabric-v1.ready', 'controller.token', 'agent.controller-pin.json')) {
+        if (Test-Path -LiteralPath (Join-Path $neutralRoot $forbidden)) {
+            throw "neutral first run created forbidden fabric authority: $forbidden"
+        }
+    }
+    if (-not $neutralDesktop.WaitForExit(12000)) {
+        throw 'neutral first-run diagnostic exit did not complete'
+    }
+    if ($neutralDesktop.ExitCode -ne 0) {
+        $neutralError = Get-Content -Raw $neutralStderr -ErrorAction SilentlyContinue
+        throw "neutral first run exited with code $($neutralDesktop.ExitCode): $neutralError"
+    }
+} finally {
+    if ($neutralDesktop -and -not $neutralDesktop.HasExited) {
+        Stop-Process -Id $neutralDesktop.Id -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# The local-fabric half of this smoke is an explicitly configured owner, not an implicit first
+# run. Neutral onboarding above owns the role decision; this marker pair exercises the packaged
+# controller, agent, intelligence service, tray lifecycle, and signed local offer after that
+# decision has been made.
+[IO.File]::WriteAllText(
+    (Join-Path $smokeRoot 'owner-fabric-v1.ready'),
+    "rampage.owner-fabric.v1`n",
+    [Text.UTF8Encoding]::new($false)
+)
+[IO.File]::WriteAllText(
+    (Join-Path $smokeRoot 'owner-confirmed-v1.ready'),
+    "rampage.owner-confirmed.v1`n",
+    [Text.UTF8Encoding]::new($false)
+)
 
 function Get-FreeTcpPort {
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -37,8 +96,6 @@ $intelligencePort = Get-FreeTcpPort
 while ($intelligencePort -eq $controllerPort) { $intelligencePort = Get-FreeTcpPort }
 $meshPort = Get-FreeUdpPort
 $controllerBase = "http://127.0.0.1:$controllerPort"
-$oldData = $env:RAMPAGE_DATA_DIR
-$oldDiagnosticExit = $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS
 $oldControllerBind = $env:RAMPAGE_BIND
 $oldIntelligencePort = $env:RAMPAGE_INTELLIGENCE_PORT
 $oldMeshPort = $env:RAMPAGE_MESH_PORT
@@ -107,6 +164,7 @@ try {
     }
     [pscustomobject]@{
         result = 'PASS'
+        neutral_first_run = $true
         controller = $health.status
         intelligence = $intelligence.status
         intelligence_authority = $intelligence.authority
