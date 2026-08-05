@@ -15,6 +15,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::AppHandle;
+#[cfg(not(test))]
+use tauri::{Manager, UserAttentionType};
 use tokio::net::UdpSocket;
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -30,6 +32,8 @@ const MAX_DATAGRAM_BYTES: usize = 8 * 1_024;
 const MAX_INVITATION_BYTES: usize = 5 * 1_024;
 const MAX_PENDING_REQUESTS: usize = 16;
 const MAX_NEW_REQUESTS_PER_IP_PER_MINUTE: usize = 5;
+
+type OwnerRequestNotifier = Arc<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub(crate) struct PairingManager {
@@ -175,6 +179,7 @@ enum PairingDatagram {
 
 pub(crate) async fn open_owner_window(
     manager: &PairingManager,
+    app: AppHandle,
     owner_name: String,
 ) -> Result<PairingWindowView, String> {
     let owner_name = bounded_label(&owner_name, "owner name")?;
@@ -193,8 +198,11 @@ pub(crate) async fn open_owner_window(
         if inner.owner_socket.is_none() {
             inner.owner_socket = Some(socket.clone());
             let background_manager = manager.clone();
+            let notifier: OwnerRequestNotifier = Arc::new(move |device_name| {
+                signal_owner_pairing_request(&app, device_name);
+            });
             tauri::async_runtime::spawn(async move {
-                owner_receive_loop(background_manager, socket).await;
+                owner_receive_loop(background_manager, socket, Some(notifier)).await;
             });
         }
     }
@@ -367,7 +375,31 @@ pub(crate) fn begin_worker(
     worker_status(manager)
 }
 
-async fn owner_receive_loop(manager: PairingManager, socket: Arc<UdpSocket>) {
+#[cfg(not(test))]
+fn signal_owner_pairing_request(app: &AppHandle, device_name: &str) {
+    if let Some(tray) = app.tray_by_id("rampage") {
+        let _ = tray.set_tooltip(Some(format!(
+            "Rampage — {device_name} is waiting for approval"
+        )));
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        // Nearby discovery should never require the owner to remember an Add-machine ritual.
+        // Surface the already approval-gated request, but do not steal keyboard focus from the
+        // owner's foreground work.
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.request_user_attention(Some(UserAttentionType::Informational));
+    }
+}
+
+#[cfg(test)]
+fn signal_owner_pairing_request(_app: &AppHandle, _device_name: &str) {}
+
+async fn owner_receive_loop(
+    manager: PairingManager,
+    socket: Arc<UdpSocket>,
+    notifier: Option<OwnerRequestNotifier>,
+) {
     let mut buffer = vec![0_u8; MAX_DATAGRAM_BYTES + 1];
     loop {
         let Ok((length, source)) = socket.recv_from(&mut buffer).await else {
@@ -429,7 +461,7 @@ async fn owner_receive_loop(manager: PairingManager, socket: Arc<UdpSocket>) {
         let Ok(peer_public_bytes) = decode_32(&ephemeral_public_key) else {
             continue;
         };
-        let payload = {
+        let (payload, newly_pending_device) = {
             let Ok(mut inner) = manager.inner.lock() else {
                 continue;
             };
@@ -444,10 +476,13 @@ async fn owner_receive_loop(manager: PairingManager, socket: Arc<UdpSocket>) {
                     continue;
                 }
                 existing.peer_addr = source;
-                existing
-                    .approval_payload
-                    .clone()
-                    .unwrap_or_else(|| existing.challenge_payload.clone())
+                (
+                    existing
+                        .approval_payload
+                        .clone()
+                        .unwrap_or_else(|| existing.challenge_payload.clone()),
+                    None,
+                )
             } else {
                 if inner.pending.len() >= MAX_PENDING_REQUESTS
                     || !admit_source_attempt(&mut inner.attempts, source.ip(), now)
@@ -483,6 +518,7 @@ async fn owner_receive_loop(manager: PairingManager, socket: Arc<UdpSocket>) {
                 let Ok(challenge_payload) = serde_json::to_vec(&challenge) else {
                     continue;
                 };
+                let signal_device = device_name.clone();
                 inner.pending.insert(
                     request_id.clone(),
                     PendingPair {
@@ -500,10 +536,13 @@ async fn owner_receive_loop(manager: PairingManager, socket: Arc<UdpSocket>) {
                         state: PairingRequestState::AwaitingApproval,
                     },
                 );
-                challenge_payload
+                (challenge_payload, Some(signal_device))
             }
         };
         let _ = socket.send_to(&payload, source).await;
+        if let (Some(notifier), Some(device_name)) = (&notifier, newly_pending_device) {
+            notifier(&device_name);
+        }
     }
 }
 
@@ -1030,6 +1069,16 @@ mod tests {
     #[tokio::test]
     async fn loopback_discovery_approval_and_completion_work_end_to_end() {
         let manager = PairingManager::default();
+        let notification_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let notified_device = Arc::new(Mutex::new(String::new()));
+        let notifier: OwnerRequestNotifier = {
+            let notification_count = notification_count.clone();
+            let notified_device = notified_device.clone();
+            Arc::new(move |device_name| {
+                notification_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *notified_device.lock().unwrap() = device_name.to_string();
+            })
+        };
         let owner_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let owner_addr = owner_socket.local_addr().unwrap();
         {
@@ -1038,7 +1087,11 @@ mod tests {
             inner.owner_name = "MAIN-PC".into();
             inner.owner_open_until_ms = now_ms() + 60_000;
         }
-        let receiver = tokio::spawn(owner_receive_loop(manager.clone(), owner_socket));
+        let receiver = tokio::spawn(owner_receive_loop(
+            manager.clone(),
+            owner_socket,
+            Some(notifier),
+        ));
         let worker_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let request_id = "cd".repeat(16);
         let worker_secret = StaticSecret::from([27_u8; 32]);
@@ -1072,6 +1125,27 @@ mod tests {
             panic!("expected owner challenge")
         };
         let owner_public = decode_32(&ephemeral_public_key).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while notification_count.load(std::sync::atomic::Ordering::SeqCst) != 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("owner attention signal timed out");
+        assert_eq!(&*notified_device.lock().unwrap(), "Studio Laptop");
+
+        // Retransmitted discovery packets refresh the challenge but must not repeatedly restore
+        // the owner window or spam attention for the same pending device.
+        worker_socket.send_to(&hello, owner_addr).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), worker_socket.recv_from(&mut buffer))
+            .await
+            .expect("retransmitted owner challenge timed out")
+            .unwrap();
+        assert_eq!(
+            notification_count.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+
         let shared = worker_secret
             .diffie_hellman(&PublicKey::from(owner_public))
             .to_bytes();
