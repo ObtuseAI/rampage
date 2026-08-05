@@ -29,6 +29,11 @@ transaction that may retire only an unconfirmed legacy bootstrap; confirmed owne
 workers remain protected. The owner listens for nearby requests automatically, and pairing now asks
 for one device approval on the main PC with no verification code to type or compare.
 
+Candidate 6 closes the last owner-notification gap. A newly discovered laptop now restores a
+tray-hidden owner window and names the waiting machine in the tray tooltip. The alert fires once per
+pending request, so the laptop's normal discovery retransmissions cannot repeatedly interrupt the
+owner's foreground work.
+
 ## What changed
 
 - **Fix Rampage** safely restarts a consistent native installation without erasing identity or work.
@@ -56,6 +61,8 @@ for one device approval on the main PC with no verification code to type or comp
   join intent is active, and a confirmed owner fabric cannot be erased by the join path.
 - The owner app keeps its bounded private-LAN listener ready automatically and surfaces only active
   device requests. The laptop needs no copied value, address, or verification code.
+- A new nearby request restores a tray-hidden owner window without taking keyboard focus, while
+  duplicate discovery packets reuse the existing request without repeating the alert.
 
 ## Simpler compute outcomes
 

@@ -902,7 +902,7 @@ async fn open_pairing_window(
     tauri::async_runtime::spawn_blocking(move || ensure_private_network_firewall(&firewall_app))
         .await
         .map_err(|error| error.to_string())??;
-    pairing::open_owner_window(&pairing, local_device_name()).await
+    pairing::open_owner_window(&pairing, app, local_device_name()).await
 }
 
 #[tauri::command]
