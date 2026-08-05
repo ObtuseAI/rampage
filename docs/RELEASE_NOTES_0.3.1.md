@@ -38,6 +38,13 @@ Candidate 7 closes the alert lifecycle before publication. Windows attention and
 label now return to the normal owner state after approval, rejection, or request expiry, with an
 exact raise-once/clear-once regression test.
 
+Candidate 8 closes the false-discovery state found during live two-PC pairing. A laptop transitioning
+from an old owner bootstrap could retain its in-memory pairing inbox, receive its own worker
+broadcast, and falsely report **Main PC found** while the real owner had no request. Join mode now
+deactivates that stale inbox before broadcasting, and discovery rejects requests sourced from the
+same machine. The native listener also sends the actual pending request directly into the owner UI,
+so the approval card no longer depends on a coupled polling read.
+
 ## What changed
 
 - **Fix Rampage** safely restarts a consistent native installation without erasing identity or work.
@@ -65,6 +72,8 @@ exact raise-once/clear-once regression test.
   join intent is active, and a confirmed owner fabric cannot be erased by the join path.
 - The owner app keeps its bounded private-LAN listener ready automatically and surfaces only active
   device requests. The laptop needs no copied value, address, or verification code.
+- Worker discovery cannot select a stale owner listener on the same machine, and the owner UI
+  receives the native pending request directly while periodic IPC remains a reconciliation path.
 - A new nearby request restores a tray-hidden owner window without taking keyboard focus, while
   duplicate discovery packets reuse the existing request without repeating the alert.
 

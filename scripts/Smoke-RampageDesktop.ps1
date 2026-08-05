@@ -23,7 +23,7 @@ $neutralDesktop = $null
 try {
     $env:RAMPAGE_DATA_DIR = $neutralRoot
     $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = '5000'
-    $neutralDesktop = Start-Process -FilePath $resolvedExecutable -PassThru `
+    $neutralDesktop = Start-Process -FilePath $resolvedExecutable -Wait -PassThru `
         -RedirectStandardOutput $neutralStdout -RedirectStandardError $neutralStderr
 } finally {
     $env:RAMPAGE_DATA_DIR = $oldData
@@ -31,10 +31,6 @@ try {
 }
 try {
     $neutralMarker = Join-Path $neutralRoot 'setup-required-v1.ready'
-    for ($attempt = 0; $attempt -lt 100 -and -not (Test-Path -LiteralPath $neutralMarker); $attempt++) {
-        if ($neutralDesktop.HasExited) { break }
-        Start-Sleep -Milliseconds 100
-    }
     if (-not (Test-Path -LiteralPath $neutralMarker -PathType Leaf)) {
         $neutralError = Get-Content -Raw $neutralStderr -ErrorAction SilentlyContinue
         throw "empty runtime did not enter neutral setup: $neutralError"
@@ -43,9 +39,6 @@ try {
         if (Test-Path -LiteralPath (Join-Path $neutralRoot $forbidden)) {
             throw "neutral first run created forbidden fabric authority: $forbidden"
         }
-    }
-    if (-not $neutralDesktop.WaitForExit(12000)) {
-        throw 'neutral first-run diagnostic exit did not complete'
     }
     if ($neutralDesktop.ExitCode -ne 0) {
         $neutralError = Get-Content -Raw $neutralStderr -ErrorAction SilentlyContinue
