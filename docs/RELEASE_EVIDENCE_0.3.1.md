@@ -7,7 +7,7 @@ packages, public artifacts, and physical two-machine behavior are separate claim
 
 | Gate | Command or artifact | Result |
 | --- | --- | --- |
-| Nine release versions | `scripts/Assert-RampageVersion.ps1 -Tag v0.3.1-recovery.8` | PASS — nine surfaces report 0.3.1 |
+| Nine release versions | `scripts/Assert-RampageVersion.ps1 -Tag v0.3.1-recovery.9` | PASS — nine surfaces report 0.3.1 |
 | Rust workspace compile | `cargo check --workspace --all-targets` | PASS |
 | Controller lifecycle | `cargo test -p rampage-controller --bin rampage-controller` | PASS — 20 tests, including restart-safe node revocation |
 | Native desktop recovery and pairing | `cargo test --workspace`; `cargo test -p rampage-desktop` | PASS — 31 desktop tests, including neutral first run, protected legacy-owner conversion, confirmed-owner preservation, retry-safe pairing intent, bounded fragment reassembly under loss/duplicates/reordering, loopback enrollment, directed-broadcast coverage, direct native approval delivery, stale-owner deactivation, self-source rejection, raise-once/clear-once owner attention, and active-worker credential protection |
@@ -17,8 +17,8 @@ packages, public artifacts, and physical two-machine behavior are separate claim
 | Full workspace tests and policy | `cargo test --workspace --no-fail-fast`; `cargo clippy --workspace --all-targets -- -D warnings`; `scripts/Assert-RustSecBaseline.ps1` | PASS — all tests; no clippy warnings; 0 RustSec vulnerabilities and 18 target-reviewed warnings through 2026-10-31 |
 | Desktop, edge, and TypeScript builds | `pnpm check` | PASS — desktop 19, edge 2, SDK 12 tests plus all production builds |
 | Proposal-only intelligence | Ruff, mypy, and pytest | PASS — Ruff clean, mypy clean across 9 files, 17 tests |
-| NSIS installer and desktop shortcut | `scripts/Smoke-RampageInstaller.ps1 -Installer output/public-recovery8/Rampage_0.3.1_x64-setup.exe` | PASS — empty runtime stayed neutral; explicit owner install 0/uninstall 0; six payloads; controller/intelligence ready; one signed node and offer; shortcuts created then removed; no leaked sidecars |
-| Public release assets | [`v0.3.1-recovery.8`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.8) | PASS — 12 assets, three source-bound manifests, three checksum files, and verified Sigstore/SLSA provenance |
+| NSIS installer and desktop shortcut | `scripts/Smoke-RampageInstaller.ps1 -Installer output/public-recovery9/Rampage_0.3.1_x64-setup.exe` | PASS — empty runtime stayed neutral; explicit owner install 0/uninstall 0; six payloads; controller/intelligence ready; one signed node and offer; shortcuts created then removed; no leaked sidecars; real installed firewall rules preserved |
+| Public release assets | [`v0.3.1-recovery.9`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.9) | PASS — 12 assets, three source-bound manifests, three checksum files, and verified Sigstore/SLSA provenance |
 | Physical owner upgrade and recovery | Public candidate 2 on Windows | PASS — exact public hash, install exit 0, runtime preserved, desktop shortcut present, lifecycle consistent, non-destructive repair restart, controller ready, one resident agent, and one fresh signed offer |
 | Physical owner/laptop re-pair | Fresh 0.3.1 installs | PENDING physical laptop action |
 | Physical owner-to-laptop view | `scripts/Qualify-RampageRemoteAssist.ps1 -ExpectedVersion 0.3.1` | PENDING live opted-in worker |
@@ -30,8 +30,8 @@ independent neutral-first-run plus explicit-owner installer smoke before publica
 
 | Package | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `Rampage_0.3.1_x64_en-US.msi` | 79,015,936 | `708fd0ef4cab4c20879b10e5c089d9beaf8abd5e11b5da362fa4268c20fb0747` |
-| `Rampage_0.3.1_x64-setup.exe` | 69,139,844 | `314e0b464ad8a137719025b36c1146c0e82fb04b44ad966db0c4d2db7d43213d` |
+| `Rampage_0.3.1_x64_en-US.msi` | 79,036,416 | `0be20761780920c3d543e12ee688c477841bf04b9439d8259f83a738050941f3` |
+| `Rampage_0.3.1_x64-setup.exe` | 69,149,351 | `d337b7d77b1bbb6ac47a981b434098402f2c1c58e88327bb26c336017dcee66c` |
 
 The source-current Recovery Center capture is
 `docs/assets/rampage-recovery-center.png`, SHA-256
@@ -39,19 +39,19 @@ The source-current Recovery Center capture is
 
 ## Public candidate artifacts
 
-The candidate-8 tag-bound GitHub Actions run `31037500549` rebuilt every package from merged commit
-`bcb304e5860d5c8804cbde2b333a7437afc2a759`. Every manifest reports that exact source commit and
+The candidate-9 tag-bound GitHub Actions run `31045549648` rebuilt every package from merged commit
+`a726e0055f67af8474f11c4ac64e1b8a9a93c66a`. Every manifest reports that exact source commit and
 version 0.3.1. `gh attestation verify` bound all 12 subjects to the public repository, release tag,
 distribution workflow, GitHub-hosted runner, and merged commit.
 
 | Package | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `Rampage_0.3.1_x64-setup.exe` | 69,139,844 | `314e0b464ad8a137719025b36c1146c0e82fb04b44ad966db0c4d2db7d43213d` |
-| `Rampage_0.3.1_x64_en-US.msi` | 79,015,936 | `708fd0ef4cab4c20879b10e5c089d9beaf8abd5e11b5da362fa4268c20fb0747` |
-| `Rampage_0.3.1_amd64.AppImage` | 168,913,400 | `2bd4a2466dfb013516fedf7a9fcce345527850271891024ed0f8975fde2c7fdd` |
-| `Rampage_0.3.1_amd64.deb` | 98,066,682 | `da0ab63ebcc394fa9b32f79d5f5dec616a7d5689c901ee85057d3e027ab8f021` |
-| `Rampage_0.3.1_aarch64.dmg` | 86,269,832 | `9fcb20d9131e88eb7fca0e070ef426c0d1de7b8e9c9ffa9e4555d2b0e21c6dbc` |
-| `Rampage.app.zip` | 84,307,351 | `56a385dac45fc7c3387b246deeef8f073ff6c250e2d9f0706ad325f4b9bcce62` |
+| `Rampage_0.3.1_x64-setup.exe` | 69,149,351 | `d337b7d77b1bbb6ac47a981b434098402f2c1c58e88327bb26c336017dcee66c` |
+| `Rampage_0.3.1_x64_en-US.msi` | 79,036,416 | `0be20761780920c3d543e12ee688c477841bf04b9439d8259f83a738050941f3` |
+| `Rampage_0.3.1_amd64.AppImage` | 168,925,688 | `75b32d1e19d5646db25b7df4bc6f33559eeea4374402d5204d54ad2cadab8ecc` |
+| `Rampage_0.3.1_amd64.deb` | 98,092,292 | `c7ec067b8e81d3ffd25daad5baf08c8b3d78acb142a1cc451523e475c016cae6` |
+| `Rampage_0.3.1_aarch64.dmg` | 86,286,887 | `667c71558aeaf400d6ac73c62c77905c65632937810ff836b0204e22c93a3d78` |
+| `Rampage.app.zip` | 84,328,548 | `3945b766192368413c4dc51ae062c2f54f4ad4d9867f4b0c340bd89671aa8827` |
 
 Candidate Windows and macOS packages are intentionally identified as unsigned/not notarized; the
 workflow keeps production-signing gates reserved for a future stable channel.
