@@ -282,6 +282,7 @@ fn main() -> anyhow::Result<()> {
     if args.serve {
         let mut ready_announced = false;
         let mut reconnect_delay = std::time::Duration::from_secs(1);
+        let mut next_link_probe_at = Instant::now();
         loop {
             if data_dir.join("KILL").is_file() {
                 return Ok(());
@@ -291,18 +292,29 @@ fn main() -> anyhow::Result<()> {
             offer.offer_id = Uuid::now_v7();
             offer.observed_at = now;
             offer.expires_at = now + Duration::seconds(45);
-            if offer
-                .link_benchmark
-                .as_ref()
-                .is_none_or(|benchmark| benchmark.expires_at < offer.expires_at)
-            {
+            // Publish the first signed offer before measuring the link. A slow or broken speed
+            // probe must never hide an otherwise usable worker behind "connecting".
+            if link_probe_due(
+                ready_announced,
+                Instant::now(),
+                next_link_probe_at,
+                offer
+                    .link_benchmark
+                    .as_ref()
+                    .map(|benchmark| benchmark.expires_at),
+                offer.expires_at,
+            ) {
                 match transport.measure_link(node_id, now) {
-                    Ok(benchmark) => offer.link_benchmark = benchmark,
+                    Ok(benchmark) => {
+                        offer.link_benchmark = benchmark;
+                        next_link_probe_at = Instant::now() + std::time::Duration::from_secs(60);
+                    }
                     Err(error) => {
                         eprintln!(
                             "link benchmark unavailable; placement will stay conservative: {error}"
                         );
                         offer.link_benchmark = None;
+                        next_link_probe_at = Instant::now() + std::time::Duration::from_secs(30);
                     }
                 }
             }
@@ -374,6 +386,18 @@ fn main() -> anyhow::Result<()> {
     }
     println!("{}", serde_json::to_string_pretty(&offer)?);
     Ok(())
+}
+
+fn link_probe_due(
+    ready_announced: bool,
+    now: Instant,
+    next_probe_at: Instant,
+    benchmark_expires_at: Option<chrono::DateTime<Utc>>,
+    offer_expires_at: chrono::DateTime<Utc>,
+) -> bool {
+    ready_announced
+        && now >= next_probe_at
+        && benchmark_expires_at.is_none_or(|expires_at| expires_at < offer_expires_at)
 }
 
 fn refresh_dynamic_capabilities(
@@ -2296,5 +2320,27 @@ mod tests {
         assert_eq!(parsed.node_id, expected.node_id);
         assert_eq!(parsed.owner_id, expected.owner_id);
         assert!(read_json_file_bounded::<IdentityIds>(&path, 8).is_err());
+    }
+
+    #[test]
+    fn first_offer_is_never_blocked_by_the_link_probe() {
+        let now = Instant::now();
+        let offer_expires_at = Utc::now() + Duration::seconds(45);
+        assert!(!link_probe_due(false, now, now, None, offer_expires_at));
+        assert!(link_probe_due(true, now, now, None, offer_expires_at));
+        assert!(!link_probe_due(
+            true,
+            now,
+            now + std::time::Duration::from_secs(1),
+            None,
+            offer_expires_at
+        ));
+        assert!(!link_probe_due(
+            true,
+            now,
+            now,
+            Some(offer_expires_at + Duration::seconds(1)),
+            offer_expires_at
+        ));
     }
 }
