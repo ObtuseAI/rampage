@@ -33,7 +33,7 @@ const MAX_INVITATION_BYTES: usize = 5 * 1_024;
 const MAX_PENDING_REQUESTS: usize = 16;
 const MAX_NEW_REQUESTS_PER_IP_PER_MINUTE: usize = 5;
 
-type OwnerRequestNotifier = Arc<dyn Fn(&str) + Send + Sync>;
+type OwnerRequestNotifier = Arc<dyn Fn(Option<&str>) + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub(crate) struct PairingManager {
@@ -45,6 +45,8 @@ struct PairingInner {
     owner_socket: Option<Arc<UdpSocket>>,
     owner_name: String,
     owner_open_until_ms: u64,
+    owner_notifier: Option<OwnerRequestNotifier>,
+    owner_attention_active: bool,
     pending: HashMap<String, PendingPair>,
     attempts: HashMap<IpAddr, VecDeque<u64>>,
     worker_generation: u64,
@@ -201,6 +203,7 @@ pub(crate) async fn open_owner_window(
             let notifier: OwnerRequestNotifier = Arc::new(move |device_name| {
                 signal_owner_pairing_request(&app, device_name);
             });
+            inner.owner_notifier = Some(notifier.clone());
             tauri::async_runtime::spawn(async move {
                 owner_receive_loop(background_manager, socket, Some(notifier)).await;
             });
@@ -232,12 +235,28 @@ pub(crate) fn owner_window(manager: &PairingManager) -> Result<PairingWindowView
         .map(PairingRequestView::from)
         .collect::<Vec<_>>();
     requests.sort_by(|left, right| left.request_id.cmp(&right.request_id));
-    Ok(PairingWindowView {
+    let clear_notifier = if inner.owner_attention_active
+        && !inner
+            .pending
+            .values()
+            .any(|request| request.state == PairingRequestState::AwaitingApproval)
+    {
+        inner.owner_attention_active = false;
+        inner.owner_notifier.clone()
+    } else {
+        None
+    };
+    let view = PairingWindowView {
         schema: "rampage.pairing-window.v1",
         open: inner.owner_open_until_ms > now,
         open_until_ms: inner.owner_open_until_ms,
         requests,
-    })
+    };
+    drop(inner);
+    if let Some(notifier) = clear_notifier {
+        notifier(None);
+    }
+    Ok(view)
 }
 
 pub(crate) async fn approve(
@@ -376,13 +395,17 @@ pub(crate) fn begin_worker(
 }
 
 #[cfg(not(test))]
-fn signal_owner_pairing_request(app: &AppHandle, device_name: &str) {
+fn signal_owner_pairing_request(app: &AppHandle, device_name: Option<&str>) {
     if let Some(tray) = app.tray_by_id("rampage") {
-        let _ = tray.set_tooltip(Some(format!(
-            "Rampage — {device_name} is waiting for approval"
-        )));
+        let tooltip = device_name.map_or_else(
+            || "Rampage — Owner fabric active".to_string(),
+            |name| format!("Rampage — {name} is waiting for approval"),
+        );
+        let _ = tray.set_tooltip(Some(tooltip));
     }
-    if let Some(window) = app.get_webview_window("main") {
+    if device_name.is_some()
+        && let Some(window) = app.get_webview_window("main")
+    {
         // Nearby discovery should never require the owner to remember an Add-machine ritual.
         // Surface the already approval-gated request, but do not steal keyboard focus from the
         // owner's foreground work.
@@ -390,10 +413,15 @@ fn signal_owner_pairing_request(app: &AppHandle, device_name: &str) {
         let _ = window.show();
         let _ = window.request_user_attention(Some(UserAttentionType::Informational));
     }
+    if device_name.is_none()
+        && let Some(window) = app.get_webview_window("main")
+    {
+        let _ = window.request_user_attention(None);
+    }
 }
 
 #[cfg(test)]
-fn signal_owner_pairing_request(_app: &AppHandle, _device_name: &str) {}
+fn signal_owner_pairing_request(_app: &AppHandle, _device_name: Option<&str>) {}
 
 async fn owner_receive_loop(
     manager: PairingManager,
@@ -536,12 +564,13 @@ async fn owner_receive_loop(
                         state: PairingRequestState::AwaitingApproval,
                     },
                 );
+                inner.owner_attention_active = true;
                 (challenge_payload, Some(signal_device))
             }
         };
         let _ = socket.send_to(&payload, source).await;
         if let (Some(notifier), Some(device_name)) = (&notifier, newly_pending_device) {
-            notifier(&device_name);
+            notifier(Some(&device_name));
         }
     }
 }
@@ -1070,13 +1099,19 @@ mod tests {
     async fn loopback_discovery_approval_and_completion_work_end_to_end() {
         let manager = PairingManager::default();
         let notification_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attention_clear_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let notified_device = Arc::new(Mutex::new(String::new()));
         let notifier: OwnerRequestNotifier = {
             let notification_count = notification_count.clone();
+            let attention_clear_count = attention_clear_count.clone();
             let notified_device = notified_device.clone();
             Arc::new(move |device_name| {
-                notification_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                *notified_device.lock().unwrap() = device_name.to_string();
+                if let Some(device_name) = device_name {
+                    notification_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    *notified_device.lock().unwrap() = device_name.to_string();
+                } else {
+                    attention_clear_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
             })
         };
         let owner_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
@@ -1086,6 +1121,7 @@ mod tests {
             inner.owner_socket = Some(owner_socket.clone());
             inner.owner_name = "MAIN-PC".into();
             inner.owner_open_until_ms = now_ms() + 60_000;
+            inner.owner_notifier = Some(notifier.clone());
         }
         let receiver = tokio::spawn(owner_receive_loop(
             manager.clone(),
@@ -1190,6 +1226,11 @@ mod tests {
         })
         .await
         .expect("completion receipt timed out");
+        assert_eq!(
+            attention_clear_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the owner attention state should clear once after approval"
+        );
         receiver.abort();
     }
 
