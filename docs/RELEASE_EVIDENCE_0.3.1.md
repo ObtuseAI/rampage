@@ -7,18 +7,18 @@ packages, public artifacts, and physical two-machine behavior are separate claim
 
 | Gate | Command or artifact | Result |
 | --- | --- | --- |
-| Nine release versions | `scripts/Assert-RampageVersion.ps1 -Tag v0.3.1-recovery.7` | PASS — nine surfaces report 0.3.1 |
+| Nine release versions | `scripts/Assert-RampageVersion.ps1 -Tag v0.3.1-recovery.8` | PASS — nine surfaces report 0.3.1 |
 | Rust workspace compile | `cargo check --workspace --all-targets` | PASS |
 | Controller lifecycle | `cargo test -p rampage-controller --bin rampage-controller` | PASS — 20 tests, including restart-safe node revocation |
-| Native desktop recovery and pairing | `cargo test --workspace`; `cargo test -p rampage-desktop` | PASS — 27 desktop tests, including neutral first run, protected legacy-owner conversion, confirmed-owner preservation, loopback enrollment, directed-broadcast coverage, raise-once/clear-once owner attention, and active-worker credential protection |
-| Desktop UI and recovery | `pnpm --dir apps/desktop test -- --run` | PASS — 18 tests |
+| Native desktop recovery and pairing | `cargo test --workspace`; `cargo test -p rampage-desktop` | PASS — 29 desktop tests, including neutral first run, protected legacy-owner conversion, confirmed-owner preservation, loopback enrollment, directed-broadcast coverage, direct native approval delivery, stale-owner deactivation, self-source rejection, raise-once/clear-once owner attention, and active-worker credential protection |
+| Desktop UI and recovery | `pnpm --dir apps/desktop test -- --run` | PASS — 19 tests |
 | TypeScript SDK | `pnpm --dir packages/sdk-ts test -- --run` | PASS — 12 tests |
 | Python SDK | `uv run --project packages/sdk-python --with pytest --with httpx python -m pytest packages/sdk-python/tests -q` | PASS — 11 tests |
 | Full workspace tests and policy | `cargo test --workspace --no-fail-fast`; `cargo clippy --workspace --all-targets -- -D warnings`; `scripts/Assert-RustSecBaseline.ps1` | PASS — all tests; no clippy warnings; 0 RustSec vulnerabilities and 18 target-reviewed warnings through 2026-10-31 |
-| Desktop, edge, and TypeScript builds | `pnpm check` | PASS — desktop 18, edge 2, SDK 12 tests plus all production builds |
+| Desktop, edge, and TypeScript builds | `pnpm check` | PASS — desktop 19, edge 2, SDK 12 tests plus all production builds |
 | Proposal-only intelligence | Ruff, mypy, and pytest | PASS — Ruff clean, mypy clean across 9 files, 17 tests |
-| NSIS installer and desktop shortcut | `scripts/Smoke-RampageInstaller.ps1 -Installer output/public-recovery7/Rampage_0.3.1_x64-setup.exe` | PASS — empty runtime stayed neutral; explicit owner install 0/uninstall 0; six payloads; controller/intelligence ready; one signed node and offer; shortcuts created then removed; no leaked sidecars |
-| Public release assets | [`v0.3.1-recovery.7`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.7) | PASS — 12 assets, three source-bound manifests, three checksum files, and verified Sigstore/SLSA provenance |
+| NSIS installer and desktop shortcut | `scripts/Smoke-RampageInstaller.ps1 -Installer output/public-recovery8/Rampage_0.3.1_x64-setup.exe` | PASS — empty runtime stayed neutral; explicit owner install 0/uninstall 0; six payloads; controller/intelligence ready; one signed node and offer; shortcuts created then removed; no leaked sidecars |
+| Public release assets | [`v0.3.1-recovery.8`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.8) | PASS — 12 assets, three source-bound manifests, three checksum files, and verified Sigstore/SLSA provenance |
 | Physical owner upgrade and recovery | Public candidate 2 on Windows | PASS — exact public hash, install exit 0, runtime preserved, desktop shortcut present, lifecycle consistent, non-destructive repair restart, controller ready, one resident agent, and one fresh signed offer |
 | Physical owner/laptop re-pair | Fresh 0.3.1 installs | PENDING physical laptop action |
 | Physical owner-to-laptop view | `scripts/Qualify-RampageRemoteAssist.ps1 -ExpectedVersion 0.3.1` | PENDING live opted-in worker |
@@ -30,8 +30,8 @@ independent neutral-first-run plus explicit-owner installer smoke before publica
 
 | Package | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `Rampage_0.3.1_x64_en-US.msi` | 79,007,744 | `a59ec2a5651fc6a8d7da5729080da573a08ad9785d4221496b1406a990c6754e` |
-| `Rampage_0.3.1_x64-setup.exe` | 69,126,892 | `af35f9861a8b24e4d2db8f070faba755b88f22b0f4bea16baa966d59ffdd9499` |
+| `Rampage_0.3.1_x64_en-US.msi` | 79,015,936 | `708fd0ef4cab4c20879b10e5c089d9beaf8abd5e11b5da362fa4268c20fb0747` |
+| `Rampage_0.3.1_x64-setup.exe` | 69,139,844 | `314e0b464ad8a137719025b36c1146c0e82fb04b44ad966db0c4d2db7d43213d` |
 
 The source-current Recovery Center capture is
 `docs/assets/rampage-recovery-center.png`, SHA-256
@@ -39,19 +39,19 @@ The source-current Recovery Center capture is
 
 ## Public candidate artifacts
 
-The candidate-7 tag-bound GitHub Actions run `30989045661` rebuilt every package from merged commit
-`6090cb30a9e60f5634db44dc022237636239892b`. Every manifest reports that exact source commit and
+The candidate-8 tag-bound GitHub Actions run `31037500549` rebuilt every package from merged commit
+`bcb304e5860d5c8804cbde2b333a7437afc2a759`. Every manifest reports that exact source commit and
 version 0.3.1. `gh attestation verify` bound all 12 subjects to the public repository, release tag,
 distribution workflow, GitHub-hosted runner, and merged commit.
 
 | Package | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `Rampage_0.3.1_x64-setup.exe` | 69,126,892 | `af35f9861a8b24e4d2db8f070faba755b88f22b0f4bea16baa966d59ffdd9499` |
-| `Rampage_0.3.1_x64_en-US.msi` | 79,007,744 | `a59ec2a5651fc6a8d7da5729080da573a08ad9785d4221496b1406a990c6754e` |
-| `Rampage_0.3.1_amd64.AppImage` | 168,921,592 | `036e8dae661c9f7ac12a039c89398fb4e33d0a4ab242c1ebdf3fa4f01e6862ec` |
-| `Rampage_0.3.1_amd64.deb` | 98,071,962 | `7ded61fce917462753f6d99c17bfd3dd842867fc91db8af630244a26f0e21c5a` |
-| `Rampage_0.3.1_aarch64.dmg` | 86,259,635 | `2fa12927f77f6202fada397582ccacc1458a64b6fb6ed3efb4c5a0dd0b1db39d` |
-| `Rampage.app.zip` | 84,307,233 | `4b0aec1556866691e8118c500c1ecdf12e55b0e641975e497655c9a46966572a` |
+| `Rampage_0.3.1_x64-setup.exe` | 69,139,844 | `314e0b464ad8a137719025b36c1146c0e82fb04b44ad966db0c4d2db7d43213d` |
+| `Rampage_0.3.1_x64_en-US.msi` | 79,015,936 | `708fd0ef4cab4c20879b10e5c089d9beaf8abd5e11b5da362fa4268c20fb0747` |
+| `Rampage_0.3.1_amd64.AppImage` | 168,913,400 | `2bd4a2466dfb013516fedf7a9fcce345527850271891024ed0f8975fde2c7fdd` |
+| `Rampage_0.3.1_amd64.deb` | 98,066,682 | `da0ab63ebcc394fa9b32f79d5f5dec616a7d5689c901ee85057d3e027ab8f021` |
+| `Rampage_0.3.1_aarch64.dmg` | 86,269,832 | `9fcb20d9131e88eb7fca0e070ef426c0d1de7b8e9c9ffa9e4555d2b0e21c6dbc` |
+| `Rampage.app.zip` | 84,307,351 | `56a385dac45fc7c3387b246deeef8f073ff6c250e2d9f0706ad325f4b9bcce62` |
 
 Candidate Windows and macOS packages are intentionally identified as unsigned/not notarized; the
 workflow keeps production-signing gates reserved for a future stable channel.
@@ -93,6 +93,13 @@ the existing request and do not repeat the alert.
 Candidate 7 completes the lifecycle: approval, rejection, and expiry clear Windows attention and
 restore the normal owner tray label exactly once. The final loopback regression proves encrypted
 discovery, approval, completion, one alert, duplicate suppression, and one attention clear together.
+
+Candidate 8 was required after live two-PC debugging proved the laptop could retain an in-memory
+owner inbox while entering join mode. Its worker broadcast could then receive its own challenge and
+falsely display **Main PC found** while the real owner held zero pending requests. Joining now
+deactivates any stale owner inbox before broadcasting, and owner discovery rejects requests sourced
+from the same machine. The native listener also emits the actual pending request directly to the
+owner WebView, while periodic IPC remains reconciliation rather than the only presentation path.
 
 ## Honest boundary
 
