@@ -57,14 +57,15 @@ an enrolled laptop does not lose its signed route merely because the main app re
 
 - The owner listener receives only bounded nearby requests; admitting a machine still requires one
   explicit owner action.
-- A laptop request expires after five minutes and contains only bounded metadata plus an ephemeral
+- A laptop request expires after fifteen minutes and contains only bounded metadata plus an ephemeral
   public key.
 - Rampage accepts at most five new requests per source address per minute and sixteen pending
   requests total.
 - Datagram size, labels, schemas, request identifiers, and public keys are validated before state is
   created. Remote timestamps never control the local expiry.
 - Repeated requests reuse the same challenge; repeated approvals resend the same encrypted payload
-  so ordinary packet loss does not force the user to start over.
+  in authenticated sub-1 KiB fragments so packet loss and mixed Wi-Fi, VPN, or wired path MTUs do
+  not force the user to start over.
 - The controller and intelligence APIs remain token-protected and bound to loopback.
 
 ## First-run and recovery guarantees

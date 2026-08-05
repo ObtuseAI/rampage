@@ -27,9 +27,14 @@ const PAIRING_MULTICAST: Ipv4Addr = Ipv4Addr::new(239, 255, 73, 82);
 // encrypted, and approval-gated, while the listener itself stays available for the app lifetime
 // so a contributor never has to coordinate an "Add machine" button with the owner.
 const PAIRING_WINDOW_MS: u64 = 365 * 24 * 60 * 60 * 1_000;
-const WORKER_WAIT_MS: u64 = 5 * 60 * 1_000;
+const WORKER_WAIT_MS: u64 = 15 * 60 * 1_000;
 const MAX_DATAGRAM_BYTES: usize = 8 * 1_024;
 const MAX_INVITATION_BYTES: usize = 5 * 1_024;
+// Keep every encrypted approval fragment comfortably below common VPN and Wi-Fi path MTUs.
+// The complete ciphertext remains authenticated as one AES-GCM payload after reassembly.
+const MAX_APPROVAL_CHUNK_CHARS: usize = 640;
+const MAX_APPROVAL_CHUNKS: usize = 16;
+const MAX_APPROVAL_CIPHERTEXT_CHARS: usize = 7 * 1_024;
 const MAX_PENDING_REQUESTS: usize = 16;
 const MAX_NEW_REQUESTS_PER_IP_PER_MINUTE: usize = 5;
 
@@ -65,7 +70,7 @@ struct PendingPair {
     aad: Vec<u8>,
     expires_at_ms: u64,
     challenge_payload: Vec<u8>,
-    approval_payload: Option<Vec<u8>>,
+    approval_payloads: Option<Vec<Vec<u8>>>,
     state: PairingRequestState,
 }
 
@@ -166,6 +171,14 @@ enum PairingDatagram {
         nonce: String,
         ciphertext: String,
     },
+    ApprovalChunk {
+        schema: String,
+        request_id: String,
+        nonce: String,
+        chunk_index: u16,
+        chunk_count: u16,
+        ciphertext_chunk: String,
+    },
     Rejected {
         schema: String,
         request_id: String,
@@ -177,6 +190,56 @@ enum PairingDatagram {
         nonce: String,
         ciphertext: String,
     },
+}
+
+#[derive(Debug)]
+struct ApprovalAssembly {
+    nonce: String,
+    chunk_count: usize,
+    chunks: Vec<Option<String>>,
+    encoded_len: usize,
+}
+
+impl ApprovalAssembly {
+    fn new(nonce: String, chunk_count: usize) -> Option<Self> {
+        (1..=MAX_APPROVAL_CHUNKS)
+            .contains(&chunk_count)
+            .then(|| Self {
+                nonce,
+                chunk_count,
+                chunks: vec![None; chunk_count],
+                encoded_len: 0,
+            })
+    }
+
+    fn push(&mut self, index: usize, chunk: String) -> Result<Option<String>, String> {
+        if index >= self.chunk_count
+            || chunk.is_empty()
+            || chunk.len() > MAX_APPROVAL_CHUNK_CHARS
+            || !chunk
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+        {
+            return Ok(None);
+        }
+        if let Some(existing) = &self.chunks[index] {
+            return Ok((existing == &chunk).then(|| self.complete()).flatten());
+        }
+        if self.encoded_len.saturating_add(chunk.len()) > MAX_APPROVAL_CIPHERTEXT_CHARS {
+            return Err("encrypted pairing approval exceeds its bounded reassembly limit".into());
+        }
+        self.encoded_len += chunk.len();
+        self.chunks[index] = Some(chunk);
+        Ok(self.complete())
+    }
+
+    fn complete(&self) -> Option<String> {
+        self.chunks
+            .iter()
+            .cloned()
+            .collect::<Option<Vec<_>>>()
+            .map(|chunks| chunks.concat())
+    }
 }
 
 pub(crate) async fn open_owner_window(
@@ -282,7 +345,7 @@ pub(crate) async fn approve(
     request_id: &str,
     invitation: &str,
 ) -> Result<PairingRequestView, String> {
-    let (socket, peer_addr, payload, view) = {
+    let (socket, peer_addr, payloads, view) = {
         let mut inner = manager
             .inner
             .lock()
@@ -296,20 +359,22 @@ pub(crate) async fn approve(
             .pending
             .get_mut(request_id)
             .ok_or_else(|| "pairing request expired or is unknown".to_string())?;
-        let payload = encrypted_approval(pending, invitation)?;
-        pending.approval_payload = Some(payload.clone());
+        let payloads = encrypted_approval_chunks(pending, invitation)?;
+        pending.approval_payloads = Some(payloads.clone());
         pending.state = PairingRequestState::Approved;
         (
             socket,
             pending.peer_addr,
-            payload,
+            payloads,
             PairingRequestView::from(&*pending),
         )
     };
-    socket
-        .send_to(&payload, peer_addr)
-        .await
-        .map_err(|error| format!("could not deliver pairing approval: {error}"))?;
+    for payload in payloads {
+        socket
+            .send_to(&payload, peer_addr)
+            .await
+            .map_err(|error| format!("could not deliver pairing approval: {error}"))?;
+    }
     Ok(view)
 }
 
@@ -514,7 +579,7 @@ async fn owner_receive_loop(
         let Ok(peer_public_bytes) = decode_32(&ephemeral_public_key) else {
             continue;
         };
-        let (payload, newly_pending_device) = {
+        let (payloads, newly_pending_device) = {
             let Ok(mut inner) = manager.inner.lock() else {
                 continue;
             };
@@ -531,9 +596,9 @@ async fn owner_receive_loop(
                 existing.peer_addr = source;
                 (
                     existing
-                        .approval_payload
+                        .approval_payloads
                         .clone()
-                        .unwrap_or_else(|| existing.challenge_payload.clone()),
+                        .unwrap_or_else(|| vec![existing.challenge_payload.clone()]),
                     None,
                 )
             } else {
@@ -582,16 +647,18 @@ async fn owner_receive_loop(
                     aad,
                     expires_at_ms: effective_expiry,
                     challenge_payload: challenge_payload.clone(),
-                    approval_payload: None,
+                    approval_payloads: None,
                     state: PairingRequestState::AwaitingApproval,
                 };
                 let signal_request = PairingRequestView::from(&pending);
                 inner.pending.insert(request_id.clone(), pending);
                 inner.owner_attention_active = true;
-                (challenge_payload, Some(signal_request))
+                (vec![challenge_payload], Some(signal_request))
             }
         };
-        let _ = socket.send_to(&payload, source).await;
+        for payload in payloads {
+            let _ = socket.send_to(&payload, source).await;
+        }
         if let (Some(notifier), Some(request)) = (&notifier, newly_pending_device) {
             notifier(Some(request));
         }
@@ -623,13 +690,14 @@ async fn worker_pairing_loop(
     let mut interval = tokio::time::interval(Duration::from_millis(750));
     let mut buffer = vec![0_u8; MAX_DATAGRAM_BYTES + 1];
     let mut selected_owner: Option<(SocketAddr, [u8; 32], Vec<u8>, String)> = None;
+    let mut approval_assembly: Option<ApprovalAssembly> = None;
     loop {
         if !generation_is_current(&manager, generation)? {
             return Ok(());
         }
         if now_ms() >= expires_at_ms {
             return Err(
-                "No owner approved this laptop within five minutes. Try again beside the owner PC."
+                "No owner approved this laptop within fifteen minutes. Try again beside the owner PC."
                     .into(),
             );
         }
@@ -670,20 +738,39 @@ async fn worker_pairing_loop(
                         if schema == PAIRING_SCHEMA && response_id == request_id => {
                         let Some((owner_addr, key, aad, owner_name)) = &selected_owner else { continue; };
                         if *owner_addr != source { continue; }
-                        let invitation = decrypt_approval(key, aad, &nonce, &ciphertext)?;
-                        super::persist_remote_invite(&app, &invitation)?;
-                        let completion = encrypted_completion(&request_id, key, aad)?;
-                        for _ in 0..3 {
-                            socket.send_to(&completion, source).await
-                                .map_err(|error| format!("could not confirm secure enrollment: {error}"))?;
-                            tokio::time::sleep(Duration::from_millis(80)).await;
+                        finish_worker_enrollment(
+                            &app, &manager, generation, &request_id, owner_name, source, key, aad,
+                            &nonce, &ciphertext, &socket,
+                        ).await?;
+                    }
+                    PairingDatagram::ApprovalChunk {
+                        schema,
+                        request_id: response_id,
+                        nonce,
+                        chunk_index,
+                        chunk_count,
+                        ciphertext_chunk,
+                    } if schema == PAIRING_SCHEMA && response_id == request_id => {
+                        let Some((owner_addr, key, aad, owner_name)) = &selected_owner else { continue; };
+                        if *owner_addr != source { continue; }
+                        let count = usize::from(chunk_count);
+                        if approval_assembly.as_ref().is_some_and(|assembly| {
+                            assembly.nonce != nonce || assembly.chunk_count != count
+                        }) {
+                            continue;
                         }
-                        set_worker_status(&manager, generation, WorkerPairingView::Approved {
-                            request_id: request_id.clone(),
-                            owner_name: owner_name.clone(),
-                        })?;
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                        app.restart();
+                        if approval_assembly.is_none() {
+                            // Repeated owner delivery makes chunk zero a stable, bounded assembly anchor.
+                            if chunk_index != 0 { continue; }
+                            approval_assembly = ApprovalAssembly::new(nonce.clone(), count);
+                        }
+                        let Some(assembly) = approval_assembly.as_mut() else { continue; };
+                        if let Some(ciphertext) = assembly.push(usize::from(chunk_index), ciphertext_chunk)? {
+                            finish_worker_enrollment(
+                                &app, &manager, generation, &request_id, owner_name, source, key, aad,
+                                &nonce, &ciphertext, &socket,
+                            ).await?;
+                        }
                     }
                     PairingDatagram::Rejected { schema, request_id: response_id, reason }
                         if schema == PAIRING_SCHEMA && response_id == request_id => {
@@ -698,33 +785,82 @@ async fn worker_pairing_loop(
     }
 }
 
-fn encrypted_approval(pending: &PendingPair, invitation: &str) -> Result<Vec<u8>, String> {
+#[allow(clippy::too_many_arguments)]
+async fn finish_worker_enrollment(
+    app: &AppHandle,
+    manager: &PairingManager,
+    generation: u64,
+    request_id: &str,
+    owner_name: &str,
+    source: SocketAddr,
+    key: &[u8; 32],
+    aad: &[u8],
+    nonce: &str,
+    ciphertext: &str,
+    socket: &UdpSocket,
+) -> Result<(), String> {
+    let invitation = decrypt_approval(key, aad, nonce, ciphertext)?;
+    super::persist_remote_invite(app, &invitation)?;
+    let completion = encrypted_completion(request_id, key, aad)?;
+    for _ in 0..3 {
+        socket
+            .send_to(&completion, source)
+            .await
+            .map_err(|error| format!("could not confirm secure enrollment: {error}"))?;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+    }
+    set_worker_status(
+        manager,
+        generation,
+        WorkerPairingView::Approved {
+            request_id: request_id.into(),
+            owner_name: owner_name.into(),
+        },
+    )?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    app.restart();
+}
+
+fn encrypted_approval_chunks(
+    pending: &PendingPair,
+    invitation: &str,
+) -> Result<Vec<Vec<u8>>, String> {
     if invitation.len() > MAX_INVITATION_BYTES {
         return Err("invite exceeds the pairing payload limit".into());
     }
-    let cipher = Aes256Gcm::new_from_slice(&pending.key)
-        .map_err(|_| "could not initialize pairing encryption".to_string())?;
-    let nonce = fresh_bytes::<12>()?;
-    let ciphertext = cipher
-        .encrypt(
-            (&nonce).into(),
-            Payload {
-                msg: invitation.as_bytes(),
-                aad: &pending.aad,
-            },
-        )
-        .map_err(|_| "could not encrypt the enrollment invitation".to_string())?;
-    let payload = serde_json::to_vec(&PairingDatagram::Approval {
-        schema: PAIRING_SCHEMA.into(),
-        request_id: pending.request_id.clone(),
-        nonce: BASE64.encode(nonce),
-        ciphertext: BASE64.encode(ciphertext),
-    })
-    .map_err(|error| error.to_string())?;
-    if payload.len() > MAX_DATAGRAM_BYTES {
-        return Err("encrypted invite exceeds the pairing datagram limit".into());
+    let (nonce, ciphertext) = encrypt_payload(&pending.key, &pending.aad, invitation.as_bytes())?;
+    if ciphertext.len() > MAX_APPROVAL_CIPHERTEXT_CHARS {
+        return Err("encrypted invite exceeds the pairing reassembly limit".into());
     }
-    Ok(payload)
+    let chunks = ciphertext
+        .as_bytes()
+        .chunks(MAX_APPROVAL_CHUNK_CHARS)
+        .map(|chunk| String::from_utf8(chunk.to_vec()).expect("base64 chunks are UTF-8"))
+        .collect::<Vec<_>>();
+    if chunks.is_empty() || chunks.len() > MAX_APPROVAL_CHUNKS {
+        return Err("encrypted invite requires too many pairing fragments".into());
+    }
+    let chunk_count = u16::try_from(chunks.len()).map_err(|_| "too many pairing fragments")?;
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(chunk_index, ciphertext_chunk)| {
+            let payload = serde_json::to_vec(&PairingDatagram::ApprovalChunk {
+                schema: PAIRING_SCHEMA.into(),
+                request_id: pending.request_id.clone(),
+                nonce: nonce.clone(),
+                chunk_index: u16::try_from(chunk_index)
+                    .map_err(|_| "pairing fragment index overflow")?,
+                chunk_count,
+                ciphertext_chunk,
+            })
+            .map_err(|error| error.to_string())?;
+            if payload.len() > 1_024 {
+                return Err("encrypted pairing fragment exceeds its safe UDP size".into());
+            }
+            Ok(payload)
+        })
+        .collect()
 }
 
 fn decrypt_approval(
@@ -1047,9 +1183,36 @@ mod tests {
             aad,
             expires_at_ms: now_ms() + 60_000,
             challenge_payload: Vec::new(),
-            approval_payload: None,
+            approval_payloads: None,
             state: PairingRequestState::AwaitingApproval,
         }
+    }
+
+    fn reassemble_approval(payloads: &[Vec<u8>]) -> (String, String) {
+        let mut assembly: Option<ApprovalAssembly> = None;
+        for payload in payloads {
+            let PairingDatagram::ApprovalChunk {
+                nonce,
+                chunk_index,
+                chunk_count,
+                ciphertext_chunk,
+                ..
+            } = serde_json::from_slice(payload).unwrap()
+            else {
+                panic!("expected approval fragment")
+            };
+            let assembly = assembly.get_or_insert_with(|| {
+                ApprovalAssembly::new(nonce.clone(), usize::from(chunk_count)).unwrap()
+            });
+            assert_eq!(assembly.nonce, nonce);
+            if let Some(ciphertext) = assembly
+                .push(usize::from(chunk_index), ciphertext_chunk)
+                .unwrap()
+            {
+                return (nonce, ciphertext);
+            }
+        }
+        panic!("approval fragments were incomplete")
     }
 
     #[test]
@@ -1083,15 +1246,13 @@ mod tests {
     fn approval_hides_and_authenticates_the_real_invite() {
         let pending = pending_fixture();
         let invitation = r#"{"schema":"rampage.enrollment-invite.v1","secret":"never-plaintext"}"#;
-        let encoded = encrypted_approval(&pending, invitation).unwrap();
-        let wire = String::from_utf8(encoded).unwrap();
-        assert!(!wire.contains("never-plaintext"));
-        let PairingDatagram::Approval {
-            nonce, ciphertext, ..
-        } = serde_json::from_str(&wire).unwrap()
-        else {
-            panic!("expected approval datagram")
-        };
+        let encoded = encrypted_approval_chunks(&pending, invitation).unwrap();
+        assert!(
+            encoded
+                .iter()
+                .all(|payload| { !String::from_utf8_lossy(payload).contains("never-plaintext") })
+        );
+        let (nonce, ciphertext) = reassemble_approval(&encoded);
         assert_eq!(
             decrypt_approval(&pending.key, &pending.aad, &nonce, &ciphertext).unwrap(),
             invitation
@@ -1123,12 +1284,93 @@ mod tests {
     }
 
     #[test]
-    fn approval_payload_is_bounded_to_one_pairing_datagram() {
+    fn approval_payload_is_fragmented_below_safe_udp_size() {
         let pending = pending_fixture();
         let largest_allowed = "x".repeat(MAX_INVITATION_BYTES);
-        let encoded = encrypted_approval(&pending, &largest_allowed).unwrap();
-        assert!(encoded.len() <= MAX_DATAGRAM_BYTES);
-        assert!(encrypted_approval(&pending, &"x".repeat(MAX_INVITATION_BYTES + 1)).is_err());
+        let encoded = encrypted_approval_chunks(&pending, &largest_allowed).unwrap();
+        assert!(encoded.len() > 1);
+        assert!(encoded.len() <= MAX_APPROVAL_CHUNKS);
+        assert!(encoded.iter().all(|payload| payload.len() <= 1_024));
+        let (nonce, ciphertext) = reassemble_approval(&encoded);
+        assert_eq!(
+            decrypt_approval(&pending.key, &pending.aad, &nonce, &ciphertext).unwrap(),
+            largest_allowed
+        );
+        assert!(
+            encrypted_approval_chunks(&pending, &"x".repeat(MAX_INVITATION_BYTES + 1)).is_err()
+        );
+    }
+
+    #[test]
+    fn approval_reassembly_survives_loss_duplicates_and_reordering() {
+        let pending = pending_fixture();
+        let invitation = "fragmented".repeat(400);
+        let encoded = encrypted_approval_chunks(&pending, &invitation).unwrap();
+        assert!(encoded.len() > 2);
+
+        let mut datagrams = encoded
+            .iter()
+            .map(|payload| serde_json::from_slice::<PairingDatagram>(payload).unwrap())
+            .collect::<Vec<_>>();
+        let PairingDatagram::ApprovalChunk {
+            nonce,
+            chunk_index,
+            chunk_count,
+            ciphertext_chunk,
+            ..
+        } = datagrams.remove(0)
+        else {
+            panic!("expected first approval fragment")
+        };
+        assert_eq!(chunk_index, 0);
+        let mut assembly = ApprovalAssembly::new(nonce.clone(), usize::from(chunk_count)).unwrap();
+        assert!(
+            assembly
+                .push(0, ciphertext_chunk.clone())
+                .unwrap()
+                .is_none()
+        );
+        assert!(assembly.push(0, ciphertext_chunk).unwrap().is_none());
+
+        datagrams.reverse();
+        let delayed = datagrams.pop().expect("one fragment is delayed");
+        let mut completed = None;
+        for datagram in datagrams {
+            let PairingDatagram::ApprovalChunk {
+                nonce: fragment_nonce,
+                chunk_index,
+                ciphertext_chunk,
+                ..
+            } = datagram
+            else {
+                panic!("expected approval fragment")
+            };
+            assert_eq!(fragment_nonce, nonce);
+            completed = assembly
+                .push(usize::from(chunk_index), ciphertext_chunk)
+                .unwrap()
+                .or(completed);
+        }
+        assert!(
+            completed.is_none(),
+            "a missing fragment must not decrypt early"
+        );
+        let PairingDatagram::ApprovalChunk {
+            chunk_index,
+            ciphertext_chunk,
+            ..
+        } = delayed
+        else {
+            panic!("expected delayed approval fragment")
+        };
+        let ciphertext = assembly
+            .push(usize::from(chunk_index), ciphertext_chunk)
+            .unwrap()
+            .expect("the retransmitted missing fragment should complete reassembly");
+        assert_eq!(
+            decrypt_approval(&pending.key, &pending.aad, &nonce, &ciphertext).unwrap(),
+            invitation
+        );
     }
 
     #[tokio::test]
@@ -1175,7 +1417,7 @@ mod tests {
             device_kind: "desktop".into(),
             ephemeral_public_key: BASE64.encode(worker_public),
             // Pairing must remain available even when the laptop's wall clock is wrong. The
-            // owner bounds the request with its own three-minute enrollment window.
+            // owner bounds the request with its own local enrollment window.
             issued_at_ms: u64::MAX,
             expires_at_ms: 0,
         })
@@ -1230,17 +1472,33 @@ mod tests {
 
         let invitation = r#"{"schema":"rampage.enrollment-invite.v1","secret":"encrypted"}"#;
         approve(&manager, &request_id, invitation).await.unwrap();
-        let (approval_length, approval_source) =
-            tokio::time::timeout(Duration::from_secs(2), worker_socket.recv_from(&mut buffer))
-                .await
-                .expect("encrypted approval timed out")
-                .unwrap();
-        assert_eq!(approval_source, owner_addr);
-        let PairingDatagram::Approval {
-            nonce, ciphertext, ..
-        } = serde_json::from_slice(&buffer[..approval_length]).unwrap()
-        else {
-            panic!("expected encrypted approval")
+        let mut assembly: Option<ApprovalAssembly> = None;
+        let (nonce, ciphertext) = loop {
+            let (approval_length, approval_source) =
+                tokio::time::timeout(Duration::from_secs(2), worker_socket.recv_from(&mut buffer))
+                    .await
+                    .expect("encrypted approval timed out")
+                    .unwrap();
+            assert_eq!(approval_source, owner_addr);
+            let PairingDatagram::ApprovalChunk {
+                nonce,
+                chunk_index,
+                chunk_count,
+                ciphertext_chunk,
+                ..
+            } = serde_json::from_slice(&buffer[..approval_length]).unwrap()
+            else {
+                panic!("expected encrypted approval fragment")
+            };
+            let assembly = assembly.get_or_insert_with(|| {
+                ApprovalAssembly::new(nonce.clone(), usize::from(chunk_count)).unwrap()
+            });
+            if let Some(ciphertext) = assembly
+                .push(usize::from(chunk_index), ciphertext_chunk)
+                .unwrap()
+            {
+                break (nonce, ciphertext);
+            }
         };
         assert_eq!(
             decrypt_approval(&key, &aad, &nonce, &ciphertext).unwrap(),

@@ -45,6 +45,14 @@ deactivates that stale inbox before broadcasting, and discovery rejects requests
 same machine. The native listener also sends the actual pending request directly into the owner UI,
 so the approval card no longer depends on a coupled polling read.
 
+Candidate 9 closes the approval-delivery failure exposed by the physical mixed wired/Wi-Fi pair.
+Discovery and the small owner challenge succeeded, but the encrypted invitation expanded beyond a
+conservative cross-network UDP payload budget and never reached the laptop. Rampage now transports
+one authenticated AES-GCM approval as retryable sub-1 KiB fragments, reassembles it under strict
+bounds, and tolerates loss, duplicates, and reordering. The nearby request remains active for fifteen
+minutes, failed attempts can retry the same protected transaction, and installer smoke no longer
+replaces a real installation's machine-wide firewall rules with temporary test paths.
+
 ## What changed
 
 - **Fix Rampage** safely restarts a consistent native installation without erasing identity or work.
@@ -76,6 +84,10 @@ so the approval card no longer depends on a coupled polling read.
   receives the native pending request directly while periodic IPC remains a reconciliation path.
 - A new nearby request restores a tray-hidden owner window without taking keyboard focus, while
   duplicate discovery packets reuse the existing request without repeating the alert.
+- Encrypted approvals are delivered as bounded sub-1 KiB fragments and retried with discovery, so
+  mixed wired, Wi-Fi, and VPN path MTUs cannot strand the laptop after owner approval.
+- Laptop discovery waits fifteen minutes, and a failed attempt can retry without leaving a stale
+  protected-intent marker behind.
 
 ## Simpler compute outcomes
 

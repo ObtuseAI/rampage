@@ -10,7 +10,7 @@ packages, public artifacts, and physical two-machine behavior are separate claim
 | Nine release versions | `scripts/Assert-RampageVersion.ps1 -Tag v0.3.1-recovery.8` | PASS — nine surfaces report 0.3.1 |
 | Rust workspace compile | `cargo check --workspace --all-targets` | PASS |
 | Controller lifecycle | `cargo test -p rampage-controller --bin rampage-controller` | PASS — 20 tests, including restart-safe node revocation |
-| Native desktop recovery and pairing | `cargo test --workspace`; `cargo test -p rampage-desktop` | PASS — 29 desktop tests, including neutral first run, protected legacy-owner conversion, confirmed-owner preservation, loopback enrollment, directed-broadcast coverage, direct native approval delivery, stale-owner deactivation, self-source rejection, raise-once/clear-once owner attention, and active-worker credential protection |
+| Native desktop recovery and pairing | `cargo test --workspace`; `cargo test -p rampage-desktop` | PASS — 31 desktop tests, including neutral first run, protected legacy-owner conversion, confirmed-owner preservation, retry-safe pairing intent, bounded fragment reassembly under loss/duplicates/reordering, loopback enrollment, directed-broadcast coverage, direct native approval delivery, stale-owner deactivation, self-source rejection, raise-once/clear-once owner attention, and active-worker credential protection |
 | Desktop UI and recovery | `pnpm --dir apps/desktop test -- --run` | PASS — 19 tests |
 | TypeScript SDK | `pnpm --dir packages/sdk-ts test -- --run` | PASS — 12 tests |
 | Python SDK | `uv run --project packages/sdk-python --with pytest --with httpx python -m pytest packages/sdk-python/tests -q` | PASS — 11 tests |
@@ -66,7 +66,7 @@ owner listener and private firewall rule were healthy. The old worker sent only 
 one default-interface multicast packet, so Windows interface selection could hide the actual LAN.
 The corrected worker also sends every active directed LAN broadcast, the owner joins multicast on
 every active LAN address, and neither side trusts the other device's wall clock for expiry. The
-owner's local request lifetime, laptop's local five-minute window, bounded requests, rate limits,
+The owner's local request lifetime, laptop's local fifteen-minute window, bounded requests, rate limits,
 ephemeral X25519 channel, and encrypted invitation remain intact.
 
 Candidate 4 was required after physical discovery and approval succeeded but the laptop
@@ -100,6 +100,17 @@ falsely display **Main PC found** while the real owner held zero pending request
 deactivates any stale owner inbox before broadcasting, and owner discovery rejects requests sourced
 from the same machine. The native listener also emits the actual pending request directly to the
 owner WebView, while periodic IPC remains reconciliation rather than the only presentation path.
+
+Candidate 9 was required after the first genuine owner approval stayed in **Approval sent** until the
+laptop's five-minute transaction expired. The owner PC's machine-wide firewall rule also still
+targeted a temporary candidate-8 smoke installation, which initially blocked discovery; it was
+repaired to the installed executable. The measured 790-byte invitation expands beyond a conservative
+1,200-byte cross-network UDP budget after authenticated encryption and JSON/base64 framing, making
+path-MTU loss the best-supported diagnosis for the post-approval timeout. Approval is now one
+authenticated AES-GCM ciphertext transported as bounded sub-1 KiB fragments; the worker retains
+strict reassembly limits and tolerates fragment loss, duplicates, and reordering. The request window
+is fifteen minutes, failed attempts can retry the existing protected transaction, and desktop smoke
+pre-seeds only its isolated firewall readiness marker instead of mutating real Rampage rules.
 
 ## Honest boundary
 
