@@ -1,9 +1,18 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
-import { useRampage } from "./store";
+import { type PairingRequest, useRampage } from "./store";
 
 vi.mock("./components/Arena", () => ({ Arena: () => <div>Spatial fabric</div> }));
+const nativeEvent = vi.hoisted(() => ({
+  pairingHandler: null as null | ((event: { payload: PairingRequest | null }) => void),
+}));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (_event: string, handler: (event: { payload: PairingRequest | null }) => void) => {
+    nativeEvent.pairingHandler = handler;
+    return () => { nativeEvent.pairingHandler = null; };
+  }),
+}));
 const baselineNodes = useRampage.getState().nodes.map((node) => ({ ...node }));
 
 afterEach(cleanup);
@@ -43,10 +52,30 @@ beforeEach(() => {
     remoteDesktopPending: false,
     killLatch: false,
     connected: true,
+    pairingWindow: null,
     nodes: baselineNodes,
     selectedNode: baselineNodes[0]?.id ?? "",
   });
   globalThis.fetch = vi.fn().mockRejectedValue(new Error("offline"));
+});
+
+test("surfaces a native nearby request immediately without waiting for polling", async () => {
+  render(<App />);
+  await waitFor(() => expect(nativeEvent.pairingHandler).not.toBeNull());
+  act(() => nativeEvent.pairingHandler?.({
+    payload: {
+      request_id: "ab".repeat(16),
+      device_name: "Studio Laptop",
+      device_kind: "desktop",
+      verification_code: "4721",
+      expires_at_ms: Date.now() + 60_000,
+      state: "awaiting_approval",
+    },
+  }));
+
+  expect(screen.getByText("NEW MACHINE FOUND")).toBeVisible();
+  expect(screen.getByRole("button", { name: /approve this machine/i })).toBeEnabled();
+  expect(screen.queryByText("4721")).not.toBeInTheDocument();
 });
 
 test("provides accessible grid parity", () => {
