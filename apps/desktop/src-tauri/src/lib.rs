@@ -2115,6 +2115,26 @@ mod tests {
     }
 
     #[test]
+    fn windows_installer_stops_every_tray_sidecar_before_replacement() {
+        let hooks = include_str!("../windows/installer-hooks.nsh");
+        assert!(hooks.contains("!macro NSIS_HOOK_PREINSTALL"));
+        assert!(hooks.contains("!macro NSIS_HOOK_PREUNINSTALL"));
+        for image in [
+            "${MAINBINARYNAME}.exe",
+            "rampage-controller.exe",
+            "rampage-agent.exe",
+            "rampage-relay.exe",
+            "rampage-intelligence.exe",
+            "rampage.exe",
+        ] {
+            assert!(
+                hooks.contains(&format!("/F /T /IM \"{image}\"")),
+                "installer omitted the exact {image} process boundary"
+            );
+        }
+    }
+
+    #[test]
     fn explicit_join_retires_unconfirmed_legacy_owner_and_commits_invite() {
         let root = recovery_runtime();
         let runtime = root.path().join("ai.obtuse.rampage/runtime");
