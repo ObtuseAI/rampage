@@ -2455,6 +2455,33 @@ mod tests {
     }
 
     #[test]
+    fn signed_route_selection_preserves_the_complete_fallback_off_lan() {
+        let endpoint_id = iroh::SecretKey::from_bytes(&[84_u8; 32]).public();
+        let aggregate = iroh::EndpointAddr::from_parts(
+            endpoint_id,
+            vec![
+                iroh::TransportAddr::Ip("192.168.86.32:58899".parse().unwrap()),
+                iroh::TransportAddr::Ip("203.0.113.20:58899".parse().unwrap()),
+            ],
+        );
+        let selected = select_controller_destination_for(
+            aggregate,
+            vec![iroh::EndpointAddr::from_parts(
+                endpoint_id,
+                vec![iroh::TransportAddr::Ip(
+                    "192.168.86.32:58899".parse().unwrap(),
+                )],
+            )],
+            &[LocalIpv4Network {
+                ip: "10.40.0.12".parse().unwrap(),
+                netmask: "255.255.255.0".parse().unwrap(),
+            }],
+        );
+        assert_eq!(selected.ip_addrs().count(), 2);
+        assert_eq!(selected.id, endpoint_id);
+    }
+
+    #[test]
     fn signed_same_lan_selection_reaches_authenticated_address() {
         let dead_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let dead_port = dead_socket.local_addr().unwrap().port();
