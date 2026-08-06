@@ -1130,31 +1130,46 @@ fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(
     }
     tauri::async_runtime::spawn(async move {
         let mut last_error: Option<String> = None;
+        let mut ready_announced = false;
         while let Some(event) = events.recv().await {
             let next = match event {
-                CommandEvent::Stdout(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
-                    .ok()
-                    .filter(|value| {
-                        value.get("schema").and_then(serde_json::Value::as_str)
-                            == Some("rampage.worker-ready.v1")
-                    })
-                    .map(|value| WorkerRuntimeView {
-                        state: "active",
-                        node_id: value
-                            .get("node_id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string),
-                        message: Some("Signed compute offer accepted by the owner PC.".into()),
-                    }),
-                CommandEvent::Stderr(bytes) => {
-                    let message = String::from_utf8_lossy(&bytes)
-                        .chars()
-                        .take(512)
-                        .collect::<String>();
-                    if !message.trim().is_empty() {
-                        last_error = Some(message);
+                CommandEvent::Stdout(bytes) => {
+                    let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+                    if value
+                        .as_ref()
+                        .and_then(|value| value.get("schema"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("rampage.worker-ready.v1")
+                    {
+                        ready_announced = true;
+                        Some(WorkerRuntimeView {
+                            state: "active",
+                            node_id: value
+                                .as_ref()
+                                .and_then(|value| value.get("node_id"))
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string),
+                            message: Some("Signed compute offer accepted by the owner PC.".into()),
+                        })
+                    } else {
+                        None
                     }
-                    None
+                }
+                CommandEvent::Stderr(bytes) => {
+                    if let Some(message) = bounded_worker_retry_message(&bytes) {
+                        last_error = Some(message.clone());
+                        if !ready_announced {
+                            Some(WorkerRuntimeView {
+                                state: "retrying",
+                                node_id: None,
+                                message: Some(message),
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 }
                 CommandEvent::Error(error) => Some(WorkerRuntimeView {
                     state: "failed",
@@ -1186,6 +1201,15 @@ fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(
         .map_err(|_| "sidecar state lock poisoned".to_string())?
         .push(agent);
     Ok(())
+}
+
+fn bounded_worker_retry_message(bytes: &[u8]) -> Option<String> {
+    let detail = String::from_utf8_lossy(bytes)
+        .trim()
+        .chars()
+        .take(384)
+        .collect::<String>();
+    (!detail.is_empty()).then(|| format!("Automatic signed-route recovery is retrying. {detail}"))
 }
 
 #[cfg(target_os = "windows")]
@@ -2077,6 +2101,17 @@ mod tests {
             std::fs::read(runtime.join(WORKER_PAIRING_INTENT_MARKER)).unwrap(),
             b"rampage.worker-pairing.v1\n"
         );
+    }
+
+    #[test]
+    fn live_worker_retry_errors_are_bounded_and_visible() {
+        assert!(bounded_worker_retry_message(b"  \r\n").is_none());
+        let message = bounded_worker_retry_message(&vec![b'x'; 2_048]).unwrap();
+        let detail = message
+            .strip_prefix("Automatic signed-route recovery is retrying. ")
+            .unwrap();
+        assert_eq!(detail.chars().count(), 384);
+        assert!(message.chars().count() <= 512);
     }
 
     #[test]

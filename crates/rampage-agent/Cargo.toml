@@ -12,6 +12,7 @@ chrono.workspace = true
 clap.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
+if-addrs.workspace = true
 iroh.workspace = true
 rand.workspace = true
 rampage-mesh = { path = "../rampage-mesh" }

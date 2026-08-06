@@ -20,6 +20,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::{Read, Write},
+    net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -529,6 +530,7 @@ enum ControllerTransport {
 struct MeshController {
     runtime: tokio::runtime::Runtime,
     endpoint: iroh::Endpoint,
+    controller_endpoint_id: String,
     destination: iroh::EndpointAddr,
 }
 
@@ -584,7 +586,7 @@ impl ControllerTransport {
                 token,
             });
         };
-        let (mesh_record, governor_key, destination) = match remote {
+        let (mesh_record, governor_key, aggregate, candidates) = match remote {
             RemoteController::Invitation(invitation) => {
                 anyhow::ensure!(
                     invitation.schema == "rampage.enrollment-invite.v1"
@@ -604,6 +606,7 @@ impl ControllerTransport {
                     mesh_record,
                     governor_key,
                     rampage_mesh::endpoint_addr_from_record(mesh_record)?,
+                    rampage_mesh::endpoint_addr_candidates_from_record(mesh_record)?,
                 )
             }
             RemoteController::Pinned(pin) => {
@@ -612,9 +615,11 @@ impl ControllerTransport {
                     &pin.endpoint,
                     pin.governor_public_key.as_str(),
                     rampage_mesh::endpoint_addr_from_pinned_record(&pin.endpoint)?,
+                    rampage_mesh::endpoint_addr_candidates_from_pinned_record(&pin.endpoint)?,
                 )
             }
         };
+        let destination = select_controller_destination(aggregate, candidates);
         let mesh_config = mesh_config_for_controller(mesh_record)?;
         let runtime = tokio::runtime::Runtime::new()?;
         let endpoint = runtime.block_on(rampage_mesh::bind_endpoint(
@@ -637,6 +642,7 @@ impl ControllerTransport {
         Ok(Self::Mesh(MeshController {
             runtime,
             endpoint,
+            controller_endpoint_id: mesh_record.endpoint_id.clone(),
             destination,
         }))
     }
@@ -733,7 +739,7 @@ impl ControllerTransport {
 
         Ok(Some(LinkBenchmarkV1 {
             schema: LinkBenchmarkV1::SCHEMA.into(),
-            controller_endpoint_id: mesh.destination.id.to_string(),
+            controller_endpoint_id: mesh.controller_endpoint_id.clone(),
             observed_at,
             expires_at: observed_at + Duration::minutes(2),
             rtt_micros_p50,
@@ -1718,6 +1724,69 @@ impl MeshController {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalIpv4Network {
+    ip: Ipv4Addr,
+    netmask: Ipv4Addr,
+}
+
+fn active_ipv4_networks() -> Vec<LocalIpv4Network> {
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|interface| {
+            interface.is_oper_up()
+                && !interface.is_loopback()
+                && !interface.is_p2p()
+                && !interface.is_link_local()
+        })
+        .filter_map(|interface| match interface.addr {
+            if_addrs::IfAddr::V4(address)
+                if !address.ip.is_unspecified() && address.netmask != Ipv4Addr::UNSPECIFIED =>
+            {
+                Some(LocalIpv4Network {
+                    ip: address.ip,
+                    netmask: address.netmask,
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn select_controller_destination(
+    aggregate: iroh::EndpointAddr,
+    candidates: Vec<iroh::EndpointAddr>,
+) -> iroh::EndpointAddr {
+    select_controller_destination_for(aggregate, candidates, &active_ipv4_networks())
+}
+
+fn select_controller_destination_for(
+    aggregate: iroh::EndpointAddr,
+    candidates: Vec<iroh::EndpointAddr>,
+    local_networks: &[LocalIpv4Network],
+) -> iroh::EndpointAddr {
+    candidates
+        .into_iter()
+        .find(|candidate| {
+            candidate.ip_addrs().any(|address| match address.ip() {
+                IpAddr::V4(remote) => local_networks
+                    .iter()
+                    .any(|local| ipv4_is_same_subnet(local.ip, remote, local.netmask)),
+                IpAddr::V6(_) => false,
+            })
+        })
+        .unwrap_or(aggregate)
+}
+
+fn ipv4_is_same_subnet(local: Ipv4Addr, remote: Ipv4Addr, netmask: Ipv4Addr) -> bool {
+    let mask = u32::from(netmask);
+    if mask == 0 {
+        return false;
+    }
+    u32::from(local) & mask == u32::from(remote) & mask
+}
+
 fn pin_from_invitation(invitation: &EnrollmentInviteV1) -> anyhow::Result<PinnedControllerV1> {
     let endpoint = invitation
         .controller_mesh
@@ -2342,5 +2411,159 @@ mod tests {
             Some(offer_expires_at + Duration::seconds(1)),
             offer_expires_at
         ));
+    }
+
+    #[test]
+    fn signed_route_selection_prefers_the_best_same_lan_address() {
+        let endpoint_id = iroh::SecretKey::from_bytes(&[83_u8; 32]).public();
+        let make = |address: &str| {
+            iroh::EndpointAddr::from_parts(
+                endpoint_id,
+                vec![iroh::TransportAddr::Ip(address.parse().unwrap())],
+            )
+        };
+        let aggregate = iroh::EndpointAddr::from_parts(
+            endpoint_id,
+            vec![
+                iroh::TransportAddr::Ip("100.98.141.113:58899".parse().unwrap()),
+                iroh::TransportAddr::Ip("172.28.48.1:58899".parse().unwrap()),
+                iroh::TransportAddr::Ip("192.168.86.32:58899".parse().unwrap()),
+            ],
+        );
+        let selected = select_controller_destination_for(
+            aggregate,
+            vec![
+                make("192.168.86.32:58899"),
+                make("172.28.48.1:58899"),
+                make("100.98.141.113:58899"),
+            ],
+            &[
+                LocalIpv4Network {
+                    ip: "192.168.86.47".parse().unwrap(),
+                    netmask: "255.255.255.0".parse().unwrap(),
+                },
+                LocalIpv4Network {
+                    ip: "100.98.141.114".parse().unwrap(),
+                    netmask: "255.255.255.255".parse().unwrap(),
+                },
+            ],
+        );
+        assert_eq!(
+            selected.ip_addrs().next().unwrap().to_string(),
+            "192.168.86.32:58899"
+        );
+    }
+
+    #[test]
+    fn signed_route_selection_preserves_the_complete_fallback_off_lan() {
+        let endpoint_id = iroh::SecretKey::from_bytes(&[84_u8; 32]).public();
+        let aggregate = iroh::EndpointAddr::from_parts(
+            endpoint_id,
+            vec![
+                iroh::TransportAddr::Ip("192.168.86.32:58899".parse().unwrap()),
+                iroh::TransportAddr::Ip("203.0.113.20:58899".parse().unwrap()),
+            ],
+        );
+        let selected = select_controller_destination_for(
+            aggregate,
+            vec![iroh::EndpointAddr::from_parts(
+                endpoint_id,
+                vec![iroh::TransportAddr::Ip(
+                    "192.168.86.32:58899".parse().unwrap(),
+                )],
+            )],
+            &[LocalIpv4Network {
+                ip: "10.40.0.12".parse().unwrap(),
+                netmask: "255.255.255.0".parse().unwrap(),
+            }],
+        );
+        assert_eq!(selected.ip_addrs().count(), 2);
+        assert_eq!(selected.id, endpoint_id);
+    }
+
+    #[test]
+    fn signed_same_lan_selection_reaches_authenticated_address() {
+        let dead_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let dead_port = dead_socket.local_addr().unwrap().port();
+        let server_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_port = server_socket.local_addr().unwrap().port();
+        drop(server_socket);
+        assert_ne!(dead_port, server_port);
+
+        let server_runtime = tokio::runtime::Runtime::new().unwrap();
+        let server = server_runtime
+            .block_on(rampage_mesh::bind_endpoint_on_port(
+                [91_u8; 32],
+                &rampage_mesh::MeshConfig::default(),
+                server_port,
+            ))
+            .unwrap();
+        let server_task_endpoint = server.clone();
+        let server_task = server_runtime.spawn(async move {
+            let connection = server_task_endpoint.accept().await.unwrap().await.unwrap();
+            let (mut send, mut receive) = connection.accept_bi().await.unwrap();
+            let bytes = receive.read_to_end(1024 * 1024).await.unwrap();
+            let request: MeshControlRequestV1 = serde_json::from_slice(&bytes).unwrap();
+            let response = rampage_protocol::MeshControlResponseV1 {
+                schema: rampage_protocol::MeshControlResponseV1::SCHEMA.into(),
+                request_id: request.request_id,
+                status: 200,
+                body: serde_json::json!({"status": "ready"}),
+            };
+            send.write_all(&serde_json::to_vec(&response).unwrap())
+                .await
+                .unwrap();
+            send.finish().unwrap();
+            let _ = send.stopped().await;
+        });
+
+        let client_runtime = tokio::runtime::Runtime::new().unwrap();
+        let client = client_runtime
+            .block_on(rampage_mesh::bind_endpoint(
+                [92_u8; 32],
+                &rampage_mesh::MeshConfig::default(),
+            ))
+            .unwrap();
+        let candidates = vec![
+            iroh::EndpointAddr::from_parts(
+                server.id(),
+                vec![iroh::TransportAddr::Ip(
+                    format!("127.0.1.1:{dead_port}").parse().unwrap(),
+                )],
+            ),
+            iroh::EndpointAddr::from_parts(
+                server.id(),
+                vec![iroh::TransportAddr::Ip(
+                    format!("127.0.0.1:{server_port}").parse().unwrap(),
+                )],
+            ),
+        ];
+        let aggregate = iroh::EndpointAddr::from_parts(
+            server.id(),
+            vec![
+                iroh::TransportAddr::Ip(format!("127.0.1.1:{dead_port}").parse().unwrap()),
+                iroh::TransportAddr::Ip(format!("127.0.0.1:{server_port}").parse().unwrap()),
+            ],
+        );
+        let destination = select_controller_destination_for(
+            aggregate,
+            candidates,
+            &[LocalIpv4Network {
+                ip: "127.0.0.2".parse().unwrap(),
+                netmask: "255.255.255.0".parse().unwrap(),
+            }],
+        );
+        let controller = MeshController {
+            runtime: client_runtime,
+            endpoint: client,
+            controller_endpoint_id: server.id().to_string(),
+            destination,
+        };
+        let response = controller.request("GET", "/health", None).unwrap();
+        assert_eq!(response.status, 200);
+
+        drop(dead_socket);
+        server_task.abort();
+        server_runtime.block_on(server.close());
     }
 }
