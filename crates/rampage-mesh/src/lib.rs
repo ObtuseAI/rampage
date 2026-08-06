@@ -224,6 +224,22 @@ pub fn endpoint_addr_from_record(record: &MeshEndpointRecordV1) -> Result<Endpoi
     endpoint_addr_from_record_inner(record)
 }
 
+/// Expand a fresh signed endpoint record into single-route candidates.
+///
+/// Passing one `EndpointAddr` containing every interface address leaves route selection to the
+/// transport. That is normally convenient, but a Windows host with VPN and Hyper-V adapters can
+/// repeatedly prefer an unreachable virtual address. Single-route candidates let a caller choose
+/// the address on its active LAN while every route remains authenticated by the same signed
+/// endpoint identity.
+pub fn endpoint_addr_candidates_from_record(
+    record: &MeshEndpointRecordV1,
+) -> Result<Vec<EndpointAddr>, MeshError> {
+    if record.schema != MeshEndpointRecordV1::SCHEMA || record.expires_at <= chrono::Utc::now() {
+        return Err(MeshError::InvalidEndpointRecord);
+    }
+    endpoint_addr_candidates_inner(record)
+}
+
 /// Resolve a controller route pinned during a successful one-time enrollment.
 ///
 /// The advertisement expiry is deliberately not reinterpreted as an authority grant here. The
@@ -239,17 +255,31 @@ pub fn endpoint_addr_from_pinned_record(
     endpoint_addr_from_record_inner(record)
 }
 
-fn endpoint_addr_from_record_inner(
+/// Expand a previously verified controller pin into single-route candidates without
+/// reinterpreting the original advertisement expiry as an authority deadline.
+pub fn endpoint_addr_candidates_from_pinned_record(
     record: &MeshEndpointRecordV1,
-) -> Result<EndpointAddr, MeshError> {
-    if record.direct_addresses.len() > 16
-        || record.relay_urls.len() > 16
-        || record
+) -> Result<Vec<EndpointAddr>, MeshError> {
+    if record.schema != MeshEndpointRecordV1::SCHEMA {
+        return Err(MeshError::InvalidEndpointRecord);
+    }
+    endpoint_addr_candidates_inner(record)
+}
+
+fn endpoint_record_shape_is_valid(record: &MeshEndpointRecordV1) -> bool {
+    record.direct_addresses.len() <= 16
+        && record.relay_urls.len() <= 16
+        && !record
             .direct_addresses
             .iter()
             .chain(&record.relay_urls)
             .any(|address| address.len() > 2_048)
-    {
+}
+
+fn endpoint_addr_from_record_inner(
+    record: &MeshEndpointRecordV1,
+) -> Result<EndpointAddr, MeshError> {
+    if !endpoint_record_shape_is_valid(record) {
         return Err(MeshError::InvalidEndpointRecord);
     }
     let endpoint_id = record
@@ -275,6 +305,75 @@ fn endpoint_addr_from_record_inner(
         return Err(MeshError::InvalidEndpointRecord);
     }
     Ok(EndpointAddr::from_parts(endpoint_id, addresses))
+}
+
+fn endpoint_addr_candidates_inner(
+    record: &MeshEndpointRecordV1,
+) -> Result<Vec<EndpointAddr>, MeshError> {
+    if !endpoint_record_shape_is_valid(record) {
+        return Err(MeshError::InvalidEndpointRecord);
+    }
+    let endpoint_id = record
+        .endpoint_id
+        .parse::<EndpointId>()
+        .map_err(|_| MeshError::InvalidEndpointRecord)?;
+    let mut direct = record
+        .direct_addresses
+        .iter()
+        .enumerate()
+        .map(|(position, address)| {
+            let parsed = address
+                .parse::<SocketAddr>()
+                .map_err(|_| MeshError::InvalidEndpointRecord)?;
+            Ok((direct_route_priority(parsed), position, parsed))
+        })
+        .collect::<Result<Vec<_>, MeshError>>()?;
+    direct.sort_by_key(|(priority, position, _)| (*priority, *position));
+
+    let mut candidates = Vec::with_capacity(direct.len() + record.relay_urls.len());
+    for (_, _, address) in direct {
+        candidates.push(EndpointAddr::from_parts(
+            endpoint_id,
+            vec![TransportAddr::Ip(address)],
+        ));
+    }
+    for relay in &record.relay_urls {
+        candidates.push(EndpointAddr::from_parts(
+            endpoint_id,
+            vec![TransportAddr::Relay(
+                relay
+                    .parse::<RelayUrl>()
+                    .map_err(|_| MeshError::InvalidEndpointRecord)?,
+            )],
+        ));
+    }
+    if candidates.is_empty() {
+        return Err(MeshError::InvalidEndpointRecord);
+    }
+    Ok(candidates)
+}
+
+fn direct_route_priority(address: SocketAddr) -> u8 {
+    match address.ip() {
+        std::net::IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            if octets[0] == 192 && octets[1] == 168 {
+                0
+            } else if octets[0] == 10 {
+                1
+            } else if octets[0] == 172 && (16..=31).contains(&octets[1]) {
+                2
+            } else if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+                5
+            } else if ip.is_loopback() || ip.is_unspecified() || ip.is_link_local() {
+                6
+            } else {
+                4
+            }
+        }
+        std::net::IpAddr::V6(ip) if ip.is_loopback() || ip.is_unspecified() => 6,
+        std::net::IpAddr::V6(_) => 3,
+    }
 }
 
 pub async fn control_request(
@@ -868,6 +967,35 @@ mod tests {
             Err(MeshError::InvalidEndpointRecord)
         ));
         assert!(endpoint_addr_from_pinned_record(&record).is_ok());
+
+        record.direct_addresses = vec![
+            "100.98.141.113:58899".into(),
+            "172.28.48.1:58899".into(),
+            "192.168.86.32:58899".into(),
+        ];
+        let candidates = endpoint_addr_candidates_from_pinned_record(&record).unwrap();
+        let candidate_ips = candidates
+            .iter()
+            .map(|candidate| {
+                candidate
+                    .ip_addrs()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            candidate_ips,
+            vec![
+                vec!["192.168.86.32:58899".to_string()],
+                vec!["172.28.48.1:58899".to_string()],
+                vec!["100.98.141.113:58899".to_string()],
+            ]
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.id == endpoint.id())
+        );
 
         record.endpoint_id = "replacement-identity".into();
         assert!(matches!(
