@@ -22,10 +22,6 @@ use std::{
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
     time::Instant,
 };
 use uuid::Uuid;
@@ -287,119 +283,159 @@ fn main() -> anyhow::Result<()> {
         }
     }
     if args.serve {
-        let transport = Arc::new(transport);
-        let shared_offer = Arc::new(Mutex::new(offer));
-        let fabric_ready = Arc::new(AtomicBool::new(false));
-        let heartbeat = {
-            let transport = Arc::clone(&transport);
-            let shared_offer = Arc::clone(&shared_offer);
-            let fabric_ready = Arc::clone(&fabric_ready);
-            let signing_key = signing_key.clone();
-            let data_dir = data_dir.clone();
-            std::thread::Builder::new()
-                .name("rampage-offer-heartbeat".into())
-                .spawn(move || {
-                    run_offer_heartbeat(
-                        &transport,
-                        &shared_offer,
-                        &fabric_ready,
-                        &signing_key,
-                        node_id,
-                        &data_dir,
-                    )
-                })?
-        };
+        let (execution_tx, execution_rx) =
+            std::sync::mpsc::channel::<anyhow::Result<ExecutionReceiptV1>>();
+        let receipt_outbox = args.key_file.with_extension("receipt.json");
+        let mut work_in_flight = false;
+        let mut ready_announced = false;
+        let mut reconnect_delay = std::time::Duration::from_secs(1);
+        let mut next_offer_at = Instant::now();
+        let mut next_work_poll_at = Instant::now();
         let mut next_link_probe_at = Instant::now();
         let mut next_capability_refresh_at = Instant::now() + CAPABILITY_REFRESH_INTERVAL;
         loop {
             if data_dir.join("KILL").is_file() {
-                break;
-            }
-            if heartbeat.is_finished() {
-                return heartbeat
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("offer heartbeat thread panicked"))?;
+                return Ok(());
             }
             if Instant::now() >= next_capability_refresh_at {
-                let mut current = shared_offer
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("resource offer state lock poisoned"))?;
-                refresh_dynamic_capabilities(&mut current, &ollama_base_url, &data_dir);
+                refresh_dynamic_capabilities(&mut offer, &ollama_base_url, &data_dir);
                 next_capability_refresh_at = Instant::now() + CAPABILITY_REFRESH_INTERVAL;
             }
-            // Enrollment and offer freshness are prerequisites for every secondary control-plane
-            // request. In particular, do not let an eager empty-queue poll win the request gate
-            // before the first signed offer or compete with a reconnecting heartbeat.
-            if !fabric_ready.load(Ordering::Acquire) {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                continue;
+            if Instant::now() >= next_offer_at {
+                let now = transport.controller_now();
+                offer.offer_id = Uuid::now_v7();
+                offer.observed_at = now;
+                offer.expires_at = now + OFFER_LIFETIME;
+                if offer
+                    .link_benchmark
+                    .as_ref()
+                    .is_some_and(|benchmark| benchmark.expires_at < offer.expires_at)
+                {
+                    offer.link_benchmark = None;
+                }
+                offer.mesh_endpoint =
+                    transport.signed_worker_endpoint(&signing_key, now, offer.expires_at);
+                rampage_policy::sign_offer(&signing_key, &mut offer);
+                if let Err(error) = transport.post_json("/v1/offers", &offer) {
+                    eprintln!(
+                        "owner PC unavailable; retrying the signed fabric connection in {} second(s): {error}",
+                        reconnect_delay.as_secs()
+                    );
+                    std::thread::sleep(reconnect_delay);
+                    reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(10));
+                    next_offer_at = Instant::now();
+                    continue;
+                }
+                reconnect_delay = std::time::Duration::from_secs(1);
+                next_offer_at = Instant::now() + OFFER_HEARTBEAT_INTERVAL;
+                if !ready_announced {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&serde_json::json!({
+                            "schema": "rampage.worker-ready.v1",
+                            "node_id": node_id,
+                            "offer_id": offer.offer_id,
+                            "offer_expires_at": offer.expires_at,
+                        }))?
+                    );
+                    std::io::stdout().flush()?;
+                    ready_announced = true;
+                }
             }
-            let (benchmark_expires_at, offer_expires_at) = {
-                let current = shared_offer
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("resource offer state lock poisoned"))?;
-                (
-                    current
-                        .link_benchmark
-                        .as_ref()
-                        .map(|benchmark| benchmark.expires_at),
-                    transport.controller_now() + OFFER_LIFETIME,
-                )
-            };
+
+            if receipt_outbox.is_file() {
+                let pending: ExecutionReceiptV1 =
+                    serde_json::from_slice(&fs::read(&receipt_outbox)?)?;
+                if let Err(error) = transport.post_json("/v1/receipts", &pending) {
+                    eprintln!("signed receipt delivery unavailable; retaining outbox: {error}");
+                } else {
+                    fs::remove_file(&receipt_outbox)?;
+                    println!("{}", serde_json::to_string_pretty(&pending)?);
+                }
+            }
+            match execution_rx.try_recv() {
+                Ok(Ok(receipt)) => {
+                    let temporary = receipt_outbox.with_extension("receipt.tmp");
+                    fs::write(&temporary, serde_json::to_vec_pretty(&receipt)?)?;
+                    fs::rename(&temporary, &receipt_outbox)?;
+                    work_in_flight = false;
+                }
+                Ok(Err(error)) => {
+                    eprintln!("admitted work failed locally: {error}");
+                    work_in_flight = false;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) if work_in_flight => {
+                    anyhow::bail!("worker execution channel disconnected")
+                }
+                Err(_) => {}
+            }
+
+            let benchmark_expires_at = offer
+                .link_benchmark
+                .as_ref()
+                .map(|benchmark| benchmark.expires_at);
             let link_probe_is_due = link_probe_due(
-                fabric_ready.load(Ordering::Acquire),
+                ready_announced,
                 Instant::now(),
                 next_link_probe_at,
                 benchmark_expires_at,
-                offer_expires_at,
+                offer.expires_at,
             );
             if link_probe_is_due {
                 let observed_at = transport.controller_now();
                 match transport.measure_link(node_id, observed_at) {
                     Ok(benchmark) => {
-                        if let Ok(mut current) = shared_offer.lock() {
-                            current.link_benchmark = benchmark;
-                        }
+                        offer.link_benchmark = benchmark;
                         next_link_probe_at = Instant::now() + std::time::Duration::from_secs(60);
                     }
                     Err(error) => {
                         eprintln!(
                             "link benchmark unavailable; placement will stay conservative: {error}"
                         );
-                        if let Ok(mut current) = shared_offer.lock() {
-                            current.link_benchmark = None;
-                        }
+                        offer.link_benchmark = None;
                         next_link_probe_at = Instant::now() + std::time::Duration::from_secs(30);
                     }
                 }
             }
-            let did_work = match execute_one_work_item(
-                &args,
-                transport.as_ref(),
-                &identity,
-                &signing_key,
-                artifact_store.as_ref(),
-            ) {
-                Ok(did_work) => did_work,
-                Err(error) => {
-                    eprintln!(
-                        "fabric work channel unavailable; retrying without dropping enrollment: {error}"
-                    );
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                    continue;
+            if !work_in_flight && Instant::now() >= next_work_poll_at {
+                match transport.get_json::<Option<WorkClaimV1>>(&format!(
+                    "/v1/work/claim?node_id={}",
+                    identity.node_id
+                )) {
+                    Ok(Some(claim)) => {
+                        let execution_tx = execution_tx.clone();
+                        let signing_key = signing_key.clone();
+                        let artifact_store = artifact_store.clone();
+                        let worker_node_id = identity.node_id;
+                        std::thread::Builder::new()
+                            .name("rampage-work-executor".into())
+                            .spawn(move || {
+                                let result = rampage_agent::execute_claim_with_store(
+                                    &claim,
+                                    worker_node_id,
+                                    claim.lease.fencing_epoch,
+                                    &signing_key,
+                                    artifact_store.as_ref(),
+                                )
+                                .map_err(anyhow::Error::from);
+                                let _ = execution_tx.send(result);
+                            })?;
+                        work_in_flight = true;
+                        next_work_poll_at = Instant::now();
+                    }
+                    Ok(None) => {
+                        next_work_poll_at = Instant::now() + std::time::Duration::from_secs(2);
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "fabric work channel unavailable; retrying without dropping enrollment: {error}"
+                        );
+                        next_work_poll_at = Instant::now() + std::time::Duration::from_secs(2);
+                    }
                 }
-            };
-            // Drain an admitted queue promptly, but back off while idle so a donated machine does
-            // not burn CPU polling. Offer freshness is maintained independently on every loop.
-            std::thread::sleep(if did_work {
-                std::time::Duration::from_millis(250)
-            } else {
-                std::time::Duration::from_secs(2)
-            });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        return heartbeat
-            .join()
-            .map_err(|_| anyhow::anyhow!("offer heartbeat thread panicked"))?;
     }
     if args.register {
         transport.post_json("/v1/offers", &offer)?;
@@ -417,65 +453,6 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     println!("{}", serde_json::to_string_pretty(&offer)?);
-    Ok(())
-}
-
-fn run_offer_heartbeat(
-    transport: &ControllerTransport,
-    shared_offer: &Mutex<ResourceOfferV1>,
-    fabric_ready: &AtomicBool,
-    signing_key: &SigningKey,
-    node_id: Uuid,
-    data_dir: &Path,
-) -> anyhow::Result<()> {
-    let mut ready_announced = false;
-    let mut reconnect_delay = std::time::Duration::from_secs(1);
-    while !data_dir.join("KILL").is_file() {
-        let now = transport.controller_now();
-        let mut heartbeat = shared_offer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("resource offer state lock poisoned"))?
-            .clone();
-        heartbeat.offer_id = Uuid::now_v7();
-        heartbeat.observed_at = now;
-        heartbeat.expires_at = now + OFFER_LIFETIME;
-        if heartbeat
-            .link_benchmark
-            .as_ref()
-            .is_some_and(|benchmark| benchmark.expires_at < heartbeat.expires_at)
-        {
-            heartbeat.link_benchmark = None;
-        }
-        heartbeat.mesh_endpoint =
-            transport.signed_worker_endpoint(signing_key, now, heartbeat.expires_at);
-        rampage_policy::sign_offer(signing_key, &mut heartbeat);
-        if let Err(error) = transport.post_json("/v1/offers", &heartbeat) {
-            fabric_ready.store(false, Ordering::Release);
-            eprintln!(
-                "owner PC unavailable; retrying the signed fabric connection in {} second(s): {error}",
-                reconnect_delay.as_secs()
-            );
-            std::thread::sleep(reconnect_delay);
-            reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(10));
-            continue;
-        }
-        reconnect_delay = std::time::Duration::from_secs(1);
-        fabric_ready.store(true, Ordering::Release);
-        if !ready_announced {
-            println!(
-                "{}",
-                serde_json::to_string(&serde_json::json!({
-                    "schema": "rampage.worker-ready.v1",
-                    "node_id": node_id,
-                    "offer_id": heartbeat.offer_id,
-                    "offer_expires_at": heartbeat.expires_at,
-                }))?
-            );
-            std::io::stdout().flush()?;
-            ready_announced = true;
-        }
-        std::thread::sleep(OFFER_HEARTBEAT_INTERVAL);
-    }
     Ok(())
 }
 
@@ -622,7 +599,6 @@ struct MeshController {
     endpoint: iroh::Endpoint,
     controller_endpoint_id: String,
     destination: iroh::EndpointAddr,
-    request_gate: Mutex<()>,
     controller_clock_offset: std::sync::Mutex<Duration>,
 }
 
@@ -736,7 +712,6 @@ impl ControllerTransport {
             endpoint,
             controller_endpoint_id: mesh_record.endpoint_id.clone(),
             destination,
-            request_gate: Mutex::new(()),
             controller_clock_offset: std::sync::Mutex::new(Duration::zero()),
         };
         if let Err(error) = mesh.request("GET", "/health", None) {
@@ -1829,15 +1804,6 @@ impl MeshController {
         body: Option<serde_json::Value>,
         deadline: std::time::Duration,
     ) -> anyhow::Result<rampage_protocol::MeshControlResponseV1> {
-        // A worker deliberately keeps its offer heartbeat independent from capability probes and
-        // work execution. Tokio Runtime::block_on and an iroh endpoint must still have one owner at
-        // a time: concurrent entry can strand both requests without producing a controller event.
-        // Serialize only the short control-plane exchange; CPU work and the worker gateway remain
-        // concurrent, so a slow task cannot suppress offer freshness.
-        let _request_guard = self
-            .request_gate
-            .lock()
-            .map_err(|_| anyhow::anyhow!("mesh control request gate poisoned"))?;
         let request = MeshControlRequestV1 {
             schema: MeshControlRequestV1::SCHEMA.into(),
             request_id: Uuid::now_v7(),
@@ -2746,7 +2712,6 @@ mod tests {
             endpoint: client,
             controller_endpoint_id: server.id().to_string(),
             destination,
-            request_gate: Mutex::new(()),
             controller_clock_offset: std::sync::Mutex::new(Duration::zero()),
         };
         let response = controller.request("GET", "/health", None).unwrap();
