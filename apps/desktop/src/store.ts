@@ -65,7 +65,7 @@ export type WorkerPairing =
   | { state: "failed"; message: string };
 
 export interface WorkerRuntime {
-  state: "inactive" | "starting" | "active" | "failed";
+  state: "inactive" | "starting" | "retrying" | "active" | "failed";
   nodeId: string | null;
   message: string | null;
 }
@@ -476,7 +476,7 @@ export const useRampage = create<RampageState>((set, get) => ({
             id: workerRuntime.nodeId ?? "worker",
             name: "This Worker",
             kind: "desktop",
-            state: active ? "ready" : workerRuntime.state === "starting" ? "sleeping" : "offline",
+            state: active ? "ready" : workerRuntime.state === "starting" || workerRuntime.state === "retrying" ? "sleeping" : "offline",
             cpu: 0,
             memory: 0,
             gpu: 0,
@@ -509,7 +509,7 @@ export const useRampage = create<RampageState>((set, get) => ({
       const [healthResponse, offersResponse, eventsResponse, modelsResponse, diagnosticResponse, intelligenceResponse] = await Promise.all([
         fetch(`${controller}/health`),
         fetch(`${controller}/v1/offers`, { headers: controllerHeaders() }),
-        fetch(`${controller}/v1/events?after=0&limit=120`, { headers: controllerHeaders() }),
+        fetch(`${controller}/v1/events?latest=true&limit=120`, { headers: controllerHeaders() }),
         fetch(`${controller}/v1/models`, { headers: controllerBearerHeaders() }).catch(() => null),
         fetch(`${controller}/v1/diagnostics/self-scan`, { headers: controllerHeaders() }),
         fetch(`${intelligence}/health`).catch(() => null),

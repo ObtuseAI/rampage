@@ -1,6 +1,7 @@
-import { Activity, Boxes, BrainCircuit, CircleStop, Command, Eye, Grid2X2, MonitorUp, MousePointer2, Orbit, Play, RefreshCw, Rocket, ShieldCheck, Wrench } from "lucide-react";
+import { Activity, Boxes, BrainCircuit, CircleStop, Command, Eye, Grid2X2, Maximize2, Minus, MonitorUp, MousePointer2, Orbit, Play, RefreshCw, Rocket, ShieldCheck, Wrench, X } from "lucide-react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { lazy, Suspense, useEffect } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { CommandPalette } from "./components/CommandPalette";
 import { ComputeStrategyPanel } from "./components/ComputeStrategyPanel";
 import { ArenaBoundary, ArenaLoading } from "./components/ArenaBoundary";
@@ -9,12 +10,30 @@ import { Onboarding } from "./components/Onboarding";
 import { OpsGrid } from "./components/OpsGrid";
 import { RemoteAssistPanel } from "./components/RemoteAssistPanel";
 import { RecoveryCenter } from "./components/RecoveryCenter";
+import { EvidenceSurface, EvolutionSurface, WorkSurface } from "./components/ProductSurfaces";
 import { type PairingRequest, surfaceNativePairingRequest, useRampage } from "./store";
 
 const Arena = lazy(() => import("./components/Arena").then((module) => ({ default: module.Arena })));
+type ProductSurface = "fabric" | "work" | "evolution" | "evidence";
+
+function WindowControls() {
+  const run = (action: "minimize" | "maximize" | "close") => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    const nativeWindow = getCurrentWindow();
+    if (action === "minimize") void nativeWindow.minimize();
+    else if (action === "maximize") void nativeWindow.toggleMaximize();
+    else void nativeWindow.close();
+  };
+  return <div className="window-controls" aria-label="Window controls">
+    <button aria-label="Minimize Rampage" onClick={() => run("minimize")}><Minus /></button>
+    <button aria-label="Maximize Rampage" onClick={() => run("maximize")}><Maximize2 /></button>
+    <button className="window-close" aria-label="Close Rampage" onClick={() => run("close")}><X /></button>
+  </div>;
+}
 
 export default function App() {
   const state = useRampage();
+  const [surface, setSurface] = useState<ProductSurface>("fabric");
   useEffect(() => {
     let disposed = false;
     let unlisten: UnlistenFn | undefined;
@@ -54,9 +73,9 @@ export default function App() {
       <CommandPalette />
       <RemoteAssistPanel />
       <RecoveryCenter />
-      <header className="topbar">
-        <div className="identity"><div className="brand-mark">R</div><div><strong>RAMPAGE</strong><span>PERSONAL COMPUTE FABRIC</span></div></div>
-        <div className={`status-ribbon ${state.remoteAssistStatus.active ? "remote-active" : ""}`} role="status"><i className={state.connected && !state.killLatch ? "online" : "reduced"} /><strong>{state.killLatch ? "OWNER STOPPED" : state.remoteAssistStatus.active ? "REMOTE CONTROL ACTIVE" : state.fabricRole === "worker" ? state.workerRuntime.state === "active" ? "WORKER ACTIVE" : state.workerRuntime.state === "starting" ? "WORKER CONNECTING" : "WORKER ATTENTION" : state.connected ? "FABRIC LIVE" : "LOCAL REDUCED"}</strong><span>{state.nodes.length} nodes</span><span>{state.meshMode.replace("_", " ")}</span><span>{state.diagnostic ? `self-scan ${state.diagnostic.health_score}/100` : state.capability.replaceAll("_", " ")}</span></div>
+      <header className="topbar" data-tauri-drag-region>
+        <div className="identity" data-tauri-drag-region><div className="brand-mark">R</div><div data-tauri-drag-region><strong data-tauri-drag-region>RAMPAGE</strong><span data-tauri-drag-region>PERSONAL COMPUTE FABRIC</span></div></div>
+        <div className={`status-ribbon ${state.remoteAssistStatus.active ? "remote-active" : ""}`} role="status" data-tauri-drag-region><i className={state.connected && !state.killLatch ? "online" : "reduced"} /><strong data-tauri-drag-region>{state.killLatch ? "OWNER STOPPED" : state.remoteAssistStatus.active ? "REMOTE CONTROL ACTIVE" : state.fabricRole === "worker" ? state.workerRuntime.state === "active" ? "WORKER ACTIVE" : state.workerRuntime.state === "starting" || state.workerRuntime.state === "retrying" ? "WORKER CONNECTING" : "WORKER ATTENTION" : state.connected ? "FABRIC LIVE" : "LOCAL REDUCED"}</strong><span data-tauri-drag-region>{state.nodes.length} nodes</span><span data-tauri-drag-region>{state.meshMode.replace("_", " ")}</span><span data-tauri-drag-region>{state.diagnostic ? `self-scan ${state.diagnostic.health_score}/100` : state.capability.replaceAll("_", " ")}</span></div>
         <div className="header-actions">
           <button className="icon-button" onClick={() => void state.refresh()} aria-label="Refresh fabric"><RefreshCw size={17} /></button>
           <button className="icon-button" onClick={() => state.setRecoveryOpen(true)} aria-label="Open Recovery Center" title="Fix connection or start over"><Wrench size={17} /></button>
@@ -66,19 +85,22 @@ export default function App() {
             ? <button className="resume-button" onClick={() => { if (window.confirm("Resume Rampage sharing under the current owner policy?")) void state.localResume().catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Resume failed." })); }}><Play size={17} /> RESUME</button>
             : <button className="stop-button" onClick={state.localStop}><CircleStop size={17} /> STOP</button>}
         </div>
+        <WindowControls />
       </header>
       <aside className="rail" aria-label="Primary navigation">
-        <button className="active" aria-label="Fabric"><Boxes /></button>
-        <button aria-label="Work"><Activity /></button>
-        <button aria-label="Evolution"><BrainCircuit /></button>
-        <button aria-label="Evidence"><ShieldCheck /></button>
+        <button className={surface === "fabric" ? "active" : ""} aria-label="Fabric" aria-pressed={surface === "fabric"} onClick={() => setSurface("fabric")}><Boxes /><span>Fabric</span></button>
+        <button className={surface === "work" ? "active" : ""} aria-label="Work" aria-pressed={surface === "work"} onClick={() => setSurface("work")}><Activity /><span>Work</span></button>
+        <button className={surface === "evolution" ? "active" : ""} aria-label="Evolution" aria-pressed={surface === "evolution"} onClick={() => setSurface("evolution")}><BrainCircuit /><span>Evolution</span></button>
+        <button className={surface === "evidence" ? "active" : ""} aria-label="Evidence" aria-pressed={surface === "evidence"} onClick={() => setSurface("evidence")}><ShieldCheck /><span>Evidence</span></button>
         <span />
-        <button onClick={() => state.setMode(state.mode === "arena" ? "grid" : "arena")} aria-label={`Switch to ${state.mode === "arena" ? "grid" : "arena"} view`}>
+        <button onClick={() => { setSurface("fabric"); state.setMode(state.mode === "arena" ? "grid" : "arena"); }} aria-label={`Switch to ${state.mode === "arena" ? "grid" : "arena"} view`}>
           {state.mode === "arena" ? <Grid2X2 /> : <Orbit />}
+          <span>{state.mode === "arena" ? "Grid" : "Arena"}</span>
         </button>
       </aside>
       <main id="main">
-        <section className="workspace">
+        <section className={`workspace surface-${surface}`}>
+          {surface === "fabric" ? <>
           <div className="section-heading"><div><p className="eyebrow">FABRIC DECK</p><h1>Your machines, acting as one.</h1></div><div className="view-switch" role="group" aria-label="View"><button className={state.mode === "arena" ? "active" : ""} onClick={() => state.setMode("arena")}><Orbit size={15} /> Arena</button><button className={state.mode === "grid" ? "active" : ""} onClick={() => state.setMode("grid")}><Grid2X2 size={15} /> Grid</button></div></div>
           {state.fabricRole === "owner" && <ComputeStrategyPanel />}
           {state.mode === "arena" ? (
@@ -88,6 +110,7 @@ export default function App() {
               </Suspense>
             </ArenaBoundary>
           ) : <OpsGrid />}
+          </> : surface === "work" ? <WorkSurface /> : surface === "evolution" ? <EvolutionSurface /> : <EvidenceSurface />}
         </section>
         <aside className="inspector" aria-live="polite">
           <PairingPanel />
@@ -102,7 +125,7 @@ export default function App() {
             <label className="permission-switch"><span>{state.remoteAssistStatus.enabled ? "Allowed" : "Off"}</span><input aria-label="Allow owner remote control" type="checkbox" checked={state.remoteAssistStatus.enabled} disabled={!state.remoteAssistStatus.supported} onChange={(event) => void state.setRemoteAssistEnabled(event.currentTarget.checked)} /><i /></label>
           </div>}
           {state.diagnostic && <div className="explanation"><BrainCircuit size={18} /><div><strong>Autonomous self-scan · {state.diagnostic.status} · {state.diagnostic.health_score}/100</strong><p>{state.diagnostic.findings.find((finding) => finding.severity !== "info")?.evidence ?? "No warning or critical bottleneck is present in the latest evidence window."} No per-change approval is required inside the owner envelope.</p></div></div>}
-          <button className="secondary">Open evidence trail</button>
+          <button className="secondary" onClick={() => setSurface("evidence")}>Open evidence trail</button>
           {state.fabricRole === "owner" && selected.remoteAssist && <div className="remote-launch-actions"><button disabled={state.remoteDesktopPending || state.killLatch} onClick={() => void state.openRemoteDesktop(selected.id, "view").catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Remote view failed." }))}><Eye size={16} /> View desktop</button><button className="control" disabled={state.remoteDesktopPending || state.killLatch} onClick={() => void state.openRemoteDesktop(selected.id, "control").catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Remote control failed." }))}><MousePointer2 size={16} /> Control desktop</button></div>}
           {state.fabricRole === "owner" && <label className="secondary file-action">{selected.artifactEndpoint ? "Encrypt + replicate file" : "Encrypt file locally"}<input type="file" onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void state.storeFile(file, selected.id).catch((error: unknown) => useRampage.setState({ lastAction: error instanceof Error ? error.message : "Artifact transfer failed." })); event.currentTarget.value = ""; }} /></label>}
           {state.inviteCode && <div className="explanation"><ShieldCheck size={18} /><div><strong>One-time invite</strong><p>{state.inviteCode}</p>{state.inviteBundle && <button className="secondary" onClick={() => void navigator.clipboard.writeText(state.inviteBundle!)}>Copy complete invite</button>}</div></div>}
