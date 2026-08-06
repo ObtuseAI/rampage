@@ -8,7 +8,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
     path::Path,
-    process::Command,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 use sysinfo::{Disks, System};
 
@@ -453,17 +454,39 @@ fn ollama_version(base_url: &str) -> Option<String> {
 }
 
 fn discover_nvidia_gpus() -> Vec<NvidiaGpu> {
-    let output = Command::new("nvidia-smi")
+    let mut command = Command::new("nvidia-smi");
+    command
         .args([
             "--query-gpu=name,uuid,memory.total,memory.free,utilization.gpu,temperature.gpu",
             "--format=csv,noheader,nounits",
         ])
-        .output();
-    match output {
-        Ok(output) if output.status.success() => {
-            parse_nvidia_smi(&String::from_utf8_lossy(&output.stdout))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let Ok(mut child) = command.spawn() else {
+        return Vec::new();
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let mut output = String::new();
+                if let Some(mut stdout) = child.stdout.take()
+                    && stdout.read_to_string(&mut output).is_ok()
+                {
+                    return parse_nvidia_smi(&output);
+                }
+                return Vec::new();
+            }
+            Ok(Some(_)) | Err(_) => return Vec::new(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Vec::new();
+            }
         }
-        _ => Vec::new(),
     }
 }
 

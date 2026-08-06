@@ -65,6 +65,11 @@ struct Args {
     serve: bool,
 }
 
+const OFFER_LIFETIME: Duration = Duration::seconds(45);
+const CAPABILITY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const LINK_PROBE_REQUEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+const MAX_TRUSTED_CLOCK_OFFSET_SECONDS: i64 = 24 * 60 * 60;
+
 fn ollama_loopback_base_url() -> anyhow::Result<String> {
     let configured =
         std::env::var("RAMPAGE_OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
@@ -179,7 +184,7 @@ fn main() -> anyhow::Result<()> {
         artifact_store.clone(),
         &ollama_base_url,
     )?;
-    let now = Utc::now();
+    let now = transport.controller_now();
     let mut adapters = BTreeSet::from([
         "rampage.echo.v1".into(),
         "rampage.hash.v1".into(),
@@ -213,7 +218,7 @@ fn main() -> anyhow::Result<()> {
         offer_id: Uuid::now_v7(),
         node_id,
         observed_at: now,
-        expires_at: now + Duration::seconds(45),
+        expires_at: now + OFFER_LIFETIME,
         resources: discovered.resources,
         availability: AvailabilityV1 {
             on_ac_power: discovered.on_ac_power,
@@ -234,11 +239,7 @@ fn main() -> anyhow::Result<()> {
         workload_capabilities,
         model_runtimes,
         link_benchmark: None,
-        mesh_endpoint: transport.signed_worker_endpoint(
-            &signing_key,
-            now,
-            now + Duration::seconds(45),
-        ),
+        mesh_endpoint: transport.signed_worker_endpoint(&signing_key, now, now + OFFER_LIFETIME),
         signature: String::new(),
     };
     let mut offer = offer;
@@ -284,18 +285,27 @@ fn main() -> anyhow::Result<()> {
         let mut ready_announced = false;
         let mut reconnect_delay = std::time::Duration::from_secs(1);
         let mut next_link_probe_at = Instant::now();
+        let mut next_capability_refresh_at = Instant::now() + CAPABILITY_REFRESH_INTERVAL;
         loop {
             if data_dir.join("KILL").is_file() {
                 return Ok(());
             }
-            let now = Utc::now();
-            refresh_dynamic_capabilities(&mut offer, &ollama_base_url, &data_dir);
+            let now = transport.controller_now();
+            if Instant::now() >= next_capability_refresh_at {
+                refresh_dynamic_capabilities(&mut offer, &ollama_base_url, &data_dir);
+                next_capability_refresh_at = Instant::now() + CAPABILITY_REFRESH_INTERVAL;
+            }
             offer.offer_id = Uuid::now_v7();
             offer.observed_at = now;
-            offer.expires_at = now + Duration::seconds(45);
-            // Publish the first signed offer before measuring the link. A slow or broken speed
-            // probe must never hide an otherwise usable worker behind "connecting".
-            if link_probe_due(
+            offer.expires_at = now + OFFER_LIFETIME;
+            if offer
+                .link_benchmark
+                .as_ref()
+                .is_some_and(|benchmark| benchmark.expires_at < offer.expires_at)
+            {
+                offer.link_benchmark = None;
+            }
+            let link_probe_is_due = link_probe_due(
                 ready_announced,
                 Instant::now(),
                 next_link_probe_at,
@@ -304,21 +314,9 @@ fn main() -> anyhow::Result<()> {
                     .as_ref()
                     .map(|benchmark| benchmark.expires_at),
                 offer.expires_at,
-            ) {
-                match transport.measure_link(node_id, now) {
-                    Ok(benchmark) => {
-                        offer.link_benchmark = benchmark;
-                        next_link_probe_at = Instant::now() + std::time::Duration::from_secs(60);
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "link benchmark unavailable; placement will stay conservative: {error}"
-                        );
-                        offer.link_benchmark = None;
-                        next_link_probe_at = Instant::now() + std::time::Duration::from_secs(30);
-                    }
-                }
-            }
+            );
+            // Heartbeat first. Diagnostics, model discovery, and work polling are all secondary
+            // to preserving a fresh signed offer on a slow or partially broken physical device.
             offer.mesh_endpoint =
                 transport.signed_worker_endpoint(&signing_key, now, offer.expires_at);
             rampage_policy::sign_offer(&signing_key, &mut offer);
@@ -342,7 +340,23 @@ fn main() -> anyhow::Result<()> {
                         "offer_expires_at": offer.expires_at,
                     }))?
                 );
+                std::io::stdout().flush()?;
                 ready_announced = true;
+            }
+            if link_probe_is_due {
+                match transport.measure_link(node_id, now) {
+                    Ok(benchmark) => {
+                        offer.link_benchmark = benchmark;
+                        next_link_probe_at = Instant::now() + std::time::Duration::from_secs(60);
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "link benchmark unavailable; placement will stay conservative: {error}"
+                        );
+                        offer.link_benchmark = None;
+                        next_link_probe_at = Instant::now() + std::time::Duration::from_secs(30);
+                    }
+                }
             }
             let did_work = match execute_one_work_item(
                 &args,
@@ -532,6 +546,7 @@ struct MeshController {
     endpoint: iroh::Endpoint,
     controller_endpoint_id: String,
     destination: iroh::EndpointAddr,
+    controller_clock_offset: std::sync::Mutex<Duration>,
 }
 
 enum RemoteController<'a> {
@@ -639,12 +654,26 @@ impl ControllerTransport {
                 remote_authority: std::sync::Arc::new(remote_assist::SessionAuthority::default()),
             },
         ));
-        Ok(Self::Mesh(MeshController {
+        let mesh = MeshController {
             runtime,
             endpoint,
             controller_endpoint_id: mesh_record.endpoint_id.clone(),
             destination,
-        }))
+            controller_clock_offset: std::sync::Mutex::new(Duration::zero()),
+        };
+        if let Err(error) = mesh.request("GET", "/health", None) {
+            eprintln!(
+                "authenticated controller clock alignment unavailable; retrying with the local clock: {error}"
+            );
+        }
+        Ok(Self::Mesh(mesh))
+    }
+
+    fn controller_now(&self) -> chrono::DateTime<Utc> {
+        match self {
+            Self::Http { .. } => Utc::now(),
+            Self::Mesh(mesh) => mesh.controller_now(),
+        }
     }
 
     fn signed_worker_endpoint(
@@ -681,7 +710,8 @@ impl ControllerTransport {
         let mut rtt_samples = Vec::with_capacity(3);
         for _ in 0..3 {
             let started = Instant::now();
-            let response = mesh.request("GET", "/health", None)?;
+            let response =
+                mesh.request_with_deadline("GET", "/health", None, LINK_PROBE_REQUEST_DEADLINE)?;
             anyhow::ensure!(
                 response.status == 200,
                 "controller health probe was rejected"
@@ -695,7 +725,7 @@ impl ControllerTransport {
         let probe_digest = hex::encode(Sha256::digest(&probe));
         let upload_nonce = Uuid::now_v7();
         let upload_started = Instant::now();
-        let upload_response = mesh.request(
+        let upload_response = mesh.request_with_deadline(
             "POST",
             "/v1/benchmarks/link",
             Some(serde_json::json!({
@@ -704,6 +734,7 @@ impl ControllerTransport {
                 "upload_base64": BASE64.encode(&probe),
                 "download_bytes": 0
             })),
+            LINK_PROBE_REQUEST_DEADLINE,
         )?;
         let upload_elapsed = upload_started.elapsed().as_micros() as u64;
         validate_probe_response(
@@ -717,7 +748,7 @@ impl ControllerTransport {
 
         let download_nonce = Uuid::now_v7();
         let download_started = Instant::now();
-        let download_response = mesh.request(
+        let download_response = mesh.request_with_deadline(
             "POST",
             "/v1/benchmarks/link",
             Some(serde_json::json!({
@@ -726,6 +757,7 @@ impl ControllerTransport {
                 "upload_base64": "",
                 "download_bytes": LINK_BENCHMARK_TRANSFER_BYTES
             })),
+            LINK_PROBE_REQUEST_DEADLINE,
         )?;
         let download_elapsed = download_started.elapsed().as_micros() as u64;
         validate_probe_response(
@@ -1709,6 +1741,16 @@ impl MeshController {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> anyhow::Result<rampage_protocol::MeshControlResponseV1> {
+        self.request_with_deadline(method, path, body, rampage_mesh::CONTROL_REQUEST_DEADLINE)
+    }
+
+    fn request_with_deadline(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+        deadline: std::time::Duration,
+    ) -> anyhow::Result<rampage_protocol::MeshControlResponseV1> {
         let request = MeshControlRequestV1 {
             schema: MeshControlRequestV1::SCHEMA.into(),
             request_id: Uuid::now_v7(),
@@ -1716,12 +1758,52 @@ impl MeshController {
             path: path.into(),
             body,
         };
-        self.runtime.block_on(rampage_mesh::control_request(
-            &self.endpoint,
-            self.destination.clone(),
-            &request,
-        ))
+        let local_sent_at = Utc::now();
+        let started = Instant::now();
+        let response = self
+            .runtime
+            .block_on(rampage_mesh::control_request_with_deadline(
+                &self.endpoint,
+                self.destination.clone(),
+                &request,
+                deadline,
+            ))?;
+        if let Some(controller_time) = response_controller_time(&response.body)
+            && let Ok(offset) =
+                estimated_controller_clock_offset(local_sent_at, started.elapsed(), controller_time)
+            && offset.num_seconds().unsigned_abs() <= MAX_TRUSTED_CLOCK_OFFSET_SECONDS as u64
+            && let Ok(mut current) = self.controller_clock_offset.lock()
+        {
+            *current = offset;
+        }
+        Ok(response)
     }
+
+    fn controller_now(&self) -> chrono::DateTime<Utc> {
+        let offset = self
+            .controller_clock_offset
+            .lock()
+            .map(|value| *value)
+            .unwrap_or_else(|_| Duration::zero());
+        Utc::now() + offset
+    }
+}
+
+fn response_controller_time(body: &serde_json::Value) -> Option<chrono::DateTime<Utc>> {
+    body.get("controller_time")
+        .or_else(|| body.get("generated_at"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+}
+
+fn estimated_controller_clock_offset(
+    local_sent_at: chrono::DateTime<Utc>,
+    round_trip: std::time::Duration,
+    controller_time: chrono::DateTime<Utc>,
+) -> anyhow::Result<Duration> {
+    let half_round_trip = Duration::from_std(round_trip / 2)?;
+    Ok(controller_time - (local_sent_at + half_round_trip))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2394,7 +2476,8 @@ mod tests {
     #[test]
     fn first_offer_is_never_blocked_by_the_link_probe() {
         let now = Instant::now();
-        let offer_expires_at = Utc::now() + Duration::seconds(45);
+        let offer_expires_at = Utc::now() + OFFER_LIFETIME;
+        assert!(LINK_PROBE_REQUEST_DEADLINE * 5 < OFFER_LIFETIME.to_std().unwrap());
         assert!(!link_probe_due(false, now, now, None, offer_expires_at));
         assert!(link_probe_due(true, now, now, None, offer_expires_at));
         assert!(!link_probe_due(
@@ -2411,6 +2494,24 @@ mod tests {
             Some(offer_expires_at + Duration::seconds(1)),
             offer_expires_at
         ));
+    }
+
+    #[test]
+    fn authenticated_controller_time_absorbs_ordinary_device_clock_skew() {
+        let local_sent_at = chrono::DateTime::parse_from_rfc3339("2026-08-06T18:52:11Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let controller_time = local_sent_at + Duration::seconds(38) + Duration::milliseconds(50);
+        let offset = estimated_controller_clock_offset(
+            local_sent_at,
+            std::time::Duration::from_millis(100),
+            controller_time,
+        )
+        .unwrap();
+        assert_eq!(offset, Duration::seconds(38));
+
+        let response = serde_json::json!({"controller_time": controller_time});
+        assert_eq!(response_controller_time(&response), Some(controller_time));
     }
 
     #[test]
@@ -2558,6 +2659,7 @@ mod tests {
             endpoint: client,
             controller_endpoint_id: server.id().to_string(),
             destination,
+            controller_clock_offset: std::sync::Mutex::new(Duration::zero()),
         };
         let response = controller.request("GET", "/health", None).unwrap();
         assert_eq!(response.status, 200);

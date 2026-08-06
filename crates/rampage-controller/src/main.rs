@@ -127,6 +127,7 @@ struct Health {
     mesh_endpoint_id: String,
     mesh_sockets: Vec<String>,
     fencing_epoch: u64,
+    generated_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -738,6 +739,7 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
             .map(|socket| socket.to_string())
             .collect(),
         fencing_epoch: state.fencing_epoch.load(Ordering::Acquire),
+        generated_at: chrono::Utc::now(),
     })
 }
 
@@ -2601,7 +2603,10 @@ async fn register_offer(
         .insert(offer.node_id, offer.clone());
     Ok((
         StatusCode::CREATED,
-        Json(json!({"offer_id": offer.offer_id})),
+        Json(json!({
+            "offer_id": offer.offer_id,
+            "controller_time": chrono::Utc::now()
+        })),
     ))
 }
 

@@ -381,15 +381,32 @@ pub async fn control_request(
     destination: EndpointAddr,
     request: &MeshControlRequestV1,
 ) -> anyhow::Result<MeshControlResponseV1> {
+    control_request_with_deadline(endpoint, destination, request, CONTROL_REQUEST_DEADLINE).await
+}
+
+/// Runs a control request with a caller-selected deadline that may only tighten the global
+/// control-plane bound. Small diagnostic operations such as link probes must not consume an
+/// entire worker-offer lifetime when a physical path is degraded.
+pub async fn control_request_with_deadline(
+    endpoint: &Endpoint,
+    destination: EndpointAddr,
+    request: &MeshControlRequestV1,
+    deadline: Duration,
+) -> anyhow::Result<MeshControlResponseV1> {
+    anyhow::ensure!(
+        !deadline.is_zero() && deadline <= CONTROL_REQUEST_DEADLINE,
+        "mesh control deadline must be positive and no greater than {} seconds",
+        CONTROL_REQUEST_DEADLINE.as_secs()
+    );
     tokio::time::timeout(
-        CONTROL_REQUEST_DEADLINE,
+        deadline,
         control_request_within_deadline(endpoint, destination, request),
     )
     .await
     .map_err(|_| {
         anyhow::anyhow!(
-            "mesh control request exceeded the {} second deadline",
-            CONTROL_REQUEST_DEADLINE.as_secs()
+            "mesh control request exceeded the {:.3} second deadline",
+            deadline.as_secs_f64()
         )
     })?
 }
