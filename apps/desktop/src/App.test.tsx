@@ -86,6 +86,31 @@ test("provides accessible grid parity", () => {
   expect(screen.getByLabelText("Encrypt file locally")).toBeInTheDocument();
 });
 
+test("every primary destination opens a functional product surface", () => {
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Work" }));
+  expect(screen.getByRole("heading", { name: /put the whole fabric to work/i })).toBeVisible();
+  expect(screen.getByRole("button", { name: /run sustained benchmark/i })).toBeEnabled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Evolution" }));
+  expect(screen.getByRole("heading", { name: /fabric that finds its own limits/i })).toBeVisible();
+  expect(screen.getByRole("button", { name: /scan now/i })).toBeEnabled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Evidence" }));
+  expect(screen.getByRole("heading", { name: /every useful action leaves a receipt/i })).toBeVisible();
+  expect(screen.getByRole("button", { name: /refresh evidence/i })).toBeEnabled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Fabric" }));
+  expect(screen.getByRole("heading", { name: /your machines, acting as one/i })).toBeVisible();
+});
+
+test("exposes native borderless window controls", () => {
+  render(<App />);
+  expect(screen.getByRole("button", { name: "Minimize Rampage" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Maximize Rampage" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Close Rampage" })).toBeEnabled();
+});
+
 test("local stop does not depend on controller", () => {
   render(<App />);
   fireEvent.click(screen.getByRole("button", { name: "STOP" }));

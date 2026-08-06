@@ -1092,32 +1092,6 @@ fn persist_remote_invite_at(data_dir: &Path, invitation: &str) -> Result<(), Str
 }
 
 fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(), String> {
-    let invite_file = data_dir.join("remote-invite.json");
-    let key_file = data_dir.join("agent.key");
-    let display_name = local_device_name();
-    let mut command = app
-        .shell()
-        .sidecar("rampage-agent")
-        .map_err(|error| error.to_string())?
-        .env("RAMPAGE_DATA_DIR", data_dir)
-        .args([
-            "--key-file".into(),
-            key_file.to_string_lossy().into_owned(),
-            "--display-name".into(),
-            display_name,
-            "--device-kind".into(),
-            "desktop".into(),
-            "--serve".into(),
-        ]);
-    if invite_file.is_file() {
-        command = command.args([
-            "--invite-file".into(),
-            invite_file.to_string_lossy().into_owned(),
-        ]);
-    }
-    let (mut events, agent) = command
-        .spawn()
-        .map_err(|error| format!("could not start remote worker: {error}"))?;
     let runtime = app.state::<WorkerRuntime>().inner().clone();
     if let Ok(mut status) = runtime.0.lock() {
         *status = WorkerRuntimeView {
@@ -1128,79 +1102,133 @@ fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(
             ),
         };
     }
+    let handle = app.clone();
+    let data_dir = data_dir.to_path_buf();
     tauri::async_runtime::spawn(async move {
-        let mut last_error: Option<String> = None;
-        let mut ready_announced = false;
-        while let Some(event) = events.recv().await {
-            let next = match event {
-                CommandEvent::Stdout(bytes) => {
-                    let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
-                    if value
-                        .as_ref()
-                        .and_then(|value| value.get("schema"))
-                        .and_then(serde_json::Value::as_str)
-                        == Some("rampage.worker-ready.v1")
-                    {
-                        ready_announced = true;
-                        Some(WorkerRuntimeView {
-                            state: "active",
-                            node_id: value
-                                .as_ref()
-                                .and_then(|value| value.get("node_id"))
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_string),
-                            message: Some("Signed compute offer accepted by the owner PC.".into()),
-                        })
-                    } else {
-                        None
-                    }
+        let mut retry_delay = Duration::from_secs(1);
+        loop {
+            if !worker_enrollment_exists(&data_dir) || data_dir.join("KILL").is_file() {
+                if let Ok(mut status) = runtime.0.lock() {
+                    *status = WorkerRuntimeView {
+                        state: "inactive",
+                        node_id: None,
+                        message: Some("Worker sharing is stopped by local policy.".into()),
+                    };
                 }
-                CommandEvent::Stderr(bytes) => {
-                    if let Some(message) = bounded_worker_retry_message(&bytes) {
-                        last_error = Some(message.clone());
-                        if !ready_announced {
-                            Some(WorkerRuntimeView {
-                                state: "retrying",
-                                node_id: None,
-                                message: Some(message),
-                            })
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                }
-                CommandEvent::Error(error) => Some(WorkerRuntimeView {
-                    state: "failed",
-                    node_id: None,
-                    message: Some(error.chars().take(512).collect()),
-                }),
-                CommandEvent::Terminated(payload) => Some(WorkerRuntimeView {
-                    state: "failed",
-                    node_id: None,
-                    message: Some(last_error.clone().unwrap_or_else(|| {
-                        format!(
-                            "Worker exited before contributing (code {:?}).",
-                            payload.code
-                        )
-                    })),
-                }),
-                _ => None,
-            };
-            if let Some(next) = next
-                && let Ok(mut status) = runtime.0.lock()
-            {
-                *status = next;
+                return;
             }
+            let invite_file = data_dir.join("remote-invite.json");
+            let key_file = data_dir.join("agent.key");
+            let mut command = match handle.shell().sidecar("rampage-agent") {
+                Ok(command) => command.env("RAMPAGE_DATA_DIR", &data_dir).args([
+                    "--key-file".into(),
+                    key_file.to_string_lossy().into_owned(),
+                    "--display-name".into(),
+                    local_device_name(),
+                    "--device-kind".into(),
+                    "desktop".into(),
+                    "--serve".into(),
+                ]),
+                Err(error) => {
+                    set_worker_retrying(&runtime, format!("Worker launch failed: {error}"));
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(10));
+                    continue;
+                }
+            };
+            if invite_file.is_file() {
+                command = command.args([
+                    "--invite-file".into(),
+                    invite_file.to_string_lossy().into_owned(),
+                ]);
+            }
+            let (mut events, agent) = match command.spawn() {
+                Ok(spawned) => spawned,
+                Err(error) => {
+                    set_worker_retrying(&runtime, format!("Worker launch failed: {error}"));
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(10));
+                    continue;
+                }
+            };
+            if let Ok(mut sidecars) = handle.state::<Sidecars>().0.lock() {
+                sidecars.push(agent);
+            }
+            let mut last_error: Option<String> = None;
+            let mut ready_announced = false;
+            while let Some(event) = events.recv().await {
+                match event {
+                    CommandEvent::Stdout(bytes) => {
+                        let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+                        if value
+                            .as_ref()
+                            .and_then(|value| value.get("schema"))
+                            .and_then(serde_json::Value::as_str)
+                            == Some("rampage.worker-ready.v1")
+                        {
+                            ready_announced = true;
+                            retry_delay = Duration::from_secs(1);
+                            if let Ok(mut status) = runtime.0.lock() {
+                                *status = WorkerRuntimeView {
+                                    state: "active",
+                                    node_id: value
+                                        .as_ref()
+                                        .and_then(|value| value.get("node_id"))
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_string),
+                                    message: Some(
+                                        "Signed compute offer accepted by the owner PC.".into(),
+                                    ),
+                                };
+                            }
+                        }
+                    }
+                    CommandEvent::Stderr(bytes) => {
+                        if let Some(message) = bounded_worker_retry_message(&bytes) {
+                            last_error = Some(message.clone());
+                            if !ready_announced {
+                                set_worker_retrying(&runtime, message);
+                            }
+                        }
+                    }
+                    CommandEvent::Error(error) => {
+                        last_error = Some(error.chars().take(512).collect());
+                    }
+                    CommandEvent::Terminated(payload) => {
+                        last_error.get_or_insert_with(|| {
+                            format!("Worker stopped unexpectedly (code {:?}).", payload.code)
+                        });
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if !worker_enrollment_exists(&data_dir) || data_dir.join("KILL").is_file() {
+                continue;
+            }
+            set_worker_retrying(
+                &runtime,
+                format!(
+                    "{} Restarting automatically in {} second(s).",
+                    last_error.unwrap_or_else(|| "Worker connection ended.".into()),
+                    retry_delay.as_secs()
+                ),
+            );
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = (retry_delay * 2).min(Duration::from_secs(10));
         }
     });
-    app.state::<Sidecars>()
-        .0
-        .lock()
-        .map_err(|_| "sidecar state lock poisoned".to_string())?
-        .push(agent);
     Ok(())
+}
+
+fn set_worker_retrying(runtime: &WorkerRuntime, message: String) {
+    if let Ok(mut status) = runtime.0.lock() {
+        *status = WorkerRuntimeView {
+            state: "retrying",
+            node_id: None,
+            message: Some(message),
+        };
+    }
 }
 
 fn bounded_worker_retry_message(bytes: &[u8]) -> Option<String> {

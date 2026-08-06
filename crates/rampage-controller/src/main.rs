@@ -201,6 +201,8 @@ struct AutonomousConstraints {
 struct EventQuery {
     after: Option<u64>,
     limit: Option<u32>,
+    #[serde(default)]
+    latest: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5218,14 +5220,13 @@ async fn events(
     State(state): State<AppState>,
     Query(query): Query<EventQuery>,
 ) -> Result<Json<Vec<LedgerEvent>>, (StatusCode, Json<Value>)> {
-    state
-        .ledger
-        .events(
-            query.after.unwrap_or(0),
-            query.limit.unwrap_or(250).clamp(1, 10_000),
-        )
-        .map(Json)
-        .map_err(internal_error)
+    let limit = query.limit.unwrap_or(250).clamp(1, 10_000);
+    let events = if query.latest {
+        state.ledger.latest_events(limit)
+    } else {
+        state.ledger.events(query.after.unwrap_or(0), limit)
+    };
+    events.map(Json).map_err(internal_error)
 }
 
 fn internal_error(error: impl std::fmt::Display) -> (StatusCode, Json<Value>) {

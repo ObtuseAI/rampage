@@ -92,6 +92,31 @@ try {
         throw "packaged worker desktop did not publish a signed artifact endpoint over direct QUIC (node=$($node | ConvertTo-Json -Compress), offer=$($nodeOffer | ConvertTo-Json -Compress))"
     }
 
+    # A single offer only proves enrollment. Require a second signed heartbeat so a worker whose
+    # control loop deadlocks after startup cannot pass packaging qualification.
+    $initialOfferId = $nodeOffer.offer_id
+    $heartbeatObserved = $false
+    for ($attempt = 0; $attempt -lt 150; $attempt++) {
+        if ($desktop.HasExited) {
+            throw "packaged worker desktop exited while proving sustained heartbeat (exit=$($desktop.ExitCode))"
+        }
+        try {
+            $offers = @(Invoke-RestMethod "$controllerUrl/v1/offers" -Headers $headers)
+            $nodeOffer = $offers | Where-Object {
+                $_ -and "$($_.node_id)" -eq "$($node.node_id)" -and
+                    "$($_.offer_id)" -ne "$initialOfferId"
+            } | Select-Object -First 1
+            if ($nodeOffer -and $nodeOffer.mesh_endpoint.signature) {
+                $heartbeatObserved = $true
+                break
+            }
+        } catch { }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $heartbeatObserved) {
+        throw 'packaged worker desktop enrolled but did not maintain its signed offer heartbeat'
+    }
+
     $artifactSource = Join-Path $smokeRoot 'artifact-source.bin'
     $artifactRetrieved = Join-Path $smokeRoot 'artifact-retrieved.bin'
     $artifactBytes = [byte[]](0, 1, 2, 127, 128, 254, 255)

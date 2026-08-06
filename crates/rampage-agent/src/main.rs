@@ -22,6 +22,10 @@ use std::{
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 use uuid::Uuid;
@@ -66,6 +70,7 @@ struct Args {
 }
 
 const OFFER_LIFETIME: Duration = Duration::seconds(45);
+const OFFER_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const CAPABILITY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const LINK_PROBE_REQUEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 const MAX_TRUSTED_CLOCK_OFFSET_SECONDS: i64 = 24 * 60 * 60;
@@ -282,85 +287,88 @@ fn main() -> anyhow::Result<()> {
         }
     }
     if args.serve {
-        let mut ready_announced = false;
-        let mut reconnect_delay = std::time::Duration::from_secs(1);
+        let transport = Arc::new(transport);
+        let shared_offer = Arc::new(Mutex::new(offer));
+        let fabric_ready = Arc::new(AtomicBool::new(false));
+        let heartbeat = {
+            let transport = Arc::clone(&transport);
+            let shared_offer = Arc::clone(&shared_offer);
+            let fabric_ready = Arc::clone(&fabric_ready);
+            let signing_key = signing_key.clone();
+            let data_dir = data_dir.clone();
+            std::thread::Builder::new()
+                .name("rampage-offer-heartbeat".into())
+                .spawn(move || {
+                    run_offer_heartbeat(
+                        &transport,
+                        &shared_offer,
+                        &fabric_ready,
+                        &signing_key,
+                        node_id,
+                        &data_dir,
+                    )
+                })?
+        };
         let mut next_link_probe_at = Instant::now();
         let mut next_capability_refresh_at = Instant::now() + CAPABILITY_REFRESH_INTERVAL;
         loop {
             if data_dir.join("KILL").is_file() {
-                return Ok(());
+                break;
             }
-            let now = transport.controller_now();
+            if heartbeat.is_finished() {
+                return heartbeat
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("offer heartbeat thread panicked"))?;
+            }
             if Instant::now() >= next_capability_refresh_at {
-                refresh_dynamic_capabilities(&mut offer, &ollama_base_url, &data_dir);
+                let mut current = shared_offer
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("resource offer state lock poisoned"))?;
+                refresh_dynamic_capabilities(&mut current, &ollama_base_url, &data_dir);
                 next_capability_refresh_at = Instant::now() + CAPABILITY_REFRESH_INTERVAL;
             }
-            offer.offer_id = Uuid::now_v7();
-            offer.observed_at = now;
-            offer.expires_at = now + OFFER_LIFETIME;
-            if offer
-                .link_benchmark
-                .as_ref()
-                .is_some_and(|benchmark| benchmark.expires_at < offer.expires_at)
-            {
-                offer.link_benchmark = None;
-            }
+            let (benchmark_expires_at, offer_expires_at) = {
+                let current = shared_offer
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("resource offer state lock poisoned"))?;
+                (
+                    current
+                        .link_benchmark
+                        .as_ref()
+                        .map(|benchmark| benchmark.expires_at),
+                    transport.controller_now() + OFFER_LIFETIME,
+                )
+            };
             let link_probe_is_due = link_probe_due(
-                ready_announced,
+                fabric_ready.load(Ordering::Acquire),
                 Instant::now(),
                 next_link_probe_at,
-                offer
-                    .link_benchmark
-                    .as_ref()
-                    .map(|benchmark| benchmark.expires_at),
-                offer.expires_at,
+                benchmark_expires_at,
+                offer_expires_at,
             );
-            // Heartbeat first. Diagnostics, model discovery, and work polling are all secondary
-            // to preserving a fresh signed offer on a slow or partially broken physical device.
-            offer.mesh_endpoint =
-                transport.signed_worker_endpoint(&signing_key, now, offer.expires_at);
-            rampage_policy::sign_offer(&signing_key, &mut offer);
-            if let Err(error) = transport.post_json("/v1/offers", &offer) {
-                eprintln!(
-                    "owner PC unavailable; retrying the signed fabric connection in {} second(s): {error}",
-                    reconnect_delay.as_secs()
-                );
-                std::thread::sleep(reconnect_delay);
-                reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(10));
-                continue;
-            }
-            reconnect_delay = std::time::Duration::from_secs(1);
-            if !ready_announced {
-                println!(
-                    "{}",
-                    serde_json::to_string(&serde_json::json!({
-                        "schema": "rampage.worker-ready.v1",
-                        "node_id": node_id,
-                        "offer_id": offer.offer_id,
-                        "offer_expires_at": offer.expires_at,
-                    }))?
-                );
-                std::io::stdout().flush()?;
-                ready_announced = true;
-            }
             if link_probe_is_due {
-                match transport.measure_link(node_id, now) {
+                let observed_at = transport.controller_now();
+                match transport.measure_link(node_id, observed_at) {
                     Ok(benchmark) => {
-                        offer.link_benchmark = benchmark;
+                        if let Ok(mut current) = shared_offer.lock() {
+                            current.link_benchmark = benchmark;
+                        }
                         next_link_probe_at = Instant::now() + std::time::Duration::from_secs(60);
                     }
                     Err(error) => {
                         eprintln!(
                             "link benchmark unavailable; placement will stay conservative: {error}"
                         );
-                        offer.link_benchmark = None;
+                        if let Ok(mut current) = shared_offer.lock() {
+                            current.link_benchmark = None;
+                        }
                         next_link_probe_at = Instant::now() + std::time::Duration::from_secs(30);
                     }
                 }
             }
             let did_work = match execute_one_work_item(
                 &args,
-                &transport,
+                transport.as_ref(),
                 &identity,
                 &signing_key,
                 artifact_store.as_ref(),
@@ -370,8 +378,7 @@ fn main() -> anyhow::Result<()> {
                     eprintln!(
                         "fabric work channel unavailable; retrying without dropping enrollment: {error}"
                     );
-                    std::thread::sleep(reconnect_delay);
-                    reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(10));
+                    std::thread::sleep(std::time::Duration::from_secs(2));
                     continue;
                 }
             };
@@ -383,6 +390,9 @@ fn main() -> anyhow::Result<()> {
                 std::time::Duration::from_secs(2)
             });
         }
+        return heartbeat
+            .join()
+            .map_err(|_| anyhow::anyhow!("offer heartbeat thread panicked"))?;
     }
     if args.register {
         transport.post_json("/v1/offers", &offer)?;
@@ -400,6 +410,65 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     println!("{}", serde_json::to_string_pretty(&offer)?);
+    Ok(())
+}
+
+fn run_offer_heartbeat(
+    transport: &ControllerTransport,
+    shared_offer: &Mutex<ResourceOfferV1>,
+    fabric_ready: &AtomicBool,
+    signing_key: &SigningKey,
+    node_id: Uuid,
+    data_dir: &Path,
+) -> anyhow::Result<()> {
+    let mut ready_announced = false;
+    let mut reconnect_delay = std::time::Duration::from_secs(1);
+    while !data_dir.join("KILL").is_file() {
+        let now = transport.controller_now();
+        let mut heartbeat = shared_offer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("resource offer state lock poisoned"))?
+            .clone();
+        heartbeat.offer_id = Uuid::now_v7();
+        heartbeat.observed_at = now;
+        heartbeat.expires_at = now + OFFER_LIFETIME;
+        if heartbeat
+            .link_benchmark
+            .as_ref()
+            .is_some_and(|benchmark| benchmark.expires_at < heartbeat.expires_at)
+        {
+            heartbeat.link_benchmark = None;
+        }
+        heartbeat.mesh_endpoint =
+            transport.signed_worker_endpoint(signing_key, now, heartbeat.expires_at);
+        rampage_policy::sign_offer(signing_key, &mut heartbeat);
+        if let Err(error) = transport.post_json("/v1/offers", &heartbeat) {
+            fabric_ready.store(false, Ordering::Release);
+            eprintln!(
+                "owner PC unavailable; retrying the signed fabric connection in {} second(s): {error}",
+                reconnect_delay.as_secs()
+            );
+            std::thread::sleep(reconnect_delay);
+            reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(10));
+            continue;
+        }
+        reconnect_delay = std::time::Duration::from_secs(1);
+        fabric_ready.store(true, Ordering::Release);
+        if !ready_announced {
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "schema": "rampage.worker-ready.v1",
+                    "node_id": node_id,
+                    "offer_id": heartbeat.offer_id,
+                    "offer_expires_at": heartbeat.expires_at,
+                }))?
+            );
+            std::io::stdout().flush()?;
+            ready_announced = true;
+        }
+        std::thread::sleep(OFFER_HEARTBEAT_INTERVAL);
+    }
     Ok(())
 }
 
@@ -546,6 +615,7 @@ struct MeshController {
     endpoint: iroh::Endpoint,
     controller_endpoint_id: String,
     destination: iroh::EndpointAddr,
+    request_gate: Mutex<()>,
     controller_clock_offset: std::sync::Mutex<Duration>,
 }
 
@@ -659,6 +729,7 @@ impl ControllerTransport {
             endpoint,
             controller_endpoint_id: mesh_record.endpoint_id.clone(),
             destination,
+            request_gate: Mutex::new(()),
             controller_clock_offset: std::sync::Mutex::new(Duration::zero()),
         };
         if let Err(error) = mesh.request("GET", "/health", None) {
@@ -1751,6 +1822,15 @@ impl MeshController {
         body: Option<serde_json::Value>,
         deadline: std::time::Duration,
     ) -> anyhow::Result<rampage_protocol::MeshControlResponseV1> {
+        // A worker deliberately keeps its offer heartbeat independent from capability probes and
+        // work execution. Tokio Runtime::block_on and an iroh endpoint must still have one owner at
+        // a time: concurrent entry can strand both requests without producing a controller event.
+        // Serialize only the short control-plane exchange; CPU work and the worker gateway remain
+        // concurrent, so a slow task cannot suppress offer freshness.
+        let _request_guard = self
+            .request_gate
+            .lock()
+            .map_err(|_| anyhow::anyhow!("mesh control request gate poisoned"))?;
         let request = MeshControlRequestV1 {
             schema: MeshControlRequestV1::SCHEMA.into(),
             request_id: Uuid::now_v7(),
@@ -2659,6 +2739,7 @@ mod tests {
             endpoint: client,
             controller_endpoint_id: server.id().to_string(),
             destination,
+            request_gate: Mutex::new(()),
             controller_clock_offset: std::sync::Mutex::new(Duration::zero()),
         };
         let response = controller.request("GET", "/health", None).unwrap();
