@@ -327,6 +327,13 @@ fn main() -> anyhow::Result<()> {
                 refresh_dynamic_capabilities(&mut current, &ollama_base_url, &data_dir);
                 next_capability_refresh_at = Instant::now() + CAPABILITY_REFRESH_INTERVAL;
             }
+            // Enrollment and offer freshness are prerequisites for every secondary control-plane
+            // request. In particular, do not let an eager empty-queue poll win the request gate
+            // before the first signed offer or compete with a reconnecting heartbeat.
+            if !fabric_ready.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
             let (benchmark_expires_at, offer_expires_at) = {
                 let current = shared_offer
                     .lock()
