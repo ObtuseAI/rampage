@@ -329,19 +329,21 @@ fn main() -> anyhow::Result<()> {
                 }
                 reconnect_delay = std::time::Duration::from_secs(1);
                 next_offer_at = Instant::now() + OFFER_HEARTBEAT_INTERVAL;
-                if !ready_announced {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&serde_json::json!({
-                            "schema": "rampage.worker-ready.v1",
-                            "node_id": node_id,
-                            "offer_id": offer.offer_id,
-                            "offer_expires_at": offer.expires_at,
-                        }))?
-                    );
-                    std::io::stdout().flush()?;
-                    ready_announced = true;
-                }
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "schema": if ready_announced {
+                            "rampage.worker-heartbeat.v1"
+                        } else {
+                            "rampage.worker-ready.v1"
+                        },
+                        "node_id": node_id,
+                        "offer_id": offer.offer_id,
+                        "offer_expires_at": offer.expires_at,
+                    }))?
+                );
+                std::io::stdout().flush()?;
+                ready_announced = true;
             }
 
             if receipt_outbox.is_file() {

@@ -1156,17 +1156,40 @@ fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(
             }
             let mut last_error: Option<String> = None;
             let mut ready_announced = false;
-            while let Some(event) = events.recv().await {
+            let mut last_heartbeat_at: Option<Instant> = None;
+            loop {
+                let event = tokio::select! {
+                    event = events.recv() => event,
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                        if ready_announced
+                            && last_heartbeat_at.is_some_and(|last| {
+                                last.elapsed() > Duration::from_secs(15)
+                            })
+                        {
+                            ready_announced = false;
+                            set_worker_retrying(
+                                &runtime,
+                                "Signed worker heartbeat is stale; reconnecting automatically."
+                                    .into(),
+                            );
+                        }
+                        continue;
+                    }
+                };
+                let Some(event) = event else { break };
                 match event {
                     CommandEvent::Stdout(bytes) => {
                         let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
-                        if value
+                        let schema = value
                             .as_ref()
                             .and_then(|value| value.get("schema"))
-                            .and_then(serde_json::Value::as_str)
-                            == Some("rampage.worker-ready.v1")
-                        {
+                            .and_then(serde_json::Value::as_str);
+                        if matches!(
+                            schema,
+                            Some("rampage.worker-ready.v1" | "rampage.worker-heartbeat.v1")
+                        ) {
                             ready_announced = true;
+                            last_heartbeat_at = Some(Instant::now());
                             retry_delay = Duration::from_secs(1);
                             if let Ok(mut status) = runtime.0.lock() {
                                 *status = WorkerRuntimeView {
