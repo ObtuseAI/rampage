@@ -317,7 +317,11 @@ fn main() -> anyhow::Result<()> {
                 offer.mesh_endpoint =
                     transport.signed_worker_endpoint(&signing_key, now, offer.expires_at);
                 rampage_policy::sign_offer(&signing_key, &mut offer);
-                if let Err(error) = transport.post_json("/v1/offers", &offer) {
+                if let Err(error) = transport.post_json_with_deadline(
+                    "/v1/offers",
+                    &offer,
+                    WORK_CONTROL_REQUEST_DEADLINE,
+                ) {
                     eprintln!(
                         "owner PC unavailable; retrying the signed fabric connection in {} second(s): {error}",
                         reconnect_delay.as_secs()
