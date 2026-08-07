@@ -69,6 +69,7 @@ const OFFER_LIFETIME: Duration = Duration::seconds(45);
 const OFFER_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const CAPABILITY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const LINK_PROBE_REQUEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+const WORK_CONTROL_REQUEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 const MAX_TRUSTED_CLOCK_OFFSET_SECONDS: i64 = 24 * 60 * 60;
 
 fn ollama_loopback_base_url() -> anyhow::Result<String> {
@@ -346,7 +347,11 @@ fn main() -> anyhow::Result<()> {
             if receipt_outbox.is_file() {
                 let pending: ExecutionReceiptV1 =
                     serde_json::from_slice(&fs::read(&receipt_outbox)?)?;
-                if let Err(error) = transport.post_json("/v1/receipts", &pending) {
+                if let Err(error) = transport.post_json_with_deadline(
+                    "/v1/receipts",
+                    &pending,
+                    WORK_CONTROL_REQUEST_DEADLINE,
+                ) {
                     eprintln!("signed receipt delivery unavailable; retaining outbox: {error}");
                 } else {
                     fs::remove_file(&receipt_outbox)?;
@@ -398,10 +403,10 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             if !work_in_flight && Instant::now() >= next_work_poll_at {
-                match transport.get_json::<Option<WorkClaimV1>>(&format!(
-                    "/v1/work/claim?node_id={}",
-                    identity.node_id
-                )) {
+                match transport.get_json_with_deadline::<Option<WorkClaimV1>>(
+                    &format!("/v1/work/claim?node_id={}", identity.node_id),
+                    WORK_CONTROL_REQUEST_DEADLINE,
+                ) {
                     Ok(Some(claim)) => {
                         let execution_tx = execution_tx.clone();
                         let signing_key = signing_key.clone();
@@ -845,9 +850,20 @@ impl ControllerTransport {
     }
 
     fn post_json<T: serde::Serialize>(&self, path: &str, body: &T) -> anyhow::Result<()> {
+        self.post_json_with_deadline(path, body, rampage_mesh::CONTROL_REQUEST_DEADLINE)
+    }
+
+    fn post_json_with_deadline<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+        deadline: std::time::Duration,
+    ) -> anyhow::Result<()> {
         match self {
             Self::Http { base, token } => {
-                let response = reqwest::blocking::Client::new()
+                let response = reqwest::blocking::Client::builder()
+                    .timeout(deadline)
+                    .build()?
                     .post(format!("{base}{path}"))
                     .header("x-rampage-token", token)
                     .json(body)
@@ -862,7 +878,12 @@ impl ControllerTransport {
                 Ok(())
             }
             Self::Mesh(mesh) => {
-                let response = mesh.request("POST", path, Some(serde_json::to_value(body)?))?;
+                let response = mesh.request_with_deadline(
+                    "POST",
+                    path,
+                    Some(serde_json::to_value(body)?),
+                    deadline,
+                )?;
                 anyhow::ensure!(
                     (200..300).contains(&response.status),
                     "mesh controller rejected request: {} {}",
@@ -875,15 +896,25 @@ impl ControllerTransport {
     }
 
     fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
+        self.get_json_with_deadline(path, rampage_mesh::CONTROL_REQUEST_DEADLINE)
+    }
+
+    fn get_json_with_deadline<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        deadline: std::time::Duration,
+    ) -> anyhow::Result<T> {
         match self {
-            Self::Http { base, token } => Ok(reqwest::blocking::Client::new()
+            Self::Http { base, token } => Ok(reqwest::blocking::Client::builder()
+                .timeout(deadline)
+                .build()?
                 .get(format!("{base}{path}"))
                 .header("x-rampage-token", token)
                 .send()?
                 .error_for_status()?
                 .json()?),
             Self::Mesh(mesh) => {
-                let response = mesh.request("GET", path, None)?;
+                let response = mesh.request_with_deadline("GET", path, None, deadline)?;
                 anyhow::ensure!(
                     (200..300).contains(&response.status),
                     "mesh controller rejected request: {} {}",
