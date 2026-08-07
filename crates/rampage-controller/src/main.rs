@@ -4372,7 +4372,15 @@ async fn claim_work(
     State(state): State<AppState>,
     Query(query): Query<ClaimQuery>,
 ) -> Result<Json<Option<WorkClaimV1>>, (StatusCode, Json<Value>)> {
-    let _admission_guard = state.admission_gate.lock().await;
+    // Claims are opportunistic polling, not a reason to queue a worker behind a long autonomous
+    // reconciliation. Preserve the same authority serialization but fail fast so the worker can
+    // refresh its signed offer and retry on the next bounded poll.
+    let _admission_guard = state.admission_gate.try_lock().map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "admission reconciliation is busy; retry claim"})),
+        )
+    })?;
     if state.kill_latch_path.is_file() {
         return Err((
             StatusCode::LOCKED,
@@ -4480,7 +4488,14 @@ async fn submit_receipt(
             })),
         ));
     }
-    let _admission_guard = state.admission_gate.lock().await;
+    // Receipt delivery is durable and retryable from the worker outbox. Never hold its heartbeat
+    // behind a long authority reconciliation; retain the receipt and retry instead.
+    let _admission_guard = state.admission_gate.try_lock().map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "admission reconciliation is busy; retry receipt"})),
+        )
+    })?;
     if state.kill_latch_path.is_file() {
         return Err((
             StatusCode::LOCKED,
