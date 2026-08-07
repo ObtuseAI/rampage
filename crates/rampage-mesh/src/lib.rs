@@ -398,29 +398,54 @@ pub async fn control_request_with_deadline(
         "mesh control deadline must be positive and no greater than {} seconds",
         CONTROL_REQUEST_DEADLINE.as_secs()
     );
-    tokio::time::timeout(
-        deadline,
-        control_request_within_deadline(endpoint, destination, request),
+    let started = std::time::Instant::now();
+    let connection = tokio::time::timeout(deadline, endpoint.connect(destination, CONTROL_ALPN))
+        .await
+        .map_err(|_| control_deadline_error(deadline))??;
+    let remaining = deadline.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        connection.close(1_u8.into(), b"control deadline");
+        return Err(control_deadline_error(deadline));
+    }
+    match tokio::time::timeout(
+        remaining,
+        control_request_on_connection(&connection, request),
     )
     .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "mesh control request exceeded the {:.3} second deadline",
-            deadline.as_secs_f64()
-        )
-    })?
+    {
+        Ok(Ok(response)) => {
+            connection.close(0_u8.into(), b"complete");
+            Ok(response)
+        }
+        Ok(Err(error)) => {
+            // iroh can retain a recently used connection for the same endpoint id. Explicitly
+            // retire a failed connection so the next worker heartbeat performs a fresh QUIC
+            // handshake after an owner-controller restart instead of reopening the dead session.
+            connection.close(1_u8.into(), b"control failed");
+            Err(error)
+        }
+        Err(_) => {
+            connection.close(1_u8.into(), b"control deadline");
+            Err(control_deadline_error(deadline))
+        }
+    }
 }
 
-async fn control_request_within_deadline(
-    endpoint: &Endpoint,
-    destination: EndpointAddr,
+fn control_deadline_error(deadline: Duration) -> anyhow::Error {
+    anyhow::anyhow!(
+        "mesh control request exceeded the {:.3} second deadline",
+        deadline.as_secs_f64()
+    )
+}
+
+async fn control_request_on_connection(
+    connection: &iroh::endpoint::Connection,
     request: &MeshControlRequestV1,
 ) -> anyhow::Result<MeshControlResponseV1> {
     anyhow::ensure!(
         request.schema == MeshControlRequestV1::SCHEMA,
         "unsupported mesh control request schema"
     );
-    let connection = endpoint.connect(destination, CONTROL_ALPN).await?;
     let (mut send, mut receive) = connection.open_bi().await?;
     let encoded = serde_json::to_vec(request)?;
     anyhow::ensure!(
@@ -438,7 +463,6 @@ async fn control_request_within_deadline(
     {
         return Err(MeshError::MismatchedResponse.into());
     }
-    connection.close(0_u8.into(), b"complete");
     Ok(response)
 }
 
