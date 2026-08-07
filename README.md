@@ -21,7 +21,7 @@ the authority to run wild.
 ## [⬇ Download Rampage 0.3.1 for Windows](https://obtuseai.github.io/rampage/download/)
 
 **One installer. Desktop shortcut included.**
-[**Current verified build: recovery.14**](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.14-bootstrap) ·
+[**Current verified build: recovery.15**](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.15-bootstrap) ·
 [Release notes](docs/RELEASE_NOTES_0.3.1.md) ·
 [SHA-256](docs/SHA256SUMS-0.3.1.txt) ·
 [All releases](https://github.com/ObtuseAI/rampage/releases)
@@ -76,7 +76,7 @@ waits for the retiring worker process tree before rotating identity, and setup m
 its bounded stale worker credentials before accepting a new encrypted invitation. A genuinely empty
 runtime now stays authority-free until the person chooses Create or Join. The owner listens for
 nearby requests automatically, and a joining machine needs only one owner-side device approval—no
-code, address, account, or copied secret. Recovery 14 keeps a worker's signed offer heartbeat
+code, address, account, or copied secret. Recovery 15 keeps a worker's signed offer heartbeat
 independent from work polling and restarts a failed worker sidecar automatically without discarding
 its enrolled identity. The native borderless shell now gives Fabric, Work, Evolution, and Evidence
 their own fully functional surfaces, while preserving obvious window controls and keyboard access.
