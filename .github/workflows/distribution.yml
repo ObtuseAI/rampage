@@ -54,7 +54,7 @@ jobs:
       RAMPAGE_STABLE: ${{ (github.event_name == 'push' && !contains(github.ref_name, '-')) || (github.event_name == 'workflow_dispatch' && inputs.channel == 'stable') }}
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.8
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.8
         with:
           version: 11.9.0
       - uses: actions/setup-node@v7
