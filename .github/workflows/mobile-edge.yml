@@ -94,7 +94,7 @@ jobs:
           unzip -t output/mobile/android-arm64/rampage-edge-android-arm64-unsigned.apk
           (cd output/mobile/android-arm64 && sha256sum rampage-edge-android-arm64-unsigned.apk > SHA256SUMS.txt)
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rampage-edge-android-arm64-${{ github.sha }}
           path: output/mobile/android-arm64
@@ -146,7 +146,7 @@ jobs:
           unzip -t output/mobile/ios-simulator-arm64/rampage-edge-ios-simulator-arm64-unsigned.zip
           (cd output/mobile/ios-simulator-arm64 && shasum -a 256 rampage-edge-ios-simulator-arm64-unsigned.zip > SHA256SUMS.txt)
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rampage-edge-ios-simulator-arm64-${{ github.sha }}
           path: output/mobile/ios-simulator-arm64
