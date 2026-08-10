@@ -262,7 +262,9 @@ fn main() -> anyhow::Result<()> {
             signature: String::new(),
         };
         rampage_policy::sign_enrollment(&signing_key, &mut request);
-        transport.post_json("/v1/nodes/enroll", &request)?;
+        // Enrollment changes the controller's authority state. Finish it on a one-shot
+        // session so the steady worker loop starts with a clean persistent QUIC connection.
+        transport.post_json_one_shot("/v1/nodes/enroll", &request)?;
         if let Some(endpoint_id) = invitation_endpoint_id {
             let temporary = enrollment_marker.with_extension("enrolled.tmp");
             fs::write(&temporary, endpoint_id)?;
@@ -286,8 +288,10 @@ fn main() -> anyhow::Result<()> {
     if args.serve {
         let (execution_tx, execution_rx) =
             std::sync::mpsc::channel::<anyhow::Result<ExecutionReceiptV1>>();
+        let (capability_tx, capability_rx) = std::sync::mpsc::channel::<ResourceOfferV1>();
         let receipt_outbox = args.key_file.with_extension("receipt.json");
         let mut work_in_flight = false;
+        let mut capability_refresh_in_flight = false;
         let mut ready_announced = false;
         let mut reconnect_delay = std::time::Duration::from_secs(1);
         let mut next_offer_at = Instant::now();
@@ -298,11 +302,29 @@ fn main() -> anyhow::Result<()> {
             if data_dir.join("KILL").is_file() {
                 return Ok(());
             }
-            if Instant::now() >= next_capability_refresh_at {
-                refresh_dynamic_capabilities(&mut offer, &ollama_base_url, &data_dir);
+            if let Ok(refreshed) = capability_rx.try_recv() {
+                offer.adapters = refreshed.adapters;
+                offer.model_runtimes = refreshed.model_runtimes;
+                offer.workload_capabilities = refreshed.workload_capabilities;
+                capability_refresh_in_flight = false;
+            }
+            if !capability_refresh_in_flight && Instant::now() >= next_capability_refresh_at {
+                diagnostic_worker_phase(&data_dir, "capability_refresh.spawn");
+                let capability_tx = capability_tx.clone();
+                let mut refreshed = offer.clone();
+                let ollama_base_url = ollama_base_url.clone();
+                let data_dir = data_dir.clone();
+                std::thread::Builder::new()
+                    .name("rampage-capability-refresh".into())
+                    .spawn(move || {
+                        refresh_dynamic_capabilities(&mut refreshed, &ollama_base_url, &data_dir);
+                        let _ = capability_tx.send(refreshed);
+                    })?;
+                capability_refresh_in_flight = true;
                 next_capability_refresh_at = Instant::now() + CAPABILITY_REFRESH_INTERVAL;
             }
             if Instant::now() >= next_offer_at {
+                diagnostic_worker_phase(&data_dir, "offer.post");
                 let now = transport.controller_now();
                 offer.offer_id = Uuid::now_v7();
                 offer.observed_at = now;
@@ -332,6 +354,7 @@ fn main() -> anyhow::Result<()> {
                     continue;
                 }
                 reconnect_delay = std::time::Duration::from_secs(1);
+                diagnostic_worker_phase(&data_dir, "offer.accepted");
                 next_offer_at = Instant::now() + OFFER_HEARTBEAT_INTERVAL;
                 println!(
                     "{}",
@@ -351,6 +374,7 @@ fn main() -> anyhow::Result<()> {
             }
 
             if receipt_outbox.is_file() {
+                diagnostic_worker_phase(&data_dir, "receipt.post");
                 let pending: ExecutionReceiptV1 =
                     serde_json::from_slice(&fs::read(&receipt_outbox)?)?;
                 if let Err(error) = transport.post_json_with_deadline(
@@ -381,39 +405,14 @@ fn main() -> anyhow::Result<()> {
                 Err(_) => {}
             }
 
-            let benchmark_expires_at = offer
-                .link_benchmark
-                .as_ref()
-                .map(|benchmark| benchmark.expires_at);
-            let link_probe_is_due = link_probe_due(
-                ready_announced,
-                Instant::now(),
-                next_link_probe_at,
-                benchmark_expires_at,
-                offer.expires_at,
-            );
-            if link_probe_is_due {
-                let observed_at = transport.controller_now();
-                match transport.measure_link(node_id, observed_at) {
-                    Ok(benchmark) => {
-                        offer.link_benchmark = benchmark;
-                        next_link_probe_at = Instant::now() + std::time::Duration::from_secs(60);
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "link benchmark unavailable; placement will stay conservative: {error}"
-                        );
-                        offer.link_benchmark = None;
-                        next_link_probe_at = Instant::now() + std::time::Duration::from_secs(30);
-                    }
-                }
-            }
             if !work_in_flight && Instant::now() >= next_work_poll_at {
+                diagnostic_worker_phase(&data_dir, "work.claim");
                 match transport.get_json_with_deadline::<Option<WorkClaimV1>>(
                     &format!("/v1/work/claim?node_id={}", identity.node_id),
                     WORK_CONTROL_REQUEST_DEADLINE,
                 ) {
                     Ok(Some(claim)) => {
+                        diagnostic_worker_phase(&data_dir, "work.claimed");
                         let execution_tx = execution_tx.clone();
                         let signing_key = signing_key.clone();
                         let artifact_store = artifact_store.clone();
@@ -435,13 +434,47 @@ fn main() -> anyhow::Result<()> {
                         next_work_poll_at = Instant::now();
                     }
                     Ok(None) => {
+                        diagnostic_worker_phase(&data_dir, "work.empty");
                         next_work_poll_at = Instant::now() + std::time::Duration::from_secs(2);
                     }
                     Err(error) => {
+                        diagnostic_worker_phase(&data_dir, "work.unavailable");
                         eprintln!(
                             "fabric work channel unavailable; retrying without dropping enrollment: {error}"
                         );
                         next_work_poll_at = Instant::now() + std::time::Duration::from_secs(2);
+                    }
+                }
+            }
+            // Work claims are authority-bearing and time-bounded; service them before optional
+            // topology refresh so a degraded benchmark path cannot starve already admitted work.
+            let benchmark_expires_at = offer
+                .link_benchmark
+                .as_ref()
+                .map(|benchmark| benchmark.expires_at);
+            let link_probe_is_due = link_probe_due(
+                ready_announced,
+                Instant::now(),
+                next_link_probe_at,
+                benchmark_expires_at,
+                offer.expires_at,
+            );
+            if !work_in_flight && link_probe_is_due {
+                diagnostic_worker_phase(&data_dir, "link.probe");
+                let observed_at = transport.controller_now();
+                match transport.measure_link(node_id, observed_at) {
+                    Ok(benchmark) => {
+                        diagnostic_worker_phase(&data_dir, "link.measured");
+                        offer.link_benchmark = benchmark;
+                        next_link_probe_at = Instant::now() + std::time::Duration::from_secs(60);
+                    }
+                    Err(error) => {
+                        diagnostic_worker_phase(&data_dir, "link.unavailable");
+                        eprintln!(
+                            "link benchmark unavailable; placement will stay conservative: {error}"
+                        );
+                        offer.link_benchmark = None;
+                        next_link_probe_at = Instant::now() + std::time::Duration::from_secs(30);
                     }
                 }
             }
@@ -477,6 +510,12 @@ fn link_probe_due(
     ready_announced
         && now >= next_probe_at
         && benchmark_expires_at.is_none_or(|expires_at| expires_at < offer_expires_at)
+}
+
+fn diagnostic_worker_phase(data_dir: &Path, phase: &str) {
+    if std::env::var_os("RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS").is_some() {
+        let _ = fs::write(data_dir.join("agent.phase"), phase.as_bytes());
+    }
 }
 
 fn refresh_dynamic_capabilities(
@@ -857,6 +896,27 @@ impl ControllerTransport {
 
     fn post_json<T: serde::Serialize>(&self, path: &str, body: &T) -> anyhow::Result<()> {
         self.post_json_with_deadline(path, body, rampage_mesh::CONTROL_REQUEST_DEADLINE)
+    }
+
+    fn post_json_one_shot<T: serde::Serialize>(&self, path: &str, body: &T) -> anyhow::Result<()> {
+        match self {
+            Self::Http { .. } => self.post_json(path, body),
+            Self::Mesh(mesh) => {
+                let response = mesh.request_one_shot_with_deadline(
+                    "POST",
+                    path,
+                    Some(serde_json::to_value(body)?),
+                    rampage_mesh::CONTROL_REQUEST_DEADLINE,
+                )?;
+                anyhow::ensure!(
+                    (200..300).contains(&response.status),
+                    "mesh controller rejected request: {} {}",
+                    response.status,
+                    response.body
+                );
+                Ok(())
+            }
+        }
     }
 
     fn post_json_with_deadline<T: serde::Serialize>(
@@ -1841,6 +1901,27 @@ impl MeshController {
         body: Option<serde_json::Value>,
         deadline: std::time::Duration,
     ) -> anyhow::Result<rampage_protocol::MeshControlResponseV1> {
+        self.request_with_policy(method, path, body, deadline, false)
+    }
+
+    fn request_one_shot_with_deadline(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+        deadline: std::time::Duration,
+    ) -> anyhow::Result<rampage_protocol::MeshControlResponseV1> {
+        self.request_with_policy(method, path, body, deadline, true)
+    }
+
+    fn request_with_policy(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+        deadline: std::time::Duration,
+        one_shot: bool,
+    ) -> anyhow::Result<rampage_protocol::MeshControlResponseV1> {
         let request = MeshControlRequestV1 {
             schema: MeshControlRequestV1::SCHEMA.into(),
             request_id: Uuid::now_v7(),
@@ -1850,14 +1931,23 @@ impl MeshController {
         };
         let local_sent_at = Utc::now();
         let started = Instant::now();
-        let response = self
-            .runtime
-            .block_on(rampage_mesh::control_request_with_deadline(
-                &self.endpoint,
-                self.destination.clone(),
-                &request,
-                deadline,
-            ))?;
+        let response = if one_shot {
+            self.runtime
+                .block_on(rampage_mesh::one_shot_control_request_with_deadline(
+                    &self.endpoint,
+                    self.destination.clone(),
+                    &request,
+                    deadline,
+                ))?
+        } else {
+            self.runtime
+                .block_on(rampage_mesh::control_request_with_deadline(
+                    &self.endpoint,
+                    self.destination.clone(),
+                    &request,
+                    deadline,
+                ))?
+        };
         if let Some(controller_time) = response_controller_time(&response.body)
             && let Ok(offset) =
                 estimated_controller_clock_offset(local_sent_at, started.elapsed(), controller_time)

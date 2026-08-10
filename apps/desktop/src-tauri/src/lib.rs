@@ -185,6 +185,25 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+#[tauri::command]
+fn control_window(window: tauri::WebviewWindow, action: &str) -> Result<(), String> {
+    match action {
+        "minimize" => window.minimize().map_err(|error| error.to_string()),
+        "maximize" => {
+            let maximized = window.is_maximized().map_err(|error| error.to_string())?;
+            if maximized {
+                window.unmaximize()
+            } else {
+                window.maximize()
+            }
+            .map_err(|error| error.to_string())
+        }
+        // Rampage remains available in the system tray when the owner closes its shell.
+        "close" => window.hide().map_err(|error| error.to_string()),
+        _ => Err("unsupported window control action".into()),
+    }
+}
+
 fn descendant_pids(system: &System, root: Pid, output: &mut Vec<Pid>) {
     for (pid, process) in system.processes() {
         if process.parent() == Some(root) {
@@ -242,6 +261,19 @@ fn kill_process_tree(child: CommandChild) -> Result<(), String> {
     }
     let _ = child.kill();
     wait_for_process_exit(&watched, SIDECAR_STOP_TIMEOUT)
+}
+
+fn take_sidecar(app: &AppHandle, pid: u32) -> Option<CommandChild> {
+    let state = app.state::<Sidecars>();
+    let mut sidecars = state.0.lock().ok()?;
+    let position = sidecars.iter().position(|child| child.pid() == pid)?;
+    Some(sidecars.remove(position))
+}
+
+fn stop_sidecar(app: &AppHandle, pid: u32) -> Result<(), String> {
+    let child = take_sidecar(app, pid)
+        .ok_or_else(|| format!("worker sidecar {pid} is no longer supervised"))?;
+    kill_process_tree(child)
 }
 
 fn stop_all_sidecars(app: &AppHandle) -> Result<usize, String> {
@@ -1151,27 +1183,40 @@ fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(
                     continue;
                 }
             };
+            let agent_pid = agent.pid();
             if let Ok(mut sidecars) = handle.state::<Sidecars>().0.lock() {
                 sidecars.push(agent);
             }
             let mut last_error: Option<String> = None;
             let mut ready_announced = false;
             let mut last_heartbeat_at: Option<Instant> = None;
+            let mut worker_stdout = Vec::new();
+            let worker_started_at = Instant::now();
             loop {
                 let event = tokio::select! {
                     event = events.recv() => event,
                     _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                        if ready_announced
-                            && last_heartbeat_at.is_some_and(|last| {
-                                last.elapsed() > Duration::from_secs(15)
-                            })
-                        {
-                            ready_announced = false;
+                        if worker_requires_restart(
+                            worker_started_at,
+                            ready_announced,
+                            last_heartbeat_at,
+                            Duration::from_secs(20),
+                            Duration::from_secs(15),
+                        ) {
+                            let message = if ready_announced {
+                                "Signed worker heartbeat is stale; restarting the worker automatically."
+                            } else {
+                                "Worker startup produced no signed heartbeat; restarting automatically."
+                            };
                             set_worker_retrying(
                                 &runtime,
-                                "Signed worker heartbeat is stale; reconnecting automatically."
-                                    .into(),
+                                message.into(),
                             );
+                            last_error = Some(message.into());
+                            if let Err(error) = stop_sidecar(&handle, agent_pid) {
+                                last_error = Some(format!("{message} {error}"));
+                            }
+                            break;
                         }
                         continue;
                     }
@@ -1179,26 +1224,14 @@ fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(
                 let Some(event) = event else { break };
                 match event {
                     CommandEvent::Stdout(bytes) => {
-                        let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
-                        let schema = value
-                            .as_ref()
-                            .and_then(|value| value.get("schema"))
-                            .and_then(serde_json::Value::as_str);
-                        if matches!(
-                            schema,
-                            Some("rampage.worker-ready.v1" | "rampage.worker-heartbeat.v1")
-                        ) {
+                        for node_id in drain_worker_heartbeats(&mut worker_stdout, &bytes) {
                             ready_announced = true;
                             last_heartbeat_at = Some(Instant::now());
                             retry_delay = Duration::from_secs(1);
                             if let Ok(mut status) = runtime.0.lock() {
                                 *status = WorkerRuntimeView {
                                     state: "active",
-                                    node_id: value
-                                        .as_ref()
-                                        .and_then(|value| value.get("node_id"))
-                                        .and_then(serde_json::Value::as_str)
-                                        .map(str::to_string),
+                                    node_id,
                                     message: Some(
                                         "Signed compute offer accepted by the owner PC.".into(),
                                     ),
@@ -1226,6 +1259,9 @@ fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(
                     _ => {}
                 }
             }
+            // A naturally terminated child must not remain in the shutdown list: Windows can
+            // recycle its PID before Rampage exits, and a stale PID must never target a new process.
+            drop(take_sidecar(&handle, agent_pid));
             if !worker_enrollment_exists(&data_dir) || data_dir.join("KILL").is_file() {
                 continue;
             }
@@ -1252,6 +1288,67 @@ fn set_worker_retrying(runtime: &WorkerRuntime, message: String) {
             message: Some(message),
         };
     }
+}
+
+fn worker_requires_restart(
+    worker_started_at: Instant,
+    ready_announced: bool,
+    last_heartbeat_at: Option<Instant>,
+    startup_threshold: Duration,
+    threshold: Duration,
+) -> bool {
+    if !ready_announced {
+        return worker_started_at.elapsed() > startup_threshold;
+    }
+    last_heartbeat_at.is_some_and(|last| last.elapsed() > threshold)
+}
+
+fn drain_worker_heartbeats(buffer: &mut Vec<u8>, bytes: &[u8]) -> Vec<Option<String>> {
+    const MAX_BUFFER_BYTES: usize = 64 * 1024;
+    if buffer.len().saturating_add(bytes.len()) > MAX_BUFFER_BYTES {
+        buffer.clear();
+    }
+    buffer.extend_from_slice(bytes);
+    let mut heartbeats = Vec::new();
+    // The shell plugin may emit a complete stdout line with its delimiter already removed.
+    // Accept that shape while retaining incomplete JSON until a later chunk arrives.
+    if !buffer.contains(&b'\n')
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(buffer)
+    {
+        let heartbeat = worker_heartbeat_node(&value);
+        buffer.clear();
+        if let Some(node_id) = heartbeat {
+            heartbeats.push(node_id);
+        }
+        return heartbeats;
+    }
+    while let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
+        let mut line = buffer.drain(..=end).collect::<Vec<_>>();
+        while matches!(line.last(), Some(b'\n' | b'\r')) {
+            line.pop();
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if let Some(node_id) = worker_heartbeat_node(&value) {
+            heartbeats.push(node_id);
+        }
+    }
+    heartbeats
+}
+
+fn worker_heartbeat_node(value: &serde_json::Value) -> Option<Option<String>> {
+    let schema = value.get("schema").and_then(serde_json::Value::as_str);
+    matches!(
+        schema,
+        Some("rampage.worker-ready.v1" | "rampage.worker-heartbeat.v1")
+    )
+    .then(|| {
+        value
+            .get("node_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    })
 }
 
 fn bounded_worker_retry_message(bytes: &[u8]) -> Option<String> {
@@ -1847,6 +1944,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            control_window,
             local_stop,
             fabric_mode,
             worker_runtime_status,
@@ -2163,6 +2261,77 @@ mod tests {
             .unwrap();
         assert_eq!(detail.chars().count(), 384);
         assert!(message.chars().count() <= 512);
+    }
+
+    #[test]
+    fn worker_startup_and_heartbeat_silence_cross_restart_thresholds() {
+        let now = Instant::now();
+        assert!(!worker_requires_restart(
+            now,
+            false,
+            Some(now - Duration::from_secs(30)),
+            Duration::from_secs(20),
+            Duration::from_secs(15),
+        ));
+        assert!(worker_requires_restart(
+            now - Duration::from_secs(21),
+            false,
+            None,
+            Duration::from_secs(20),
+            Duration::from_secs(15),
+        ));
+        assert!(!worker_requires_restart(
+            now,
+            true,
+            Some(now - Duration::from_secs(5)),
+            Duration::from_secs(20),
+            Duration::from_secs(15),
+        ));
+        assert!(worker_requires_restart(
+            now,
+            true,
+            Some(now - Duration::from_secs(16)),
+            Duration::from_secs(20),
+            Duration::from_secs(15),
+        ));
+    }
+
+    #[test]
+    fn worker_heartbeat_parser_handles_fragmented_and_batched_lines() {
+        let mut buffer = Vec::new();
+        assert!(
+            drain_worker_heartbeats(
+                &mut buffer,
+                br#"{"schema":"rampage.worker-ready.v1","node_id":"node""#,
+            )
+            .is_empty()
+        );
+        let parsed = drain_worker_heartbeats(
+            &mut buffer,
+            b"}\n{\"schema\":\"noise\"}\n{\"schema\":\"rampage.worker-heartbeat.v1\",\"node_id\":\"node\"}\r\n",
+        );
+        assert_eq!(parsed, vec![Some("node".into()), Some("node".into())]);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn worker_heartbeat_parser_drops_an_unbounded_partial_frame() {
+        let mut buffer = vec![b'x'; 64 * 1024];
+        assert!(drain_worker_heartbeats(&mut buffer, b"more").is_empty());
+        assert_eq!(buffer, b"more");
+    }
+
+    #[test]
+    fn worker_heartbeat_parser_accepts_tauri_line_without_delimiter() {
+        let mut buffer = Vec::new();
+        let parsed = drain_worker_heartbeats(
+            &mut buffer,
+            br#"{"schema":"rampage.worker-heartbeat.v1","node_id":"node"}"#,
+        );
+        assert_eq!(parsed, vec![Some("node".into())]);
+        assert!(buffer.is_empty());
+        assert!(drain_worker_heartbeats(&mut buffer, br#"{"schema":"noise"}"#).is_empty());
+        assert!(buffer.is_empty());
     }
 
     #[test]

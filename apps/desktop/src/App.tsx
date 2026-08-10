@@ -1,6 +1,6 @@
 import { Activity, Boxes, BrainCircuit, CircleStop, Command, Eye, Grid2X2, Maximize2, Minus, MonitorUp, MousePointer2, Orbit, Play, RefreshCw, Rocket, ShieldCheck, Wrench, X } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { CommandPalette } from "./components/CommandPalette";
 import { ComputeStrategyPanel } from "./components/ComputeStrategyPanel";
@@ -19,10 +19,11 @@ type ProductSurface = "fabric" | "work" | "evolution" | "evidence";
 function WindowControls() {
   const run = (action: "minimize" | "maximize" | "close") => {
     if (!("__TAURI_INTERNALS__" in window)) return;
-    const nativeWindow = getCurrentWindow();
-    if (action === "minimize") void nativeWindow.minimize();
-    else if (action === "maximize") void nativeWindow.toggleMaximize();
-    else void nativeWindow.close();
+    void invoke("control_window", { action }).catch((error: unknown) => {
+      useRampage.setState({
+        lastAction: error instanceof Error ? error.message : "Window control failed.",
+      });
+    });
   };
   return <div className="window-controls" aria-label="Window controls">
     <button aria-label="Minimize Rampage" onClick={() => run("minimize")}><Minus /></button>
