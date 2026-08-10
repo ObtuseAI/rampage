@@ -4,6 +4,11 @@ import App from "./App";
 import { type PairingRequest, useRampage } from "./store";
 
 vi.mock("./components/Arena", () => ({ Arena: () => <div>Spatial fabric</div> }));
+const nativeInvoke = vi.hoisted(() => vi.fn(async (command: string) => {
+  if (command === "control_window") return undefined;
+  throw new Error("native backend unavailable in browser test");
+}));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: nativeInvoke }));
 const nativeEvent = vi.hoisted(() => ({
   pairingHandler: null as null | ((event: { payload: PairingRequest | null }) => void),
 }));
@@ -18,6 +23,11 @@ const baselineNodes = useRampage.getState().nodes.map((node) => ({ ...node }));
 afterEach(cleanup);
 
 beforeEach(() => {
+  nativeInvoke.mockClear();
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {},
+  });
   localStorage.setItem("rampage.onboarded", "true");
   localStorage.setItem("rampage.compute-strategy", "maximum_model_size");
   useRampage.setState({
@@ -104,11 +114,14 @@ test("every primary destination opens a functional product surface", () => {
   expect(screen.getByRole("heading", { name: /your machines, acting as one/i })).toBeVisible();
 });
 
-test("exposes native borderless window controls", () => {
+test("routes every borderless window control through the native backend", () => {
   render(<App />);
-  expect(screen.getByRole("button", { name: "Minimize Rampage" })).toBeEnabled();
-  expect(screen.getByRole("button", { name: "Maximize Rampage" })).toBeEnabled();
-  expect(screen.getByRole("button", { name: "Close Rampage" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "Minimize Rampage" }));
+  fireEvent.click(screen.getByRole("button", { name: "Maximize Rampage" }));
+  fireEvent.click(screen.getByRole("button", { name: "Close Rampage" }));
+  expect(nativeInvoke).toHaveBeenCalledWith("control_window", { action: "minimize" });
+  expect(nativeInvoke).toHaveBeenCalledWith("control_window", { action: "maximize" });
+  expect(nativeInvoke).toHaveBeenCalledWith("control_window", { action: "close" });
 });
 
 test("local stop does not depend on controller", () => {

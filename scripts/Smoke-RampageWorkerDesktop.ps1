@@ -62,7 +62,7 @@ try {
     $env:RAMPAGE_DATA_DIR = $workerData
     $env:RAMPAGE_BIND = $oldBind
     $env:RAMPAGE_TOKEN = $oldToken
-    $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = '60000'
+    $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = '150000'
     $desktop = Start-Process -FilePath $desktopExe -PassThru
     $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = $oldDiagnosticExit
 
@@ -89,32 +89,33 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if (-not $joined) {
-        throw "packaged worker desktop did not publish a signed artifact endpoint over direct QUIC (node=$($node | ConvertTo-Json -Compress), offer=$($nodeOffer | ConvertTo-Json -Compress))"
+        $phase = Get-Content -Raw (Join-Path $workerData 'agent.phase') -ErrorAction SilentlyContinue
+        throw "packaged worker desktop did not publish a signed artifact endpoint over direct QUIC (phase=$phase, node=$($node | ConvertTo-Json -Compress), offer=$($nodeOffer | ConvertTo-Json -Compress))"
     }
 
-    # A single offer only proves enrollment. Require a second signed heartbeat so a worker whose
-    # control loop deadlocks after startup cannot pass packaging qualification.
-    $initialOfferId = $nodeOffer.offer_id
-    $heartbeatObserved = $false
-    for ($attempt = 0; $attempt -lt 150; $attempt++) {
+    # Cross the one-minute topology-refresh boundary that previously stranded physical workers.
+    # A passing release must continue rotating signed offers before and after that refresh.
+    $offerIds = [System.Collections.Generic.HashSet[string]]::new()
+    [void]$offerIds.Add("$($nodeOffer.offer_id)")
+    $heartbeatDeadline = [DateTime]::UtcNow.AddSeconds(70)
+    while ([DateTime]::UtcNow -lt $heartbeatDeadline) {
         if ($desktop.HasExited) {
             throw "packaged worker desktop exited while proving sustained heartbeat (exit=$($desktop.ExitCode))"
         }
         try {
             $offers = @(Invoke-RestMethod "$controllerUrl/v1/offers" -Headers $headers)
             $nodeOffer = $offers | Where-Object {
-                $_ -and "$($_.node_id)" -eq "$($node.node_id)" -and
-                    "$($_.offer_id)" -ne "$initialOfferId"
+                $_ -and "$($_.node_id)" -eq "$($node.node_id)"
             } | Select-Object -First 1
             if ($nodeOffer -and $nodeOffer.mesh_endpoint.signature) {
-                $heartbeatObserved = $true
-                break
+                [void]$offerIds.Add("$($nodeOffer.offer_id)")
             }
         } catch { }
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Seconds 1
     }
-    if (-not $heartbeatObserved) {
-        throw 'packaged worker desktop enrolled but did not maintain its signed offer heartbeat'
+    if ($offerIds.Count -lt 10) {
+        $phase = Get-Content -Raw (Join-Path $workerData 'agent.phase') -ErrorAction SilentlyContinue
+        throw "packaged worker crossed the topology-refresh boundary with only $($offerIds.Count) signed offers (phase=$phase)"
     }
 
     $artifactSource = Join-Path $smokeRoot 'artifact-source.bin'
@@ -199,7 +200,7 @@ try {
     $null = $desktop.CloseMainWindow()
     Start-Sleep -Milliseconds 750
     if ($desktop.HasExited) { throw 'closing the worker window exited instead of keeping its contribution in the tray' }
-    if (-not $desktop.WaitForExit(62000)) { Stop-ProcessTree -RootProcessId $desktopId; throw 'worker diagnostic exit did not complete' }
+    if (-not $desktop.WaitForExit(155000)) { Stop-ProcessTree -RootProcessId $desktopId; throw 'worker diagnostic exit did not complete' }
     Start-Sleep -Milliseconds 750
 
     $controllerPin = Join-Path $workerData 'agent.controller-pin.json'
@@ -253,6 +254,7 @@ try {
         transport = 'authenticated_direct_quic'
         nodes = $nodes.Count
         offers = $offers.Count
+        sustained_heartbeat_offers = $offerIds.Count
         invite_signature = $true
         artifact_endpoint_signature = $true
         artifact_digest = $put.digest

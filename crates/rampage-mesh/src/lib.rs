@@ -393,6 +393,25 @@ pub async fn control_request_with_deadline(
     request: &MeshControlRequestV1,
     deadline: Duration,
 ) -> anyhow::Result<MeshControlResponseV1> {
+    control_request_with_policy(endpoint, destination, request, deadline, false).await
+}
+
+pub async fn one_shot_control_request_with_deadline(
+    endpoint: &Endpoint,
+    destination: EndpointAddr,
+    request: &MeshControlRequestV1,
+    deadline: Duration,
+) -> anyhow::Result<MeshControlResponseV1> {
+    control_request_with_policy(endpoint, destination, request, deadline, true).await
+}
+
+async fn control_request_with_policy(
+    endpoint: &Endpoint,
+    destination: EndpointAddr,
+    request: &MeshControlRequestV1,
+    deadline: Duration,
+    close_on_success: bool,
+) -> anyhow::Result<MeshControlResponseV1> {
     anyhow::ensure!(
         !deadline.is_zero() && deadline <= CONTROL_REQUEST_DEADLINE,
         "mesh control deadline must be positive and no greater than {} seconds",
@@ -414,7 +433,9 @@ pub async fn control_request_with_deadline(
     .await
     {
         Ok(Ok(response)) => {
-            connection.close(0_u8.into(), b"complete");
+            if close_on_success {
+                connection.close(0_u8.into(), b"one-shot complete");
+            }
             Ok(response)
         }
         Ok(Err(error)) => {
