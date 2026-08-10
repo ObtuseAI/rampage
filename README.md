@@ -18,12 +18,12 @@ the authority to run wild.
 [![Rust 1.91](https://img.shields.io/badge/Rust-1.91%2B-0b0f17?logo=rust&logoColor=67f5c5)](Cargo.toml)
 [![AI authority](https://img.shields.io/badge/AI%20authority-proposals%20only-0b0f17?logo=probot&logoColor=67f5c5)](docs/ARCHITECTURE.md#recursive-improvement)
 
-## [⬇ Download Rampage 0.3.1 for Windows](https://obtuseai.github.io/rampage/download/)
+## [⬇ Download Rampage Recovery 16 for Windows](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.16-bootstrap/Rampage_0.3.1_x64-setup.exe)
 
 **One installer. Desktop shortcut included.**
-[**Current verified build: recovery.15**](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.15-bootstrap) ·
+[**Current verified build: recovery.16**](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.16-bootstrap) ·
 [Release notes](docs/RELEASE_NOTES_0.3.1.md) ·
-[SHA-256](docs/SHA256SUMS-0.3.1.txt) ·
+[SHA-256](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.16-bootstrap/SHA256SUMS-windows-x64) ·
 [All releases](https://github.com/ObtuseAI/rampage/releases)
 
 [**Launch the showcase**](https://obtuseai.github.io/rampage/) ·
@@ -76,10 +76,12 @@ waits for the retiring worker process tree before rotating identity, and setup m
 its bounded stale worker credentials before accepting a new encrypted invitation. A genuinely empty
 runtime now stays authority-free until the person chooses Create or Join. The owner listens for
 nearby requests automatically, and a joining machine needs only one owner-side device approval—no
-code, address, account, or copied secret. Recovery 15 keeps a worker's signed offer heartbeat
-independent from work polling and restarts a failed worker sidecar automatically without discarding
-its enrolled identity. The native borderless shell now gives Fabric, Work, Evolution, and Evidence
-their own fully functional surfaces, while preserving obvious window controls and keyboard access.
+code, address, account, or copied secret. Recovery 16 keeps enrollment isolated from the worker's
+persistent authenticated QUIC control session, moves capability refresh off the heartbeat loop,
+prioritizes admitted work ahead of optional link probes, and restarts a stalled sidecar without
+discarding its enrolled identity. The native borderless shell now gives Fabric, Work, Evolution,
+and Evidence their own fully functional surfaces, with verified native minimize, maximize, and
+close-to-tray controls plus keyboard access.
 
 | Proof surface | Validated result |
 | --- | --- |
