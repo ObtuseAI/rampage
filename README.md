@@ -18,12 +18,12 @@ the authority to run wild.
 [![Rust 1.91](https://img.shields.io/badge/Rust-1.91%2B-0b0f17?logo=rust&logoColor=67f5c5)](Cargo.toml)
 [![AI authority](https://img.shields.io/badge/AI%20authority-proposals%20only-0b0f17?logo=probot&logoColor=67f5c5)](docs/ARCHITECTURE.md#recursive-improvement)
 
-## [⬇ Download Rampage Recovery 17 for Windows](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.17-bootstrap/Rampage_0.3.1_x64-setup.exe)
+## [⬇ Download Rampage Recovery 18 for Windows](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.18-bootstrap/Rampage_0.3.1_x64-setup.exe)
 
 **One installer. Desktop shortcut included.**
-[**Current verified build: recovery.17**](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.17-bootstrap) ·
+[**Current verified build: recovery.18**](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.18-bootstrap) ·
 [Release notes](docs/RELEASE_NOTES_0.3.1.md) ·
-[SHA-256](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.17-bootstrap/SHA256SUMS-windows-x64) ·
+[SHA-256](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.18-bootstrap/SHA256SUMS-windows-x64) ·
 [All releases](https://github.com/ObtuseAI/rampage/releases)
 
 [**Launch the showcase**](https://obtuseai.github.io/rampage/) ·
@@ -83,7 +83,9 @@ discarding its enrolled identity. The native borderless shell now gives Fabric, 
 and Evidence their own fully functional surfaces, with verified native minimize, maximize, and
 close-to-tray controls plus keyboard access. Recovery 17 applies the same signed-heartbeat
 supervision to the owner PC's local agent, so either side of the fabric can recover without a full
-app restart.
+app restart. Recovery 18 keeps that owner agent on authenticated loopback even when a historical
+self-mesh pin exists, and moves optional link measurement off the worker's signed heartbeat and
+admitted-work loop so a slow probe cannot trigger a reconnect cycle.
 
 | Proof surface | Validated result |
 | --- | --- |
