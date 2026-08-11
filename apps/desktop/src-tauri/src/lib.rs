@@ -1673,110 +1673,177 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
     let agent_controller = controller_origin.clone();
     tauri::async_runtime::spawn(async move {
         let client = reqwest::Client::new();
-        let mut ready = false;
-        for _ in 0..80 {
-            if client
-                .get(format!("{controller_origin}/health"))
-                .send()
-                .await
-                .is_ok_and(|response| response.status().is_success())
-            {
-                ready = true;
-                break;
+        let mut retry_delay = Duration::from_secs(1);
+        loop {
+            let mut ready = false;
+            for _ in 0..80 {
+                if client
+                    .get(format!("{controller_origin}/health"))
+                    .send()
+                    .await
+                    .is_ok_and(|response| response.status().is_success())
+                {
+                    ready = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        if !ready {
-            return;
-        }
-        let Ok(data_dir) = runtime_dir(&handle) else {
-            return;
-        };
-        let key_file = data_dir.join("agent.key");
-        let controller_pin = key_file.with_extension("controller-pin.json");
-        let mut agent_args = vec![
-            "--controller".into(),
-            agent_controller,
-            "--key-file".into(),
-            key_file.to_string_lossy().into_owned(),
-        ];
-        if !controller_pin.is_file() {
-            let Ok(response) = client
-                .post(format!("{controller_origin}/v1/enrollment/invites"))
-                .header("x-rampage-token", &token)
-                .json(&serde_json::json!({}))
-                .send()
-                .await
-            else {
+            if !ready {
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(Duration::from_secs(10));
+                continue;
+            }
+            let Ok(data_dir) = runtime_dir(&handle) else {
                 return;
             };
-            if !response.status().is_success() {
-                return;
+            if data_dir.join("KILL").is_file() {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
             }
-            let Ok(invite_bytes) = response.bytes().await else {
-                return;
-            };
-            if invite_bytes.len() > 256 * 1024 {
-                return;
-            }
-            let Ok(invite) = serde_json::from_slice::<serde_json::Value>(&invite_bytes) else {
-                return;
-            };
-            if invite.get("schema").and_then(serde_json::Value::as_str)
-                != Some("rampage.enrollment-invite.v1")
-                || invite.get("controller_mesh").is_none()
-            {
-                return;
-            }
-            let Ok(invite_bytes) = serde_json::to_vec_pretty(&invite) else {
-                return;
-            };
-            if invite_bytes.len() > 256 * 1024 {
-                return;
-            }
-            let invite_file = data_dir.join(format!(
-                "owner-agent-invite-{}.json",
-                &fresh_intelligence_token()[..16]
-            ));
-            let Ok(mut file) = std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&invite_file)
-            else {
-                return;
-            };
-            if file
-                .write_all(&invite_bytes)
-                .and_then(|()| file.sync_all())
-                .is_err()
-            {
-                let _ = std::fs::remove_file(&invite_file);
-                return;
+            let key_file = data_dir.join("agent.key");
+            let controller_pin = key_file.with_extension("controller-pin.json");
+            let mut invite_file = None;
+            let mut agent_args = vec![
+                "--controller".into(),
+                agent_controller.clone(),
+                "--key-file".into(),
+                key_file.to_string_lossy().into_owned(),
+            ];
+            if !controller_pin.is_file() {
+                let Ok(response) = client
+                    .post(format!("{controller_origin}/v1/enrollment/invites"))
+                    .header("x-rampage-token", &token)
+                    .json(&serde_json::json!({}))
+                    .send()
+                    .await
+                else {
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(10));
+                    continue;
+                };
+                if !response.status().is_success() {
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(10));
+                    continue;
+                }
+                let Ok(invite_bytes) = response.bytes().await else {
+                    tokio::time::sleep(retry_delay).await;
+                    continue;
+                };
+                if invite_bytes.len() > 256 * 1024 {
+                    tokio::time::sleep(retry_delay).await;
+                    continue;
+                }
+                let Ok(invite) = serde_json::from_slice::<serde_json::Value>(&invite_bytes) else {
+                    tokio::time::sleep(retry_delay).await;
+                    continue;
+                };
+                if invite.get("schema").and_then(serde_json::Value::as_str)
+                    != Some("rampage.enrollment-invite.v1")
+                    || invite.get("controller_mesh").is_none()
+                {
+                    tokio::time::sleep(retry_delay).await;
+                    continue;
+                }
+                let Ok(invite_bytes) = serde_json::to_vec_pretty(&invite) else {
+                    tokio::time::sleep(retry_delay).await;
+                    continue;
+                };
+                if invite_bytes.len() > 256 * 1024 {
+                    tokio::time::sleep(retry_delay).await;
+                    continue;
+                }
+                let path = data_dir.join(format!(
+                    "owner-agent-invite-{}.json",
+                    &fresh_intelligence_token()[..16]
+                ));
+                let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&path)
+                else {
+                    tokio::time::sleep(retry_delay).await;
+                    continue;
+                };
+                if file
+                    .write_all(&invite_bytes)
+                    .and_then(|()| file.sync_all())
+                    .is_err()
+                {
+                    let _ = std::fs::remove_file(&path);
+                    tokio::time::sleep(retry_delay).await;
+                    continue;
+                }
+                agent_args.extend(["--invite-file".into(), path.to_string_lossy().into_owned()]);
+                invite_file = Some(path);
             }
             agent_args.extend([
-                "--invite-file".into(),
-                invite_file.to_string_lossy().into_owned(),
+                "--display-name".into(),
+                "This Device".into(),
+                "--device-kind".into(),
+                "desktop".into(),
+                "--serve".into(),
             ]);
-        }
-        agent_args.extend([
-            "--display-name".into(),
-            "This Device".into(),
-            "--device-kind".into(),
-            "desktop".into(),
-            "--serve".into(),
-        ]);
-        let Ok(command) = handle.shell().sidecar("rampage-agent") else {
-            return;
-        };
-        let Ok((_, agent)) = command
-            .env("RAMPAGE_DATA_DIR", &data_dir)
-            .args(agent_args)
-            .spawn()
-        else {
-            return;
-        };
-        if let Ok(mut sidecars) = handle.state::<Sidecars>().0.lock() {
-            sidecars.push(agent);
+            let Ok(command) = handle.shell().sidecar("rampage-agent") else {
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(Duration::from_secs(10));
+                continue;
+            };
+            let Ok((mut events, agent)) = command
+                .env("RAMPAGE_DATA_DIR", &data_dir)
+                .args(agent_args)
+                .spawn()
+            else {
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(Duration::from_secs(10));
+                continue;
+            };
+            let agent_pid = agent.pid();
+            if let Ok(mut sidecars) = handle.state::<Sidecars>().0.lock() {
+                sidecars.push(agent);
+            }
+            let worker_started_at = Instant::now();
+            let mut ready_announced = false;
+            let mut last_heartbeat_at = None;
+            let mut worker_stdout = Vec::new();
+            loop {
+                let event = tokio::select! {
+                    event = events.recv() => event,
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                        if worker_requires_restart(
+                            worker_started_at,
+                            ready_announced,
+                            last_heartbeat_at,
+                            Duration::from_secs(20),
+                            Duration::from_secs(15),
+                        ) {
+                            let _ = stop_sidecar(&handle, agent_pid);
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let Some(event) = event else {
+                    break;
+                };
+                match event {
+                    CommandEvent::Stdout(bytes) => {
+                        if !drain_worker_heartbeats(&mut worker_stdout, &bytes).is_empty() {
+                            ready_announced = true;
+                            last_heartbeat_at = Some(Instant::now());
+                            retry_delay = Duration::from_secs(1);
+                        }
+                    }
+                    CommandEvent::Terminated(_) | CommandEvent::Error(_) => break,
+                    _ => {}
+                }
+            }
+            drop(take_sidecar(&handle, agent_pid));
+            if let Some(path) = invite_file {
+                let _ = std::fs::remove_file(path);
+            }
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = (retry_delay * 2).min(Duration::from_secs(10));
         }
     });
     Ok(())

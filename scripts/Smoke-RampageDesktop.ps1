@@ -23,8 +23,14 @@ $neutralDesktop = $null
 try {
     $env:RAMPAGE_DATA_DIR = $neutralRoot
     $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = '5000'
-    $neutralDesktop = Start-Process -FilePath $resolvedExecutable -Wait -PassThru `
+    $neutralDesktop = Start-Process -FilePath $resolvedExecutable -PassThru `
         -RedirectStandardOutput $neutralStdout -RedirectStandardError $neutralStderr
+    # A newly installed executable can spend tens of seconds in Windows reputation scanning before
+    # Tauri setup begins. The app still receives a five-second diagnostic lifetime once it starts.
+    if (-not $neutralDesktop.WaitForExit(60000)) {
+        Stop-Process -Id $neutralDesktop.Id -Force -ErrorAction SilentlyContinue
+        throw 'neutral first run did not exit within its diagnostic lifetime'
+    }
 } finally {
     $env:RAMPAGE_DATA_DIR = $oldData
     $env:RAMPAGE_DIAGNOSTIC_EXIT_AFTER_MS = $oldDiagnosticExit
@@ -152,6 +158,35 @@ try {
         $intelligence.capability -ne 'deterministic_only') {
         throw 'desktop did not autonomously start and enroll its local fabric'
     }
+    $ownerNodeId = "$($ownerOffer[0].node_id)"
+    $initialOfferId = "$($ownerOffer[0].offer_id)"
+    $initialAgent = Get-CimInstance Win32_Process | Where-Object {
+        $_.ParentProcessId -eq $desktop.Id -and $_.Name -eq 'rampage-agent.exe'
+    } | Select-Object -First 1
+    if (-not $initialAgent) { throw 'desktop local agent process is missing before recovery test' }
+    Stop-Process -Id $initialAgent.ProcessId -Force
+    $agentRestarted = $false
+    for ($attempt = 0; $attempt -lt 450; $attempt++) {
+        if ($desktop.HasExited) { throw 'desktop exited while recovering its local agent' }
+        $replacement = Get-CimInstance Win32_Process | Where-Object {
+            $_.ParentProcessId -eq $desktop.Id -and $_.Name -eq 'rampage-agent.exe' -and
+                $_.ProcessId -ne $initialAgent.ProcessId
+        } | Select-Object -First 1
+        try {
+            $offers = Invoke-RestMethod "$controllerBase/v1/offers" -Headers $headers
+            $recoveredOffer = $offers | Where-Object {
+                "$($_.node_id)" -eq $ownerNodeId -and "$($_.offer_id)" -ne $initialOfferId
+            } | Select-Object -First 1
+            if ($replacement -and $recoveredOffer -and $recoveredOffer.mesh_endpoint.signature) {
+                $agentRestarted = $true
+                break
+            }
+        } catch { }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $agentRestarted) {
+        throw 'desktop did not restart its failed local agent and restore signed offers'
+    }
     $null = $desktop.CloseMainWindow()
     Start-Sleep -Milliseconds 750
     if ($desktop.HasExited) { throw 'closing the desktop window exited instead of keeping the fabric in the tray' }
@@ -178,6 +213,7 @@ try {
         nodes = $nodes.Count
         offers = $offers.Count
         owner_mesh_endpoint = $true
+        owner_agent_restart_recovery = $agentRestarted
         close_to_tray = $true
         clean_explicit_exit = $true
         data_dir = $smokeRoot
