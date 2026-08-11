@@ -63,6 +63,8 @@ impl Ledger {
             );
             CREATE INDEX IF NOT EXISTS idx_ledger_subject
                 ON ledger_events(subject_id, sequence);
+            CREATE INDEX IF NOT EXISTS idx_ledger_event_type
+                ON ledger_events(event_type, sequence);
             CREATE TABLE IF NOT EXISTS authority_epochs (
                 scope TEXT PRIMARY KEY,
                 fencing_epoch INTEGER NOT NULL CHECK(fencing_epoch >= 0)
@@ -196,6 +198,61 @@ impl Ledger {
              FROM ledger_events ORDER BY sequence DESC LIMIT ?1",
         )?;
         let rows = statement.query_map(params![limit.min(10_000)], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?;
+        let mut events = rows
+            .map(|row| {
+                let (
+                    sequence,
+                    timestamp,
+                    event_type,
+                    subject_id,
+                    payload_json,
+                    previous_hash,
+                    event_hash,
+                ) = row?;
+                let recorded_at = DateTime::parse_from_rfc3339(&timestamp)
+                    .map_err(|error| serde_json::Error::io(std::io::Error::other(error)))?
+                    .with_timezone(&Utc);
+                Ok(LedgerEvent {
+                    sequence,
+                    recorded_at,
+                    event_type,
+                    subject_id,
+                    payload: serde_json::from_str(&payload_json)?,
+                    previous_hash,
+                    event_hash,
+                })
+            })
+            .collect::<Result<Vec<_>, LedgerError>>()?;
+        events.reverse();
+        Ok(events)
+    }
+
+    /// Return the newest events of one exact type in chronological order.
+    ///
+    /// Product history projections use this indexed, bounded query instead of scanning unrelated
+    /// high-volume heartbeat and scheduling evidence.
+    pub fn latest_events_of_type(
+        &self,
+        event_type: &str,
+        limit: u32,
+    ) -> Result<Vec<LedgerEvent>, LedgerError> {
+        let connection = self.connection.lock().map_err(|_| LedgerError::Poisoned)?;
+        let mut statement = connection.prepare(
+            "SELECT sequence, recorded_at, event_type, subject_id, payload_json,
+                    previous_hash, event_hash
+             FROM ledger_events WHERE event_type = ?1 ORDER BY sequence DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![event_type, limit.min(10_000)], |row| {
             Ok((
                 row.get::<_, u64>(0)?,
                 row.get::<_, String>(1)?,
@@ -542,5 +599,23 @@ mod tests {
             vec![3, 4, 5]
         );
         assert!(ledger.latest_events(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn latest_events_of_type_filters_before_bounding() {
+        let ledger = Ledger::in_memory().unwrap();
+        ledger.append("dividend", "one", &1).unwrap();
+        ledger.append("noise", "noise", &2).unwrap();
+        ledger.append("dividend", "two", &3).unwrap();
+        ledger.append("noise", "noise", &4).unwrap();
+        ledger.append("dividend", "three", &5).unwrap();
+        let events = ledger.latest_events_of_type("dividend", 2).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.subject_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["two", "three"]
+        );
     }
 }

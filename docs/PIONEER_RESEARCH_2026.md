@@ -278,16 +278,33 @@ explanation, not the only control surface.
 
 - Replace exhaustive agent process enumeration with a bounded CPU/RAM resource probe.
 - Turn signed sustained benchmark receipts into an explicitly scoped Compute Dividend.
+- Revalidate each benchmark aggregate against its exact all-or-nothing shard set and accepted signed
+  execution receipts before committing it to the hash-chained ledger.
+- Persist a bounded Compute Dividend history with ledger sequence, recorded time, prior scale, and
+  percentage change; restore the newest proof automatically after an app or controller restart.
+- Add five typed workload profiles and a conservative p90 break-even planner that charges compute,
+  startup, complete remote input/output transfer, round trips, and retry reserve. Plans with stale
+  dividends, missing offers, missing link evidence, non-restart-tolerant work, or insufficient gain
+  stay on the fastest node automatically.
+- Keep the selected same-LAN direct address and owner relay in one authenticated Iroh endpoint set,
+  allowing relay establishment and direct-path upgrade without changing fabric identity. Link
+  receipts now report whether the active path was direct or owner relay when the transport can prove
+  it.
+- Add Network Autopilot traffic gates for authority control, interactive AI, remote media,
+  artifacts, and bulk background work. Only bounded authority traffic may use an unmeasured
+  authenticated fallback; performance traffic waits for fresh end-to-end measurements.
+- Show durable dividend history, the p90 keep/distribute decision, and plain-language Direct, Owner
+  relay, or Recovering state in the native Work surface.
 - Increase functional-surface readability, target size, and focus visibility.
 - Publish this architecture and qualification sequence.
 
 ### Phase 1: prove repeatable value
 
-- Persist benchmark history and compare the same workload before/after each topology change.
-- Add workload profiles: LLM batch/interactive, build/test, render/transcode, and artifact movement.
-- Implement the break-even planner with conservative p90 predictions and placement explanations.
-- Add relay-first/direct-upgrade Network Autopilot with traffic classes and path migration evidence.
 - Add per-node contribution, interference, thermal trajectory, and recovery-time receipts.
+- Accumulate jitter, loss, time-of-day, and path-switch history so Network Autopilot can predict p95
+  behavior rather than relying on the current fresh link envelope alone.
+- Bind each production adapter to its own before/after qualification campaign; the current dividend
+  remains a projection for matching divisible CPU work, not a generic acceleration claim.
 
 ### Phase 2: make local AI materially larger and faster
 

@@ -1,4 +1,4 @@
-import { Activity, ArrowUpRight, BrainCircuit, CheckCircle2, Gauge, RefreshCw, ShieldCheck, Sparkles, Zap } from "lucide-react";
+import { Activity, ArrowUpRight, BrainCircuit, CheckCircle2, Gauge, Network, RefreshCw, ShieldCheck, Sparkles, Timer, TrendingUp, Zap } from "lucide-react";
 import { ComputeStrategyPanel } from "./ComputeStrategyPanel";
 import { useRampage } from "../store";
 
@@ -10,12 +10,38 @@ function compactEventName(value: string) {
   return value.replaceAll(".", " / ").replaceAll("_", " ");
 }
 
+function dividendPoints(scales: number[]) {
+  if (!scales.length) return "";
+  const minimum = Math.min(...scales);
+  const maximum = Math.max(...scales);
+  const span = Math.max(maximum - minimum, 0.05);
+  return scales.map((scale, index) => {
+    const x = scales.length === 1 ? 50 : (index / (scales.length - 1)) * 100;
+    const y = 34 - ((scale - minimum) / span) * 28;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+}
+
+function duration(ms: number | null) {
+  if (ms === null) return "—";
+  if (ms < 1_000) return `${ms} ms`;
+  return `${(ms / 1_000).toFixed(ms < 10_000 ? 1 : 0)} s`;
+}
+
 export function WorkSurface() {
   const state = useRampage();
   const dividend = state.fabricBenchmark;
   const working = state.nodes.filter((node) => node.state === "working").length;
   const ready = state.nodes.filter((node) => node.state === "ready").length;
   const measured = state.nodes.filter((node) => node.topologyConfidence === "measured").length;
+  const historyScales = state.dividendHistory.map((record) => record.result.effective_scale_over_fastest_node);
+  const historyPoints = dividendPoints(historyScales);
+  const planner = state.breakEvenPlan;
+  const network = state.networkAutopilot;
+  const remotePaths = network?.nodes.filter((node) => node.preferred_path !== "controller_local") ?? [];
+  const directPaths = remotePaths.filter((node) => node.preferred_path === "direct_measured" || node.preferred_path === "direct_candidate").length;
+  const relayPaths = remotePaths.filter((node) => node.preferred_path === "owner_relay_measured" || node.preferred_path === "owner_relay_bootstrap").length;
+  const interactiveReady = remotePaths.filter((node) => node.traffic.some((traffic) => traffic.traffic_class === "interactive_ai" && traffic.admitted)).length;
   const recentWork = state.events.filter((event) => event.event_type.startsWith("job.") || event.event_type.includes("benchmark")).slice(-6).reverse();
   return <section className="product-surface" aria-labelledby="work-title">
     {heading("work-title", "WORK ORCHESTRATOR", "Put the whole fabric to work.", "Rampage selects qualified machines, preserves owner reserves, and records every admitted result.")}
@@ -33,8 +59,35 @@ export function WorkSurface() {
         <div><span>Signed machines</span><strong>{dividend.nodes.length}</strong></div>
         <div><span>Proof rate</span><strong>{(dividend.fabric_hashes_per_second / 1_000_000).toFixed(2)} MH/s</strong></div>
       </div>
+      <div className="dividend-history">
+        <span><TrendingUp /> Durable history</span>
+        <svg viewBox="0 0 100 40" role="img" aria-label={`${historyScales.length} durable Compute Dividend measurement${historyScales.length === 1 ? "" : "s"}`} preserveAspectRatio="none">
+          <polyline points={historyPoints} />
+          {historyScales.map((_, index) => {
+            const [x, y] = historyPoints.split(" ")[index]?.split(",") ?? ["0", "34"];
+            return <circle key={state.dividendHistory[index]?.ledger_sequence ?? index} cx={x} cy={y} r="1.8" />;
+          })}
+        </svg>
+        <strong>{state.dividendHistory.length ? `${state.dividendHistory.length} chained` : "Current session"}</strong>
+      </div>
       <small><ShieldCheck /> Derived only from concurrent signed sustained CPU receipts. It is not a claim that every workload or the PC itself becomes this much faster.</small>
     </article>}
+    <div className="autopilot-grid" aria-label="Automatic placement and network decisions">
+      <article className={`autopilot-card ${planner?.decision ?? "insufficient_evidence"}`}>
+        <div className="card-title"><Timer /><div><p className="eyebrow">P90 BREAK-EVEN BRAIN</p><h2>{planner?.decision === "use_fabric" ? "Fabric clears the gate" : planner?.decision === "stay_on_fastest_node" ? "Fastest node wins" : "Waiting for proof"}</h2></div></div>
+        <p>{planner?.reason ?? "Run a signed sustained benchmark to unlock evidence-gated placement."}</p>
+        <div className="autopilot-metrics"><span>Fastest node <strong>{duration(planner?.p90_baseline_ms ?? null)}</strong></span><span>Fabric <strong>{duration(planner?.p90_fabric_ms ?? null)}</strong></span><span>Required gain <strong>{planner ? `${planner.required_gain_percent.toFixed(0)}%` : "—"}</strong></span></div>
+        <small>Conservative proof-target projection; slower or unmeasured distributed plans are refused automatically.</small>
+      </article>
+      <article className="autopilot-card network-autopilot">
+        <div className="card-title"><Network /><div><p className="eyebrow">NETWORK AUTOPILOT</p><h2>{network ? `${directPaths} direct · ${relayPaths} relay` : "Collecting paths"}</h2></div></div>
+        <p>{network ? `${interactiveReady}/${remotePaths.length} remote path${remotePaths.length === 1 ? "" : "s"} currently clear the interactive traffic gate.` : "Rampage will retain an authenticated owner relay for recovery and upgrade only from measured path evidence."}</p>
+        <div className="path-chips">
+          {remotePaths.length ? remotePaths.map((node) => <span key={node.node_id} className={node.preferred_path}>{state.nodes.find((candidate) => candidate.id === node.node_id)?.name ?? node.node_id.slice(0, 8)} · {node.preferred_path.replaceAll("_", " ")}</span>) : <span className="recovering">No remote path evidence yet</span>}
+        </div>
+        <small>Control stays available on authenticated fallback paths; AI, remote media, artifacts, and bulk work each have separate measured thresholds.</small>
+      </article>
+    </div>
     {state.fabricRole === "owner" && <ComputeStrategyPanel />}
     <div className="surface-grid two-column">
       <article className="surface-card featured">

@@ -13,8 +13,8 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use rampage_controller::{
-    AdmissionPolicy, ResourceReservation, choose_offer_with_topology, plan_model_session,
-    plan_shard_set, score_offer_with_topology,
+    AdmissionPolicy, ResourceReservation, choose_offer_with_topology, network_autopilot_status,
+    plan_break_even, plan_model_session, plan_shard_set, score_offer_with_topology,
 };
 use rampage_ledger::{Ledger, LedgerEvent};
 use rampage_mesh::{MeshConfig, MeshMode, MeshNode};
@@ -24,17 +24,18 @@ use rampage_policy::{
     verify_model_receipt, verify_offer,
 };
 use rampage_protocol::{
-    ArtifactRefV1, ArtifactReplicaReceiptV1, ArtifactTransferOperation, CapabilityLeaseV1,
-    DeviceKind, EnrollmentInviteV1, EnrollmentRequestV1, ExecutionReceiptV1, InstalledModelV1,
+    ArtifactRefV1, ArtifactReplicaReceiptV1, ArtifactTransferOperation, BreakEvenPlanV1,
+    BreakEvenRequestV1, CapabilityLeaseV1, DeviceKind, EnrollmentInviteV1, EnrollmentRequestV1,
+    ExecutionReceiptV1, FabricBenchmarkResultV1, FabricDividendRecordV1, InstalledModelV1,
     JobSpecV1, JobState, LINK_BENCHMARK_TRANSFER_BYTES, MAX_ARTIFACT_TRANSFER_BYTES,
     MAX_MODEL_OUTPUT_BYTES, MAX_MODEL_OUTPUT_TOKENS, MAX_MODEL_PROMPT_BYTES, MeshControlRequestV1,
     MeshControlResponseV1, MeshEndpointRecordV1, ModelBackend, ModelChatMessageV1,
     ModelExecutionReceiptV1, ModelInvocationFrameKind, ModelInvocationRequestV1, ModelMemoryKind,
     ModelParallelism, ModelRuntimeOfferV1, ModelRuntimeStatus, ModelSessionLeaseV1,
-    ModelSessionRequestV1, ModelUsageV1, NodeIdentityV1, PromotionCanaryLeaseV1,
-    PromotionCandidateV1, RelayAccessManifestV1, RemoteDesktopActionV1, RemoteDesktopLeaseV1,
-    RemoteDesktopModeV1, RemoteDesktopRequestV1, RemoteInputEventV1, ResourceClass,
-    ResourceOfferV1, ShardSetV1, StorageClass, StorageLeaseV1, WorkClaimV1,
+    ModelSessionRequestV1, ModelUsageV1, NetworkAutopilotStatusV1, NodeIdentityV1,
+    PromotionCanaryLeaseV1, PromotionCandidateV1, RelayAccessManifestV1, RemoteDesktopActionV1,
+    RemoteDesktopLeaseV1, RemoteDesktopModeV1, RemoteDesktopRequestV1, RemoteInputEventV1,
+    ResourceClass, ResourceOfferV1, ShardSetV1, StorageClass, StorageLeaseV1, WorkClaimV1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -167,6 +168,8 @@ struct DiagnosticMetrics {
     under_replicated_protected_artifacts: usize,
     recent_denials: usize,
     recent_failed_receipts: usize,
+    dividend_history_entries: usize,
+    latest_dividend_age_seconds: Option<u64>,
     available_resources: BTreeMap<&'static str, u64>,
 }
 
@@ -203,6 +206,11 @@ struct EventQuery {
     limit: Option<u32>,
     #[serde(default)]
     latest: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DividendQuery {
+    limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -405,6 +413,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/diagnostics/self-scan", get(self_scan))
         .route("/v1/jobs", post(submit_job))
         .route("/v1/jobs/plan", post(plan_job))
+        .route("/v1/plans/break-even", post(plan_break_even_request))
         .route("/v1/model-sessions/plan", post(plan_model_session_request))
         .route("/v1/shard-sets", post(submit_shard_set))
         .route("/v1/shard-sets/plan", post(plan_shard_set_request))
@@ -422,6 +431,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/artifacts/retrieve", post(retrieve_artifact))
         .route("/v1/artifacts/repair", post(repair_protected_artifacts))
         .route("/v1/benchmarks/link", post(link_probe))
+        .route("/v1/dividends", get(list_dividends).post(record_dividend))
+        .route("/v1/network/autopilot", get(network_autopilot))
         .route("/v1/remote-assist/sessions", post(open_remote_desktop))
         .route(
             "/v1/remote-assist/sessions/{session_id}/frame",
@@ -3098,6 +3109,10 @@ fn refresh_diagnostics(state: &AppState) -> Result<(), String> {
         .ledger
         .latest_events(512)
         .map_err(|error| format!("diagnostic evidence read failed: {error}"))?;
+    let dividends = state
+        .ledger
+        .latest_events_of_type("fabric.dividend.recorded", 250)
+        .map_err(|error| format!("dividend diagnostic read failed: {error}"))?;
     let report = build_diagnostic_report(
         now,
         &nodes,
@@ -3107,7 +3122,10 @@ fn refresh_diagnostics(state: &AppState) -> Result<(), String> {
             replicas: &artifact_replicas,
             evidence: &replica_evidence,
         },
-        &events,
+        LedgerDiagnosticState {
+            events: &events,
+            dividends: &dividends,
+        },
         state.kill_latch_path.is_file(),
     );
     let constraints = derive_autonomous_constraints(&state.governor, &report);
@@ -3217,13 +3235,18 @@ struct ArtifactDiagnosticState<'a> {
     evidence: &'a HashMap<(String, Uuid), ArtifactReplicaReceiptV1>,
 }
 
+struct LedgerDiagnosticState<'a> {
+    events: &'a [LedgerEvent],
+    dividends: &'a [LedgerEvent],
+}
+
 fn build_diagnostic_report(
     now: chrono::DateTime<chrono::Utc>,
     nodes: &HashMap<Uuid, NodeIdentityV1>,
     offers: &HashMap<Uuid, ResourceOfferV1>,
     active_assignments: usize,
     artifacts: ArtifactDiagnosticState<'_>,
-    events: &[LedgerEvent],
+    history: LedgerDiagnosticState<'_>,
     kill_latch: bool,
 ) -> FabricDiagnosticReport {
     let mut findings = Vec::new();
@@ -3439,8 +3462,71 @@ fn build_diagnostic_report(
         }
     }
 
+    let latest_dividend_age_seconds = history.dividends.last().map(|event| {
+        now.signed_duration_since(event.recorded_at)
+            .num_seconds()
+            .max(0) as u64
+    });
+    if live_offers.len() >= 2 && history.dividends.is_empty() {
+        findings.push(diagnostic_finding(
+            DiagnosticSeverity::Info,
+            "COMPUTE_DIVIDEND_MISSING",
+            "fabric",
+            "Multiple live machines are available, but no signed sustained fabric proof has been committed yet.",
+            "run_sustained_fabric_benchmark",
+            "r0_configuration",
+            true,
+            "benchmark grants remain bounded, node-pinned, concurrent, and restart tolerant",
+        ));
+    }
+    if let Some(latest) = history.dividends.last() {
+        match serde_json::from_value::<FabricBenchmarkResultV1>(latest.payload.clone()) {
+            Ok(result) if result.is_internally_consistent() => {
+                let dividend_nodes = result
+                    .nodes
+                    .iter()
+                    .map(|node| node.node_id)
+                    .collect::<BTreeSet<_>>();
+                if latest_dividend_age_seconds.is_some_and(|age| age > 24 * 60 * 60) {
+                    findings.push(diagnostic_finding(
+                        DiagnosticSeverity::Warning,
+                        "COMPUTE_DIVIDEND_STALE",
+                        "fabric",
+                        "The newest signed fabric proof is older than 24 hours, so break-even placement is fenced until remeasurement.",
+                        "run_sustained_fabric_benchmark",
+                        "r0_configuration",
+                        true,
+                        "new measurements never broaden workload authority",
+                    ));
+                } else if dividend_nodes != live_node_ids {
+                    findings.push(diagnostic_finding(
+                        DiagnosticSeverity::Info,
+                        "COMPUTE_DIVIDEND_TOPOLOGY_CHANGED",
+                        "fabric",
+                        "The live machine set differs from the newest signed fabric proof; automatic distribution waits for a matching measurement.",
+                        "run_sustained_fabric_benchmark",
+                        "r0_configuration",
+                        true,
+                        "changed topology remains ineligible until every participant produces a signed receipt",
+                    ));
+                }
+            }
+            _ => findings.push(diagnostic_finding(
+                DiagnosticSeverity::Critical,
+                "COMPUTE_DIVIDEND_CONTRACT_INVALID",
+                latest.subject_id.clone(),
+                "A persisted Compute Dividend failed its recomputed aggregate contract and cannot inform placement.",
+                "quarantine_invalid_dividend_projection",
+                "r1_allowlisted_source",
+                false,
+                "canonical receipt evidence is immutable; only the invalid projection may be excluded",
+            )),
+        }
+    }
+
     let recent_cutoff = now - chrono::Duration::minutes(15);
-    let recent_denials = events
+    let recent_denials = history
+        .events
         .iter()
         .filter(|event| {
             event.recorded_at >= recent_cutoff
@@ -3450,7 +3536,8 @@ fn build_diagnostic_report(
                 )
         })
         .count();
-    let recent_failed_receipts = events
+    let recent_failed_receipts = history
+        .events
         .iter()
         .filter(|event| {
             event.recorded_at >= recent_cutoff
@@ -3560,6 +3647,8 @@ fn build_diagnostic_report(
         under_replicated_protected_artifacts,
         recent_denials,
         recent_failed_receipts,
+        dividend_history_entries: history.dividends.len(),
+        latest_dividend_age_seconds,
         available_resources,
     };
     let autonomy = DiagnosticAutonomy {
@@ -4187,6 +4276,40 @@ async fn plan_job(
         "scores": scores,
         "mutated": false
     })))
+}
+
+async fn plan_break_even_request(
+    State(state): State<AppState>,
+    Json(request): Json<BreakEvenRequestV1>,
+) -> Result<Json<BreakEvenPlanV1>, (StatusCode, Json<Value>)> {
+    if !request.is_valid() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid bounded break-even request"})),
+        ));
+    }
+    let latest_event = state
+        .ledger
+        .latest_event_of_type("fabric.dividend.recorded")
+        .map_err(internal_error)?;
+    let latest_dividend = latest_event
+        .as_ref()
+        .map(|event| {
+            serde_json::from_value::<FabricBenchmarkResultV1>(event.payload.clone())
+                .map(|result| (result, event.recorded_at))
+        })
+        .transpose()
+        .map_err(internal_error)?;
+    let offers = placement_offers(&state)?;
+    let dividend_ref = latest_dividend
+        .as_ref()
+        .map(|(result, recorded_at)| (result, *recorded_at));
+    Ok(Json(plan_break_even(
+        &request,
+        dividend_ref,
+        &offers,
+        chrono::Utc::now(),
+    )))
 }
 
 async fn plan_model_session_request(
@@ -5244,6 +5367,198 @@ async fn events(
     events.map(Json).map_err(internal_error)
 }
 
+async fn record_dividend(
+    State(state): State<AppState>,
+    Json(result): Json<FabricBenchmarkResultV1>,
+) -> Result<(StatusCode, Json<FabricBenchmarkResultV1>), (StatusCode, Json<Value>)> {
+    if !result.is_internally_consistent() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "fabric benchmark result is internally inconsistent"})),
+        ));
+    }
+
+    for event in state
+        .ledger
+        .events_for_subject(&result.set_id.to_string(), 100)
+        .map_err(internal_error)?
+    {
+        if event.event_type != "fabric.dividend.recorded" {
+            continue;
+        }
+        let existing = serde_json::from_value::<FabricBenchmarkResultV1>(event.payload)
+            .map_err(internal_error)?;
+        if existing == result {
+            return Ok((StatusCode::OK, Json(existing)));
+        }
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "benchmark set already has a different dividend record"})),
+        ));
+    }
+
+    validate_dividend_evidence(&state, &result)?;
+    state
+        .ledger
+        .append(
+            "fabric.dividend.recorded",
+            &result.set_id.to_string(),
+            &result,
+        )
+        .map_err(internal_error)?;
+    Ok((StatusCode::ACCEPTED, Json(result)))
+}
+
+async fn list_dividends(
+    State(state): State<AppState>,
+    Query(query): Query<DividendQuery>,
+) -> Result<Json<Vec<FabricDividendRecordV1>>, (StatusCode, Json<Value>)> {
+    let limit = query.limit.unwrap_or(24).clamp(1, 250);
+    let events = state
+        .ledger
+        .latest_events_of_type("fabric.dividend.recorded", limit)
+        .map_err(internal_error)?;
+    let mut previous_scale = None;
+    let mut records = Vec::with_capacity(events.len());
+    for event in events {
+        let result = serde_json::from_value::<FabricBenchmarkResultV1>(event.payload)
+            .map_err(internal_error)?;
+        if !result.is_internally_consistent() {
+            return Err(internal_error(format!(
+                "ledger dividend {} failed contract validation",
+                event.subject_id
+            )));
+        }
+        let scale_change_percent = previous_scale.map(|previous: f64| {
+            ((result.effective_scale_over_fastest_node - previous) / previous.max(f64::EPSILON))
+                * 100.0
+        });
+        records.push(FabricDividendRecordV1 {
+            schema: FabricDividendRecordV1::SCHEMA.into(),
+            ledger_sequence: event.sequence,
+            recorded_at: event.recorded_at,
+            previous_effective_scale: previous_scale,
+            scale_change_percent,
+            result,
+        });
+        previous_scale = records
+            .last()
+            .map(|record| record.result.effective_scale_over_fastest_node);
+    }
+    Ok(Json(records))
+}
+
+async fn network_autopilot(
+    State(state): State<AppState>,
+) -> Result<Json<NetworkAutopilotStatusV1>, (StatusCode, Json<Value>)> {
+    let offers = placement_offers(&state)?;
+    Ok(Json(network_autopilot_status(&offers, chrono::Utc::now())))
+}
+
+fn validate_dividend_evidence(
+    state: &AppState,
+    result: &FabricBenchmarkResultV1,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let set = state
+        .shard_sets
+        .read()
+        .map_err(lock_error)?
+        .get(&result.set_id)
+        .cloned()
+        .ok_or_else(|| {
+            (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "benchmark set is not present in controller evidence"})),
+            )
+        })?;
+    if set.spec.shards.len() != result.nodes.len()
+        || set.spec.minimum_successes as usize != set.spec.shards.len()
+        || set
+            .spec
+            .shards
+            .iter()
+            .any(|job| job.adapter != "rampage.benchmark.v1" || job.operation != "sha256_chain")
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(
+                json!({"error": "benchmark result does not cover its exact all-or-nothing shard set"}),
+            ),
+        ));
+    }
+    let jobs = set
+        .spec
+        .shards
+        .iter()
+        .map(|job| job.job_id)
+        .collect::<BTreeSet<_>>();
+    let lease_nodes = set
+        .leases
+        .iter()
+        .map(|lease| (lease.job_id, lease.node_id))
+        .collect::<HashMap<_, _>>();
+    let completed = state.completed_receipts.read().map_err(lock_error)?.clone();
+    for node in &result.nodes {
+        if !jobs.contains(&node.job_id)
+            || lease_nodes.get(&node.job_id) != Some(&node.node_id)
+            || completed.get(&node.receipt_id) != Some(&node.job_id)
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(
+                    json!({"error": "benchmark node does not match its admitted lease and receipt"}),
+                ),
+            ));
+        }
+        let receipt = state
+            .ledger
+            .events_for_subject(&node.job_id.to_string(), 100)
+            .map_err(internal_error)?
+            .into_iter()
+            .filter(|event| event.event_type == "job.receipted")
+            .filter_map(|event| serde_json::from_value::<ExecutionReceiptV1>(event.payload).ok())
+            .find(|receipt| receipt.receipt_id == node.receipt_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": "signed benchmark receipt is absent from the ledger"})),
+                )
+            })?;
+        let signed_result = receipt
+            .result
+            .as_ref()
+            .and_then(Value::as_str)
+            .and_then(|text| serde_json::from_str::<Value>(text).ok());
+        let matches_signed_result = receipt.state == JobState::Succeeded
+            && receipt.job_id == node.job_id
+            && receipt.node_id == node.node_id
+            && signed_result.as_ref().is_some_and(|signed| {
+                signed.get("schema").and_then(Value::as_str)
+                    == Some("rampage.cpu-benchmark-result.v1")
+                    && signed.get("lanes").and_then(Value::as_u64) == Some(node.lanes)
+                    && signed.get("total_hashes").and_then(Value::as_u64) == Some(node.total_hashes)
+                    && signed.get("hashes_per_second").and_then(Value::as_u64)
+                        == Some(node.hashes_per_second)
+                    && signed.get("result_digest").and_then(Value::as_str)
+                        == Some(node.result_digest.as_str())
+                    && signed
+                        .get("elapsed_ms")
+                        .and_then(Value::as_f64)
+                        .is_some_and(|elapsed| {
+                            (elapsed - node.elapsed_ms).abs()
+                                <= elapsed.abs().max(1.0) * f64::EPSILON * 8.0
+                        })
+            });
+        if !matches_signed_result {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error": "dividend values do not match the signed benchmark receipt"})),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn internal_error(error: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -6200,7 +6515,10 @@ mod tests {
                 replicas: &HashMap::new(),
                 evidence: &HashMap::new(),
             },
-            &[],
+            LedgerDiagnosticState {
+                events: &[],
+                dividends: &[],
+            },
             false,
         );
         let repeated = build_diagnostic_report(
@@ -6212,7 +6530,10 @@ mod tests {
                 replicas: &HashMap::new(),
                 evidence: &HashMap::new(),
             },
-            &[],
+            LedgerDiagnosticState {
+                events: &[],
+                dividends: &[],
+            },
             false,
         );
         assert!(!report.autonomy.per_change_approval_required);
@@ -6251,7 +6572,10 @@ mod tests {
                 replicas: &HashMap::new(),
                 evidence: &HashMap::new(),
             },
-            &ledger.latest_events(10).unwrap(),
+            LedgerDiagnosticState {
+                events: &ledger.latest_events(10).unwrap(),
+                dividends: &[],
+            },
             false,
         );
         assert_eq!(report.metrics.recent_denials, 3);
@@ -6287,7 +6611,10 @@ mod tests {
                 replicas: &HashMap::new(),
                 evidence: &HashMap::new(),
             },
-            &[],
+            LedgerDiagnosticState {
+                events: &[],
+                dividends: &[],
+            },
             false,
         );
         let constraints =
@@ -6319,7 +6646,10 @@ mod tests {
                 replicas: &HashMap::new(),
                 evidence: &HashMap::new(),
             },
-            &[],
+            LedgerDiagnosticState {
+                events: &[],
+                dividends: &[],
+            },
             false,
         );
         let constraints =
@@ -6383,7 +6713,10 @@ mod tests {
                 replicas: &replicas,
                 evidence: &evidence,
             },
-            &[],
+            LedgerDiagnosticState {
+                events: &[],
+                dividends: &[],
+            },
             false,
         );
         assert_eq!(report.metrics.protected_artifacts, 1);

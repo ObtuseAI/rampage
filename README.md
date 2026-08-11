@@ -18,12 +18,12 @@ the authority to run wild.
 [![Rust 1.91](https://img.shields.io/badge/Rust-1.91%2B-0b0f17?logo=rust&logoColor=67f5c5)](Cargo.toml)
 [![AI authority](https://img.shields.io/badge/AI%20authority-proposals%20only-0b0f17?logo=probot&logoColor=67f5c5)](docs/ARCHITECTURE.md#recursive-improvement)
 
-## [⬇ Download Rampage Recovery 18 for Windows](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.18-bootstrap/Rampage_0.3.1_x64-setup.exe)
+## [⬇ Download Rampage Recovery 19 for Windows](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.19-bootstrap/Rampage_0.3.1_x64-setup.exe)
 
 **One installer. Desktop shortcut included.**
-[**Current verified build: recovery.18**](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.18-bootstrap) ·
+[**Current verified build: recovery.19**](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.19-bootstrap) ·
 [Release notes](docs/RELEASE_NOTES_0.3.1.md) ·
-[SHA-256](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.18-bootstrap/SHA256SUMS-windows-x64) ·
+[SHA-256](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.19-bootstrap/SHA256SUMS-windows-x64) ·
 [All releases](https://github.com/ObtuseAI/rampage/releases)
 
 [**Launch the showcase**](https://obtuseai.github.io/rampage/) ·
@@ -86,7 +86,20 @@ close-to-tray controls plus keyboard access. Recovery 17 applies the same signed
 supervision to the owner PC's local agent, so either side of the fabric can recover without a full
 app restart. Recovery 18 keeps that owner agent on authenticated loopback even when a historical
 self-mesh pin exists, and moves optional link measurement off the worker's signed heartbeat and
-admitted-work loop so a slow probe cannot trigger a reconnect cycle.
+admitted-work loop so a slow probe cannot trigger a reconnect cycle. Recovery 19 turns the fabric
+proof into a durable decision system: every Compute Dividend is revalidated against its exact shard
+set and signed receipts before entering the ledger, historical scale survives restart, and a
+conservative p90 planner automatically refuses a distributed plan when startup, transfer, retry, or
+stale topology would erase the gain. Network Autopilot keeps authenticated direct and owner-relay
+candidates available together, records the active path when Iroh can prove it, and independently
+gates control, interactive AI, remote media, artifact, and bulk traffic from fresh link evidence.
+The dependency lock also removes `RUSTSEC-2026-0253` through the fixed `lru 0.18.2` patch release.
+
+![Rampage Recovery 19 Work Orchestrator showing the p90 break-even brain, Network Autopilot, autonomous compute strategy, live fabric proof, and owner-protected node telemetry](docs/assets/rampage-work-autopilot.png)
+
+The Work Orchestrator above is the source-current interface in its explicitly labeled showcase
+topology. Production builds replace every demonstration value with verified controller evidence and
+stay in a waiting or local-only state when that evidence is unavailable.
 
 | Proof surface | Validated result |
 | --- | --- |
@@ -97,6 +110,9 @@ admitted-work loop so a slow probe cannot trigger a reconnect cycle.
 | Real AI workload | OpenAI, Anthropic Messages, and OpenRouter-style text requests crossed authenticated QUIC to a worker's loopback Ollama, streamed back, and ended in a transcript-matched signed receipt |
 | Automatic local AI | Windows bootstrap detects or installs the pinned Ollama runtime, pulls the exact 2.5 GB `qwen3:4b` artifact, verifies its complete SHA-256 digest, and advertises it without an agent restart |
 | Signed fabric benchmark | One bounded CPU grant per capable live node; deterministic SHA-256 chains; node-pinned placement; signed receipts; aggregate rate, verified extra capacity, and scoped time-returned Compute Dividend in the desktop |
+| Durable Compute Dividend | Exact shard-set and signed-receipt reconciliation before ledger commit; restart-restored history, prior-scale comparison, and a native trend view |
+| P90 break-even brain | Five typed workload profiles; conservative compute/startup/transfer/retry model; stale or unmeasured topology fails closed; slower plans stay on the fastest node |
+| Network Autopilot | Same-LAN direct candidate plus owner-relay recovery in one authenticated endpoint set; observed direct/relay path evidence; independent traffic gates for control, AI, media, artifacts, and bulk work |
 | Universal capability contract | Signed offers advertise exact workload domain, adapter, operation, execution pattern, isolation, runtime digest, and qualification status; candidate profiles grant no authority |
 | Autonomous self-scan | Stable evidence digests cover routes, links, failures, denials, thermal/battery pressure, capability gaps, idle capacity, and protected-artifact replication |
 | Compute Strategy | Outcome-first Automatic, Biggest AI, Fastest AI, More Work, and Protect This PC placement previews with exact capacity and qualification blockers |

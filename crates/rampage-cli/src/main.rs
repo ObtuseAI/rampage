@@ -430,14 +430,16 @@ async fn main() -> anyhow::Result<()> {
                 let status =
                     fetch_json(&format!("{}/v1/shard-sets/{set_id}", cli.controller)).await?;
                 if status.get("status").and_then(Value::as_str) != Some("running") {
-                    let summary = benchmark_summary(&status, &names)?;
                     let succeeded =
                         status.get("status").and_then(Value::as_str) == Some("succeeded");
-                    print_json(summary)?;
                     anyhow::ensure!(
                         succeeded,
                         "fabric benchmark finished below its success threshold"
                     );
+                    let summary = benchmark_summary(&status, &names)?;
+                    let persisted =
+                        post_json(&format!("{}/v1/dividends", cli.controller), &summary).await?;
+                    print_json(persisted)?;
                     break Ok(());
                 }
                 anyhow::ensure!(
@@ -855,6 +857,11 @@ fn benchmark_summary(status: &Value, names: &BTreeMap<Uuid, String>) -> anyhow::
             .and_then(Value::as_str)
             .context("benchmark member omitted node_id")?
             .parse::<Uuid>()?;
+        let job_id = member
+            .get("job_id")
+            .and_then(Value::as_str)
+            .context("benchmark member omitted job_id")?
+            .parse::<Uuid>()?;
         let result_text = member
             .get("result")
             .and_then(Value::as_str)
@@ -872,6 +879,7 @@ fn benchmark_summary(status: &Value, names: &BTreeMap<Uuid, String>) -> anyhow::
         fabric_hashes_per_second = fabric_hashes_per_second.saturating_add(rate);
         fastest_node_hashes_per_second = fastest_node_hashes_per_second.max(rate);
         nodes.push(json!({
+            "job_id": job_id,
             "node_id": node_id,
             "name": names.get(&node_id).cloned().unwrap_or_else(|| "Rampage node".into()),
             "receipt_id": member.get("receipt_id"),
@@ -1151,6 +1159,7 @@ mod tests {
             "status": "succeeded",
             "members": [{
                 "status": "succeeded",
+                "job_id": Uuid::now_v7(),
                 "node_id": node_id,
                 "receipt_id": Uuid::now_v7(),
                 "result": result.to_string()
@@ -1186,6 +1195,7 @@ mod tests {
             });
             json!({
                 "status": "succeeded",
+                "job_id": Uuid::now_v7(),
                 "node_id": node_id,
                 "receipt_id": Uuid::now_v7(),
                 "result": result.to_string()

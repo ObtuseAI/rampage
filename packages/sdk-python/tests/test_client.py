@@ -218,6 +218,57 @@ def test_model_session_planning_is_exposed_as_preview_only() -> None:
     assert result["execution_authority"] == "none_preview_only"
 
 
+def test_dividend_break_even_and_network_autopilot_are_exposed() -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.path == "/v1/dividends":
+            assert request.url.params["limit"] == "250"
+            return httpx.Response(200, json=[])
+        if request.url.path == "/v1/plans/break-even":
+            assert b'"restart_tolerant":true' in request.content
+            return httpx.Response(
+                200,
+                json={
+                    "schema": "rampage.break-even-plan.v1",
+                    "decision": "insufficient_evidence",
+                },
+            )
+        assert request.url.path == "/v1/network/autopilot"
+        return httpx.Response(
+            200,
+            json={
+                "schema": "rampage.network-autopilot-status.v1",
+                "mode": "automatic_evidence_gated",
+                "nodes": [],
+            },
+        )
+
+    client = RampageClient(token="local-token")
+    client._client.close()
+    client._client = httpx.Client(
+        base_url="http://127.0.0.1:47831",
+        headers={"x-rampage-token": "local-token"},
+        transport=httpx.MockTransport(handler),
+    )
+    assert client.dividend_history(999) == []
+    assert client.plan_break_even(
+        {
+            "schema": "rampage.break-even-request.v1",
+            "workload_class": "build_test",
+            "fastest_node_compute_ms": 60_000,
+            "input_bytes": 0,
+            "output_bytes": 0,
+            "startup_ms": 0,
+            "restart_tolerant": True,
+            "minimum_gain_percent": 12,
+        }
+    )["decision"] == "insufficient_evidence"
+    assert client.network_autopilot()["mode"] == "automatic_evidence_gated"
+    assert len(requests) == 3
+
+
 def test_openai_gateway_config_and_models_use_bearer_auth() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/models"

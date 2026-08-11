@@ -53,7 +53,8 @@ changes. The scan currently checks:
 - high RTT, low bandwidth, thermal pressure, and battery reserve;
 - empty local-model inventories and useful idle capacity;
 - repeated authority denials and failed terminal receipts; and
-- under-replicated protected artifacts.
+- under-replicated protected artifacts; and
+- missing, stale, topology-mismatched, or contract-invalid Compute Dividend history.
 
 Each finding includes evidence and a bounded proposal. Promotion is autonomous inside a
 preconfigured owner envelope: deterministic replay, quality/reliability/cost, sealed holdout,
@@ -73,6 +74,24 @@ R1 and R2 project envelopes are loaded at controller start from
 `RAMPAGE_AUTONOMY_R1_PROJECTS` and `RAMPAGE_AUTONOMY_R2_PROJECTS` (comma- or semicolon-separated
 UUIDs). R2 also requires the explicit protected-project set. R3 is always denied. This is an owner
 configuration boundary, not a per-change approval prompt.
+
+## Durable measurement and automatic break-even
+
+`POST /v1/dividends` accepts only `rampage.fabric-benchmark-result.v1`. Before committing the
+projection, the controller reconciles its set, jobs, lease-node mapping, accepted signed receipts,
+signed result bodies, digests, rates, and recomputed aggregates. `GET /v1/dividends?limit=24`
+returns the bounded chronological ledger projection with previous-scale comparisons.
+
+`POST /v1/plans/break-even` accepts `rampage.break-even-request.v1` and returns a preview-only
+`rampage.break-even-plan.v1`. It can choose `use_fabric`, `stay_on_fastest_node`, or
+`insufficient_evidence`; it cannot issue a job or lease. The five workload classes apply separate
+minimum-gain and p90 safety factors. Artifact movement is not inferred from CPU evidence, and every
+projection carries the explicit boundary that it is not a general speed guarantee.
+
+`GET /v1/network/autopilot` returns `rampage.network-autopilot-status.v1`. Direct and owner-relay
+labels distinguish observed active transport from advertised candidates. Authority control can use
+an authenticated fallback, while interactive AI, remote media, artifacts, and bulk background work
+must independently meet the current measured thresholds.
 
 The operational R0 lane already acts without a prompt: the Rust Governor may convert direct signed
 evidence of an unroutable, thermally constrained, or low-battery contributor into a reversible

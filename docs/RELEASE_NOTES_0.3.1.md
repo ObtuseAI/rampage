@@ -53,6 +53,30 @@ bounds, and tolerates loss, duplicates, and reordering. The nearby request remai
 minutes, failed attempts can retry the same protected transaction, and installer smoke no longer
 replaces a real installation's machine-wide firewall rules with temporary test paths.
 
+Recovery 19 makes measured usefulness durable and actionable. The benchmark CLI no longer prints a
+Compute Dividend and walks away: the controller verifies the exact all-or-nothing shard set, lease
+placement, accepted signed receipt, node identity, result digest, measured fields, aggregate rate,
+and every derived percentage before appending `fabric.dividend.recorded`. Repeating the same result
+is idempotent; trying to rewrite a set with different numbers is rejected. The native app restores a
+bounded chronological history and shows its trend after restart.
+
+A new proposal-only p90 break-even endpoint uses that newest valid dividend plus fresh signed offers
+and link measurements. It charges conservative compute, startup, full remote input/output transfer,
+round-trip, and retry factors for five workload classes. Missing evidence, a dividend older than 24
+hours, a changed topology, non-restart-tolerant work, or a gain below the workload safety threshold
+keeps execution on the fastest node. The result is an explanation, not execution authority and not
+a generic speed promise.
+
+Network Autopilot now keeps the best same-LAN direct address and any owner-operated relay in the same
+pinned Iroh endpoint set, so relay establishment and direct upgrade do not require a new identity.
+Fresh link receipts include the active direct/relay transport when Iroh exposes it. The controller
+then admits authority control, interactive AI, remote media, artifacts, and bulk background traffic
+through separate measured gates; an unmeasured fallback can carry bounded control but not
+performance traffic. The Work surface exposes these decisions without adding a settings maze.
+
+The release also advances Iroh's transitive `lru` dependency to 0.18.2, removing the newly published
+`RUSTSEC-2026-0253` panic-safety issue instead of adding it to Rampage's reviewed-warning baseline.
+
 ## What changed
 
 - **Fix Rampage** safely restarts a consistent native installation without erasing identity or work.

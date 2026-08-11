@@ -83,6 +83,7 @@ export interface FabricBenchmarkResult {
   set_id: string;
   status: "succeeded";
   nodes: Array<{
+    job_id: string;
     node_id: string;
     name: string;
     receipt_id: string;
@@ -101,6 +102,55 @@ export interface FabricBenchmarkResult {
   proof_basis: "concurrent_signed_sustained_cpu_receipts";
   applicability: "matching_fully_divisible_cpu_work_only";
   all_results_signed: true;
+}
+
+export interface FabricDividendRecord {
+  schema: "rampage.fabric-dividend-record.v1";
+  ledger_sequence: number;
+  recorded_at: string;
+  result: FabricBenchmarkResult;
+  previous_effective_scale?: number;
+  scale_change_percent?: number;
+}
+
+export interface BreakEvenPlan {
+  schema: "rampage.break-even-plan.v1";
+  decision: "use_fabric" | "stay_on_fastest_node" | "insufficient_evidence";
+  workload_class: "interactive_ai" | "batch_ai" | "build_test" | "render_transcode" | "artifact_movement";
+  baseline_node_id: string | null;
+  selected_node_ids: string[];
+  p90_baseline_ms: number;
+  p90_fabric_ms: number | null;
+  estimated_gain_percent: number | null;
+  required_gain_percent: number;
+  evidence_set_id: string | null;
+  evidence_age_seconds: number | null;
+  topology_confidence: string;
+  reason: string;
+  claim_boundary: string;
+}
+
+export interface NetworkAutopilotStatus {
+  schema: "rampage.network-autopilot-status.v1";
+  generated_at: string;
+  mode: "automatic_evidence_gated";
+  nodes: Array<{
+    node_id: string;
+    preferred_path: "controller_local" | "direct_measured" | "owner_relay_measured" | "direct_candidate" | "owner_relay_bootstrap" | "recovering";
+    evidence: string;
+    direct_candidates: number;
+    owner_relays: number;
+    rtt_millis_p50: number | null;
+    uplink_mbps: number | null;
+    downlink_mbps: number | null;
+    link_expires_at: string | null;
+    traffic: Array<{
+      traffic_class: "authority_control" | "interactive_ai" | "remote_media" | "artifact" | "bulk_background";
+      admitted: boolean;
+      reason: string;
+    }>;
+  }>;
+  policy: string;
 }
 
 export interface RecoveryNode {
@@ -204,6 +254,9 @@ interface RampageState {
   workerRuntime: WorkerRuntime;
   localAiRuntime: LocalAiRuntime;
   fabricBenchmark: FabricBenchmarkResult | null;
+  dividendHistory: FabricDividendRecord[];
+  breakEvenPlan: BreakEvenPlan | null;
+  networkAutopilot: NetworkAutopilotStatus | null;
   fabricBenchmarkPending: boolean;
   remoteAssistStatus: RemoteAssistStatus;
   remoteDesktopSession: RemoteDesktopSession | null;
@@ -331,6 +384,9 @@ export const useRampage = create<RampageState>((set, get) => ({
   workerRuntime: { state: "inactive", nodeId: null, message: null },
   localAiRuntime: initialLocalAiRuntime,
   fabricBenchmark: null,
+  dividendHistory: [],
+  breakEvenPlan: null,
+  networkAutopilot: null,
   fabricBenchmarkPending: false,
   remoteAssistStatus: {
     supported: false,
@@ -452,6 +508,10 @@ export const useRampage = create<RampageState>((set, get) => ({
           killLatch: false,
           gatewayModels: [],
           diagnostic: null,
+          fabricBenchmark: null,
+          dividendHistory: [],
+          breakEvenPlan: null,
+          networkAutopilot: null,
           lastAction: "This device is clean and ready to create or join a fabric.",
           lastSync: new Date(),
         });
@@ -477,6 +537,10 @@ export const useRampage = create<RampageState>((set, get) => ({
           capability: active ? "local_reduced" : "blocked",
           gatewayModels: [],
           diagnostic: null,
+          fabricBenchmark: null,
+          dividendHistory: [],
+          breakEvenPlan: null,
+          networkAutopilot: null,
           nodes: [{
             id: workerRuntime.nodeId ?? "worker",
             name: "This Worker",
@@ -511,13 +575,15 @@ export const useRampage = create<RampageState>((set, get) => ({
           .catch(() => undefined);
       }
       localControllerToken ??= await invoke<string>("controller_token").catch(() => null);
-      const [healthResponse, offersResponse, eventsResponse, modelsResponse, diagnosticResponse, intelligenceResponse] = await Promise.all([
+      const [healthResponse, offersResponse, eventsResponse, modelsResponse, diagnosticResponse, intelligenceResponse, dividendsResponse, networkResponse] = await Promise.all([
         fetch(`${controller}/health`),
         fetch(`${controller}/v1/offers`, { headers: controllerHeaders() }),
         fetch(`${controller}/v1/events?latest=true&limit=120`, { headers: controllerHeaders() }),
         fetch(`${controller}/v1/models`, { headers: controllerBearerHeaders() }).catch(() => null),
         fetch(`${controller}/v1/diagnostics/self-scan`, { headers: controllerHeaders() }),
         fetch(`${intelligence}/health`).catch(() => null),
+        fetch(`${controller}/v1/dividends?limit=24`, { headers: controllerHeaders() }).catch(() => null),
+        fetch(`${controller}/v1/network/autopilot`, { headers: controllerHeaders() }).catch(() => null),
       ]);
       if (!healthResponse.ok || !offersResponse.ok || !eventsResponse.ok || !diagnosticResponse.ok) throw new Error("controller unavailable");
       const health = (await healthResponse.json()) as ControllerHealth;
@@ -530,6 +596,36 @@ export const useRampage = create<RampageState>((set, get) => ({
       const intelligenceHealth = intelligenceResponse?.ok
         ? ((await intelligenceResponse.json()) as IntelligenceHealth)
         : null;
+      const dividendHistory = dividendsResponse?.ok
+        ? (await dividendsResponse.json()) as FabricDividendRecord[]
+        : [];
+      const networkAutopilot = networkResponse?.ok
+        ? (await networkResponse.json()) as NetworkAutopilotStatus
+        : null;
+      const latestDividend = dividendHistory.at(-1)?.result ?? null;
+      let breakEvenPlan: BreakEvenPlan | null = null;
+      if (latestDividend) {
+        const fastest = latestDividend.nodes.reduce((best, node) =>
+          node.hashes_per_second > best.hashes_per_second ? node : best,
+        );
+        const plannerResponse = await fetch(`${controller}/v1/plans/break-even`, {
+          method: "POST",
+          headers: controllerHeaders(true),
+          body: JSON.stringify({
+            schema: "rampage.break-even-request.v1",
+            workload_class: "build_test",
+            fastest_node_compute_ms: Math.max(1, Math.round(fastest.elapsed_ms)),
+            input_bytes: 0,
+            output_bytes: 0,
+            startup_ms: 0,
+            restart_tolerant: true,
+            minimum_gain_percent: 12,
+          }),
+        }).catch(() => null);
+        breakEvenPlan = plannerResponse?.ok
+          ? (await plannerResponse.json()) as BreakEvenPlan
+          : null;
+      }
       set({
         connected: true,
         fabricRole,
@@ -559,6 +655,10 @@ export const useRampage = create<RampageState>((set, get) => ({
         events,
         gatewayModels,
         diagnostic,
+        fabricBenchmark: latestDividend ?? get().fabricBenchmark,
+        dividendHistory,
+        breakEvenPlan,
+        networkAutopilot,
         killLatch: health.kill_latch,
         lastAction: (() => {
           const latest = events.at(-1);
@@ -740,6 +840,7 @@ export const useRampage = create<RampageState>((set, get) => ({
     try {
       const fabricBenchmark = await invoke<FabricBenchmarkResult>("run_fabric_benchmark");
       const rate = (fabricBenchmark.fabric_hashes_per_second / 1_000_000).toFixed(2);
+      await get().refresh();
       set({
         fabricBenchmark,
         lastAction: `Fabric proof complete: ${fabricBenchmark.nodes.length} signed node receipt${fabricBenchmark.nodes.length === 1 ? "" : "s"}, ${rate} MH/s combined.`,

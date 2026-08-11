@@ -2,9 +2,11 @@
 
 use chrono::{DateTime, Utc};
 use rampage_protocol::{
-    ComputeStrategy, JobSpecV1, ModelBackend, ModelMemoryKind, ModelParallelism,
-    ModelRuntimeOfferV1, ModelRuntimeStatus, ModelSessionRequestV1, ResourceClass, ResourceOfferV1,
-    ShardSetV1,
+    BreakEvenDecisionV1, BreakEvenPlanV1, BreakEvenRequestV1, ComputeStrategy,
+    FabricBenchmarkResultV1, JobSpecV1, ModelBackend, ModelMemoryKind, ModelParallelism,
+    ModelRuntimeOfferV1, ModelRuntimeStatus, ModelSessionRequestV1, NetworkAutopilotStatusV1,
+    NetworkNodeAutopilotV1, NetworkPathKindV1, ResourceClass, ResourceOfferV1, ShardSetV1,
+    TrafficAdmissionV1, TrafficClassV1, WorkloadClassV1,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -846,6 +848,354 @@ pub fn choose_offer<'a>(
         .max_by_key(|(_, score)| placement_rank(score))
 }
 
+/// Decide whether measured fabric throughput is likely to repay its distribution overhead.
+///
+/// This planner never issues authority and never substitutes synthetic capacity for evidence. It
+/// requires a recent, internally consistent dividend plus fresh signed offers and link benchmarks
+/// for every participating remote node. The estimate is intentionally pessimistic: complete input
+/// and output sizes are charged to every remote participant and p90 safety factors are applied to
+/// compute, startup, transfer, and retry cost.
+pub fn plan_break_even(
+    request: &BreakEvenRequestV1,
+    dividend: Option<(&FabricBenchmarkResultV1, DateTime<Utc>)>,
+    offers: &[ResourceOfferV1],
+    now: DateTime<Utc>,
+) -> BreakEvenPlanV1 {
+    let required_gain = request
+        .minimum_gain_percent
+        .max(default_minimum_gain(request.workload_class));
+    let mut plan = BreakEvenPlanV1 {
+        schema: BreakEvenPlanV1::SCHEMA.into(),
+        decision: BreakEvenDecisionV1::InsufficientEvidence,
+        workload_class: request.workload_class,
+        baseline_node_id: None,
+        selected_node_ids: Vec::new(),
+        p90_baseline_ms: conservative_baseline_ms(request),
+        p90_fabric_ms: None,
+        estimated_gain_percent: None,
+        required_gain_percent: required_gain,
+        evidence_set_id: None,
+        evidence_age_seconds: None,
+        topology_confidence: "insufficient".into(),
+        reason:
+            "No recent signed Compute Dividend is available; run the sustained benchmark first."
+                .into(),
+        claim_boundary: BreakEvenPlanV1::CLAIM_BOUNDARY.into(),
+    };
+    if !request.is_valid() {
+        plan.reason = "The break-even request is outside its bounded planning contract.".into();
+        return plan;
+    }
+    if request.workload_class == WorkloadClassV1::ArtifactMovement {
+        plan.reason = "Artifact movement is network-bound and cannot use a CPU dividend as performance evidence."
+            .into();
+        return plan;
+    }
+    if !request.restart_tolerant {
+        plan.reason =
+            "This workload is not restart tolerant, so automatic multi-node execution is fenced."
+                .into();
+        return plan;
+    }
+    let Some((dividend, recorded_at)) = dividend else {
+        return plan;
+    };
+    if !dividend.is_internally_consistent() {
+        plan.reason = "The latest Compute Dividend failed contract validation.".into();
+        return plan;
+    }
+    let evidence_age = now.signed_duration_since(recorded_at).num_seconds().max(0) as u64;
+    plan.evidence_set_id = Some(dividend.set_id);
+    plan.evidence_age_seconds = Some(evidence_age);
+    if evidence_age > 24 * 60 * 60 {
+        plan.reason = "The latest Compute Dividend is older than 24 hours; remeasure before changing placement."
+            .into();
+        return plan;
+    }
+    let Some(baseline) = dividend
+        .nodes
+        .iter()
+        .max_by_key(|node| node.hashes_per_second)
+    else {
+        return plan;
+    };
+    plan.baseline_node_id = Some(baseline.node_id);
+    if dividend.nodes.len() < 2 {
+        plan.decision = BreakEvenDecisionV1::StayOnFastestNode;
+        plan.selected_node_ids = vec![baseline.node_id];
+        plan.topology_confidence = "measured_single_node".into();
+        plan.reason =
+            "Only one node contributed verified work, so there is no measured fabric gain to use."
+                .into();
+        return plan;
+    }
+
+    let offers_by_node = offers
+        .iter()
+        .filter(|offer| offer.expires_at > now)
+        .map(|offer| (offer.node_id, offer))
+        .collect::<HashMap<_, _>>();
+    let mut max_transfer_ms = 0_u64;
+    for node in &dividend.nodes {
+        let Some(offer) = offers_by_node.get(&node.node_id) else {
+            plan.reason = format!(
+                "{} no longer has a fresh signed resource offer; the measured topology changed.",
+                node.name
+            );
+            return plan;
+        };
+        if offer.mesh_endpoint.is_none() {
+            continue;
+        }
+        let Some(link) = offer.link_benchmark.as_ref().filter(|link| {
+            link.expires_at > now
+                && link.rtt_micros_p50 > 0
+                && link.uplink_bps > 0
+                && link.downlink_bps > 0
+        }) else {
+            plan.reason = format!(
+                "{} lacks a fresh signed link benchmark; unknown topology cannot justify distribution.",
+                node.name
+            );
+            return plan;
+        };
+        let input_ms = transfer_millis(request.input_bytes, link.downlink_bps);
+        let output_ms = transfer_millis(request.output_bytes, link.uplink_bps);
+        let round_trips_ms = link.rtt_micros_p50.div_ceil(1_000).saturating_mul(2);
+        max_transfer_ms = max_transfer_ms.max(
+            input_ms
+                .saturating_add(output_ms)
+                .saturating_add(round_trips_ms),
+        );
+    }
+
+    let (compute_factor, startup_factor, network_factor, retry_factor) =
+        p90_factors(request.workload_class);
+    let distributed_compute_ms =
+        request.fastest_node_compute_ms as f64 / dividend.effective_scale_over_fastest_node;
+    let before_retry = distributed_compute_ms * compute_factor
+        + request.startup_ms as f64 * startup_factor
+        + max_transfer_ms as f64 * network_factor;
+    let p90_fabric_ms = (before_retry * (1.0 + retry_factor)).ceil().max(1.0) as u64;
+    let gain = (1.0 - p90_fabric_ms as f64 / plan.p90_baseline_ms.max(1) as f64) * 100.0;
+    plan.p90_fabric_ms = Some(p90_fabric_ms);
+    plan.estimated_gain_percent = Some(gain);
+    plan.topology_confidence = "fresh_signed_compute_and_link_evidence".into();
+    if gain >= required_gain && p90_fabric_ms < plan.p90_baseline_ms {
+        plan.decision = BreakEvenDecisionV1::UseFabric;
+        plan.selected_node_ids = dividend.nodes.iter().map(|node| node.node_id).collect();
+        plan.reason = format!(
+            "Conservative p90 clears the {:.1}% gain threshold with {:.1}% projected headroom.",
+            required_gain, gain
+        );
+    } else {
+        plan.decision = BreakEvenDecisionV1::StayOnFastestNode;
+        plan.selected_node_ids = vec![baseline.node_id];
+        plan.reason = format!(
+            "Distribution projects {:.1}% gain, below the {:.1}% safety threshold; stay on the fastest node.",
+            gain, required_gain
+        );
+    }
+    plan
+}
+
+fn conservative_baseline_ms(request: &BreakEvenRequestV1) -> u64 {
+    (request.fastest_node_compute_ms as f64 * 1.2 + request.startup_ms as f64 * 1.1)
+        .ceil()
+        .max(1.0) as u64
+}
+
+fn transfer_millis(bytes: u64, bits_per_second: u64) -> u64 {
+    bytes
+        .saturating_mul(8)
+        .saturating_mul(1_000)
+        .div_ceil(bits_per_second.max(1))
+}
+
+fn default_minimum_gain(class: WorkloadClassV1) -> f64 {
+    match class {
+        WorkloadClassV1::InteractiveAi => 20.0,
+        WorkloadClassV1::BatchAi => 10.0,
+        WorkloadClassV1::BuildTest => 12.0,
+        WorkloadClassV1::RenderTranscode => 8.0,
+        WorkloadClassV1::ArtifactMovement => 5.0,
+    }
+}
+
+fn p90_factors(class: WorkloadClassV1) -> (f64, f64, f64, f64) {
+    match class {
+        WorkloadClassV1::InteractiveAi => (1.25, 1.6, 2.0, 0.10),
+        WorkloadClassV1::BatchAi => (1.2, 1.4, 1.6, 0.08),
+        WorkloadClassV1::BuildTest => (1.2, 1.35, 1.5, 0.08),
+        WorkloadClassV1::RenderTranscode => (1.2, 1.3, 1.4, 0.06),
+        WorkloadClassV1::ArtifactMovement => (1.2, 1.3, 1.4, 0.06),
+    }
+}
+
+/// Project the safest usable network path and traffic classes from current signed offers.
+///
+/// A signed endpoint advertisement proves a candidate, not the route currently carrying packets.
+/// Consequently this status names `direct_candidate` and `owner_relay_bootstrap` explicitly and
+/// only admits performance-sensitive classes after a fresh end-to-end link benchmark.
+pub fn network_autopilot_status(
+    offers: &[ResourceOfferV1],
+    now: DateTime<Utc>,
+) -> NetworkAutopilotStatusV1 {
+    let mut nodes = offers
+        .iter()
+        .filter(|offer| offer.expires_at > now)
+        .map(|offer| {
+            let direct_candidates = offer
+                .mesh_endpoint
+                .as_ref()
+                .map_or(0, |endpoint| endpoint.direct_addresses.len());
+            let owner_relays = offer
+                .mesh_endpoint
+                .as_ref()
+                .map_or(0, |endpoint| endpoint.relay_urls.len());
+            let link = offer.link_benchmark.as_ref().filter(|link| {
+                link.expires_at > now
+                    && link.rtt_micros_p50 > 0
+                    && link.uplink_bps > 0
+                    && link.downlink_bps > 0
+            });
+            let (preferred_path, evidence) = if offer.mesh_endpoint.is_none() {
+                (
+                    NetworkPathKindV1::ControllerLocal,
+                    "controller-local offer; no network hop required",
+                )
+            } else if link.is_some_and(|link| {
+                link.observed_path == Some(rampage_protocol::ObservedLinkPathV1::Direct)
+            }) {
+                (
+                    NetworkPathKindV1::DirectMeasured,
+                    "transport reports an active direct path and the end-to-end benchmark is fresh",
+                )
+            } else if link.is_some_and(|link| {
+                link.observed_path == Some(rampage_protocol::ObservedLinkPathV1::OwnerRelay)
+            }) {
+                (
+                    NetworkPathKindV1::OwnerRelayMeasured,
+                    "transport reports an active owner relay path and the end-to-end benchmark is fresh",
+                )
+            } else if link.is_some() && direct_candidates > 0 {
+                (
+                    NetworkPathKindV1::DirectCandidate,
+                    "fresh signed link benchmark and signed direct candidate",
+                )
+            } else if owner_relays > 0 {
+                (
+                    NetworkPathKindV1::OwnerRelayBootstrap,
+                    "owner-operated relay retained while direct-path evidence is unavailable",
+                )
+            } else {
+                (
+                    NetworkPathKindV1::Recovering,
+                    "signed endpoint exists but no fresh measured path or owner relay is available",
+                )
+            };
+            let traffic = [
+                TrafficClassV1::AuthorityControl,
+                TrafficClassV1::InteractiveAi,
+                TrafficClassV1::RemoteMedia,
+                TrafficClassV1::Artifact,
+                TrafficClassV1::BulkBackground,
+            ]
+            .into_iter()
+            .map(|traffic_class| {
+                admit_traffic(
+                    traffic_class,
+                    preferred_path,
+                    link,
+                    direct_candidates + owner_relays > 0,
+                )
+            })
+            .collect();
+            NetworkNodeAutopilotV1 {
+                node_id: offer.node_id,
+                preferred_path,
+                evidence: evidence.into(),
+                direct_candidates,
+                owner_relays,
+                rtt_millis_p50: link.map(|link| link.rtt_micros_p50 as f64 / 1_000.0),
+                uplink_mbps: link.map(|link| link.uplink_bps as f64 / 1_000_000.0),
+                downlink_mbps: link.map(|link| link.downlink_bps as f64 / 1_000_000.0),
+                link_expires_at: link.map(|link| link.expires_at),
+                traffic,
+            }
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_by_key(|node| node.node_id);
+    NetworkAutopilotStatusV1 {
+        schema: NetworkAutopilotStatusV1::SCHEMA.into(),
+        generated_at: now,
+        mode: "automatic_evidence_gated".into(),
+        nodes,
+        policy: NetworkAutopilotStatusV1::POLICY.into(),
+    }
+}
+
+fn admit_traffic(
+    traffic_class: TrafficClassV1,
+    path: NetworkPathKindV1,
+    link: Option<&rampage_protocol::LinkBenchmarkV1>,
+    has_candidate: bool,
+) -> TrafficAdmissionV1 {
+    if path == NetworkPathKindV1::ControllerLocal {
+        return TrafficAdmissionV1 {
+            traffic_class,
+            admitted: true,
+            reason: "controller-local path".into(),
+        };
+    }
+    if traffic_class == TrafficClassV1::AuthorityControl {
+        return TrafficAdmissionV1 {
+            traffic_class,
+            admitted: has_candidate,
+            reason: if has_candidate {
+                "bounded authority traffic may use any authenticated candidate"
+            } else {
+                "no authenticated path candidate"
+            }
+            .into(),
+        };
+    }
+    let Some(link) = link else {
+        return TrafficAdmissionV1 {
+            traffic_class,
+            admitted: false,
+            reason: "performance traffic waits for a fresh signed link benchmark".into(),
+        };
+    };
+    let rtt_ms = link.rtt_micros_p50 as f64 / 1_000.0;
+    let up_mbps = link.uplink_bps as f64 / 1_000_000.0;
+    let down_mbps = link.downlink_bps as f64 / 1_000_000.0;
+    let (admitted, reason) = match traffic_class {
+        TrafficClassV1::AuthorityControl => unreachable!(),
+        TrafficClassV1::InteractiveAi => (
+            rtt_ms <= 75.0 && up_mbps >= 2.0 && down_mbps >= 10.0,
+            "requires p50 RTT <= 75 ms, uplink >= 2 Mbps, and downlink >= 10 Mbps",
+        ),
+        TrafficClassV1::RemoteMedia => (
+            rtt_ms <= 50.0 && up_mbps >= 10.0 && down_mbps >= 5.0,
+            "requires p50 RTT <= 50 ms, uplink >= 10 Mbps, and downlink >= 5 Mbps",
+        ),
+        TrafficClassV1::Artifact => (
+            up_mbps >= 5.0 && down_mbps >= 5.0,
+            "requires bidirectional throughput >= 5 Mbps",
+        ),
+        TrafficClassV1::BulkBackground => (
+            up_mbps >= 20.0 && down_mbps >= 20.0,
+            "requires bidirectional throughput >= 20 Mbps",
+        ),
+    };
+    TrafficAdmissionV1 {
+        traffic_class,
+        admitted,
+        reason: reason.into(),
+    }
+}
+
 /// Plan an independent shard set against one evolving reservation book.
 ///
 /// The function is deliberately pure and all-or-nothing: callers receive placements for every
@@ -1030,6 +1380,7 @@ mod tests {
             transfer_bytes: rampage_protocol::LINK_BENCHMARK_TRANSFER_BYTES,
             samples: 3,
             transport: "authenticated_quic".into(),
+            observed_path: None,
         });
         let offers = vec![local.clone(), remote.clone()];
         let locality = HashMap::from([
@@ -1170,6 +1521,148 @@ mod tests {
     }
 
     #[test]
+    fn break_even_uses_fabric_only_when_conservative_p90_clears_the_gate() {
+        let now = Utc::now();
+        let baseline_id = Uuid::now_v7();
+        let remote_id = Uuid::now_v7();
+        let dividend = benchmark_dividend(baseline_id, remote_id);
+        let mut baseline = model_offer(now, 16, false, 0, 0);
+        baseline.node_id = baseline_id;
+        let mut remote = model_offer(now, 16, true, 2_000, 1_000);
+        remote.node_id = remote_id;
+        let request = BreakEvenRequestV1 {
+            schema: BreakEvenRequestV1::SCHEMA.into(),
+            workload_class: WorkloadClassV1::BuildTest,
+            fastest_node_compute_ms: 60_000,
+            input_bytes: 1_000_000,
+            output_bytes: 100_000,
+            startup_ms: 200,
+            restart_tolerant: true,
+            minimum_gain_percent: 10.0,
+        };
+        let plan = plan_break_even(
+            &request,
+            Some((&dividend, now - Duration::minutes(5))),
+            &[baseline, remote],
+            now,
+        );
+        assert_eq!(plan.decision, BreakEvenDecisionV1::UseFabric);
+        assert_eq!(plan.selected_node_ids.len(), 2);
+        assert!(plan.estimated_gain_percent.unwrap() > 20.0);
+        assert_eq!(
+            plan.topology_confidence,
+            "fresh_signed_compute_and_link_evidence"
+        );
+    }
+
+    #[test]
+    fn break_even_refuses_slow_or_unmeasured_remote_paths() {
+        let now = Utc::now();
+        let baseline_id = Uuid::now_v7();
+        let remote_id = Uuid::now_v7();
+        let dividend = benchmark_dividend(baseline_id, remote_id);
+        let mut baseline = model_offer(now, 16, false, 0, 0);
+        baseline.node_id = baseline_id;
+        let mut remote = model_offer(now, 16, true, 80_000, 10);
+        remote.node_id = remote_id;
+        let request = BreakEvenRequestV1 {
+            schema: BreakEvenRequestV1::SCHEMA.into(),
+            workload_class: WorkloadClassV1::InteractiveAi,
+            fastest_node_compute_ms: 30_000,
+            input_bytes: 512 * 1024 * 1024,
+            output_bytes: 8 * 1024 * 1024,
+            startup_ms: 1_000,
+            restart_tolerant: true,
+            minimum_gain_percent: 5.0,
+        };
+        let plan = plan_break_even(
+            &request,
+            Some((&dividend, now)),
+            &[baseline.clone(), remote.clone()],
+            now,
+        );
+        assert_eq!(plan.decision, BreakEvenDecisionV1::StayOnFastestNode);
+        assert_eq!(plan.selected_node_ids, vec![baseline_id]);
+
+        remote.link_benchmark = None;
+        let plan = plan_break_even(&request, Some((&dividend, now)), &[baseline, remote], now);
+        assert_eq!(plan.decision, BreakEvenDecisionV1::InsufficientEvidence);
+        assert!(plan.reason.contains("lacks a fresh signed link benchmark"));
+    }
+
+    #[test]
+    fn break_even_requires_path_evidence_when_the_fastest_node_is_remote() {
+        let now = Utc::now();
+        let remote_fastest_id = Uuid::now_v7();
+        let local_id = Uuid::now_v7();
+        let dividend = benchmark_dividend(remote_fastest_id, local_id);
+        let mut remote_fastest = model_offer(now, 16, true, 2_000, 1_000);
+        remote_fastest.node_id = remote_fastest_id;
+        remote_fastest.link_benchmark = None;
+        let mut local = model_offer(now, 16, false, 0, 0);
+        local.node_id = local_id;
+        let request = BreakEvenRequestV1 {
+            schema: BreakEvenRequestV1::SCHEMA.into(),
+            workload_class: WorkloadClassV1::BatchAi,
+            fastest_node_compute_ms: 60_000,
+            input_bytes: 1_000_000,
+            output_bytes: 100_000,
+            startup_ms: 200,
+            restart_tolerant: true,
+            minimum_gain_percent: 10.0,
+        };
+
+        let plan = plan_break_even(
+            &request,
+            Some((&dividend, now - Duration::minutes(5))),
+            &[remote_fastest, local],
+            now,
+        );
+
+        assert_eq!(plan.decision, BreakEvenDecisionV1::InsufficientEvidence);
+        assert_eq!(plan.baseline_node_id, Some(remote_fastest_id));
+        assert!(plan.reason.contains("lacks a fresh signed link benchmark"));
+    }
+
+    #[test]
+    fn network_autopilot_admits_each_traffic_class_from_fresh_thresholds() {
+        let now = Utc::now();
+        let local = model_offer(now, 16, false, 0, 0);
+        let mut remote = model_offer(now, 16, true, 20_000, 100);
+        remote.link_benchmark.as_mut().unwrap().observed_path =
+            Some(rampage_protocol::ObservedLinkPathV1::Direct);
+        let status = network_autopilot_status(&[local, remote.clone()], now);
+        assert_eq!(status.nodes.len(), 2);
+        let local = status
+            .nodes
+            .iter()
+            .find(|node| node.preferred_path == NetworkPathKindV1::ControllerLocal)
+            .unwrap();
+        assert!(local.traffic.iter().all(|traffic| traffic.admitted));
+        let measured = status
+            .nodes
+            .iter()
+            .find(|node| node.node_id == remote.node_id)
+            .unwrap();
+        assert_eq!(measured.preferred_path, NetworkPathKindV1::DirectMeasured);
+        assert!(measured.traffic.iter().all(|traffic| traffic.admitted));
+    }
+
+    #[test]
+    fn network_autopilot_keeps_control_but_fences_unmeasured_performance() {
+        let now = Utc::now();
+        let mut remote = model_offer(now, 16, true, 20_000, 100);
+        remote.link_benchmark = None;
+        remote.mesh_endpoint.as_mut().unwrap().relay_urls =
+            vec!["https://relay.example.test".into()];
+        let status = network_autopilot_status(&[remote], now);
+        let node = &status.nodes[0];
+        assert_eq!(node.preferred_path, NetworkPathKindV1::OwnerRelayBootstrap);
+        assert!(node.traffic[0].admitted);
+        assert!(node.traffic[1..].iter().all(|traffic| !traffic.admitted));
+    }
+
+    #[test]
     fn maximum_model_plan_combines_only_qualified_compatible_memory() {
         let now = Utc::now();
         let request = model_request(now, ComputeStrategy::MaximumModelSize, 40, 4);
@@ -1254,6 +1747,47 @@ mod tests {
         }
     }
 
+    fn benchmark_dividend(baseline_id: Uuid, remote_id: Uuid) -> FabricBenchmarkResultV1 {
+        FabricBenchmarkResultV1 {
+            schema: FabricBenchmarkResultV1::SCHEMA.into(),
+            set_id: Uuid::now_v7(),
+            status: "succeeded".into(),
+            nodes: vec![
+                rampage_protocol::FabricBenchmarkNodeV1 {
+                    job_id: Uuid::now_v7(),
+                    node_id: baseline_id,
+                    name: "Main PC".into(),
+                    receipt_id: Uuid::now_v7(),
+                    lanes: 8,
+                    total_hashes: 3_000_000,
+                    elapsed_ms: 50.0,
+                    hashes_per_second: 60_000,
+                    result_digest: format!("sha256:{}", "a".repeat(64)),
+                },
+                rampage_protocol::FabricBenchmarkNodeV1 {
+                    job_id: Uuid::now_v7(),
+                    node_id: remote_id,
+                    name: "Laptop".into(),
+                    receipt_id: Uuid::now_v7(),
+                    lanes: 4,
+                    total_hashes: 2_000_000,
+                    elapsed_ms: 50.0,
+                    hashes_per_second: 40_000,
+                    result_digest: format!("sha256:{}", "b".repeat(64)),
+                },
+            ],
+            fabric_hashes_per_second: 100_000,
+            fastest_node_hashes_per_second: 60_000,
+            effective_scale_over_fastest_node: 5.0 / 3.0,
+            verified_extra_capacity_percent: 200.0 / 3.0,
+            estimated_time_saved_percent: 40.0,
+            time_returned_hours_per_100: 40.0,
+            proof_basis: FabricBenchmarkResultV1::PROOF_BASIS.into(),
+            applicability: FabricBenchmarkResultV1::APPLICABILITY.into(),
+            all_results_signed: true,
+        }
+    }
+
     fn model_offer(
         now: chrono::DateTime<Utc>,
         memory_gib: u64,
@@ -1315,6 +1849,7 @@ mod tests {
                 transfer_bytes: rampage_protocol::LINK_BENCHMARK_TRANSFER_BYTES,
                 samples: 3,
                 transport: "authenticated_quic".into(),
+                observed_path: None,
             }),
             mesh_endpoint: remote.then(|| MeshEndpointRecordV1 {
                 schema: MeshEndpointRecordV1::SCHEMA.into(),

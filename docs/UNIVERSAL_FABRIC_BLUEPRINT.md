@@ -180,7 +180,8 @@ combinations remain candidate-only.
 | Stage | Deliverable | Completion evidence |
 | --- | --- | --- |
 | 0.3.1 | Recovery Center, Pair again, owner Forget, factory reset, automatic outcome-first UI, SDK lifecycle API | Native package, restart-safe tests, two-machine re-pair and Remote Assist receipt |
-| Next | Network Autopilot v1 and remote media telemetry | Direct/relay path race, adaptive media proof, visible encode/network/decode latency |
+| 0.3.1 | Durable Compute Dividend, conservative p90 break-even planning, and Network Autopilot v1 | Exact signed-receipt reconciliation, restart-restored history, slower-plan refusal, retained direct/owner-relay candidates, observed active path, and five independent traffic gates |
+| Next | Adaptive remote media telemetry | Visible encode/network/decode latency, loss/jitter history, codec switching, and physical before/after proof |
 | Next | Qualified multi-GPU server adapter | Homogeneous CUDA tensor/pipeline campaign that beats or enables the single-node baseline |
 | Next | Replicated AI service and prefix-aware routing | Concurrent-load proof, failover, cache-hit evidence, bounded autoscaling |
 | Experimental | Prefill/decode and speculative lanes | KV/token compatibility, transfer break-even, quality equality, rollback proof |
