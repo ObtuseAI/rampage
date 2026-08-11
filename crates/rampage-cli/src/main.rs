@@ -888,6 +888,13 @@ fn benchmark_summary(status: &Value, names: &BTreeMap<Uuid, String>) -> anyhow::
     );
     let effective_scale =
         fabric_hashes_per_second as f64 / fastest_node_hashes_per_second.max(1) as f64;
+    let verified_extra_capacity_percent = (effective_scale - 1.0).max(0.0) * 100.0;
+    let estimated_time_saved_percent = if effective_scale > 0.0 {
+        (1.0 - (1.0 / effective_scale)).max(0.0) * 100.0
+    } else {
+        0.0
+    };
+    let time_returned_hours_per_100 = estimated_time_saved_percent;
     Ok(json!({
         "schema": "rampage.fabric-benchmark-result.v1",
         "set_id": status.get("set_id"),
@@ -896,6 +903,11 @@ fn benchmark_summary(status: &Value, names: &BTreeMap<Uuid, String>) -> anyhow::
         "fabric_hashes_per_second": fabric_hashes_per_second,
         "fastest_node_hashes_per_second": fastest_node_hashes_per_second,
         "effective_scale_over_fastest_node": effective_scale,
+        "verified_extra_capacity_percent": verified_extra_capacity_percent,
+        "estimated_time_saved_percent": estimated_time_saved_percent,
+        "time_returned_hours_per_100": time_returned_hours_per_100,
+        "proof_basis": "concurrent_signed_sustained_cpu_receipts",
+        "applicability": "matching_fully_divisible_cpu_work_only",
         "all_results_signed": true
     }))
 }
@@ -1148,7 +1160,66 @@ mod tests {
             benchmark_summary(&status, &BTreeMap::from([(node_id, "Laptop".to_string())])).unwrap();
         assert_eq!(summary["fabric_hashes_per_second"], 100_000);
         assert_eq!(summary["effective_scale_over_fastest_node"], 1.0);
+        assert_eq!(summary["verified_extra_capacity_percent"], 0.0);
+        assert_eq!(summary["estimated_time_saved_percent"], 0.0);
+        assert_eq!(summary["time_returned_hours_per_100"], 0.0);
+        assert_eq!(
+            summary["applicability"],
+            "matching_fully_divisible_cpu_work_only"
+        );
         assert_eq!(summary["all_results_signed"], true);
         assert_eq!(summary["nodes"][0]["name"], "Laptop");
+    }
+
+    #[test]
+    fn benchmark_summary_quantifies_only_the_verified_compute_dividend() {
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+        let member = |node_id: Uuid, rate: u64, digest: char| {
+            let result = json!({
+                "schema": "rampage.cpu-benchmark-result.v1",
+                "lanes": 4,
+                "total_hashes": 2_000_000,
+                "elapsed_ms": 50.0,
+                "hashes_per_second": rate,
+                "result_digest": format!("sha256:{}", digest.to_string().repeat(64))
+            });
+            json!({
+                "status": "succeeded",
+                "node_id": node_id,
+                "receipt_id": Uuid::now_v7(),
+                "result": result.to_string()
+            })
+        };
+        let status = json!({
+            "set_id": Uuid::now_v7(),
+            "status": "succeeded",
+            "members": [member(first, 60_000, 'a'), member(second, 40_000, 'b')]
+        });
+        let summary = benchmark_summary(
+            &status,
+            &BTreeMap::from([(first, "Main".to_string()), (second, "Laptop".to_string())]),
+        )
+        .unwrap();
+
+        assert_eq!(summary["fabric_hashes_per_second"], 100_000);
+        assert_eq!(summary["fastest_node_hashes_per_second"], 60_000);
+        assert!(
+            (summary["effective_scale_over_fastest_node"]
+                .as_f64()
+                .unwrap()
+                - 1.666_666)
+                .abs()
+                < 0.001
+        );
+        assert!(
+            (summary["verified_extra_capacity_percent"].as_f64().unwrap() - 66.666_666).abs()
+                < 0.001
+        );
+        assert!((summary["estimated_time_saved_percent"].as_f64().unwrap() - 40.0).abs() < 0.001);
+        assert_eq!(
+            summary["proof_basis"],
+            "concurrent_signed_sustained_cpu_receipts"
+        );
     }
 }

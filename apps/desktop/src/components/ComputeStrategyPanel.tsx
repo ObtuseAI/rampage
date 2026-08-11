@@ -133,7 +133,7 @@ export function ComputeStrategyPanel() {
           <span>
             <strong>SUSTAINED FABRIC PROOF</strong>
             {state.fabricBenchmark
-              ? `${state.fabricBenchmark.nodes.length} signed machine receipt${state.fabricBenchmark.nodes.length === 1 ? "" : "s"} · ${(state.fabricBenchmark.fabric_hashes_per_second / 1_000_000).toFixed(2)} MH/s · ${state.fabricBenchmark.effective_scale_over_fastest_node.toFixed(2)}× fastest node`
+              ? `${state.fabricBenchmark.nodes.length} signed machine receipt${state.fabricBenchmark.nodes.length === 1 ? "" : "s"} · ${(state.fabricBenchmark.fabric_hashes_per_second / 1_000_000).toFixed(2)} MH/s · +${state.fabricBenchmark.verified_extra_capacity_percent.toFixed(1)}% verified capacity · ${state.fabricBenchmark.time_returned_hours_per_100.toFixed(1)}h returned per 100h of matched work`
               : "Run real bounded CPU work on every connected machine and compare their combined measured rate."}
           </span>
           <button onClick={() => void state.runFabricBenchmark()} disabled={state.fabricBenchmarkPending || !state.connected}>
