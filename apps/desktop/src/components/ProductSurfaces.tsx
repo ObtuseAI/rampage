@@ -12,6 +12,7 @@ function compactEventName(value: string) {
 
 export function WorkSurface() {
   const state = useRampage();
+  const dividend = state.fabricBenchmark;
   const working = state.nodes.filter((node) => node.state === "working").length;
   const ready = state.nodes.filter((node) => node.state === "ready").length;
   const measured = state.nodes.filter((node) => node.topologyConfidence === "measured").length;
@@ -22,8 +23,18 @@ export function WorkSurface() {
       <article><span>Ready now</span><strong>{ready}</strong><small>verified nodes</small></article>
       <article><span>Working</span><strong>{working}</strong><small>active nodes</small></article>
       <article><span>Measured links</span><strong>{measured}/{state.nodes.length}</strong><small>placement confidence</small></article>
-      <article><span>Proof rate</span><strong>{state.fabricBenchmark ? `${(state.fabricBenchmark.fabric_hashes_per_second / 1_000_000).toFixed(1)}M` : "—"}</strong><small>signed hashes/sec</small></article>
+      <article><span>Time returned</span><strong>{dividend ? `${dividend.time_returned_hours_per_100.toFixed(1)}h` : "—"}</strong><small>per 100h of matched work</small></article>
     </div>
+    {dividend && <article className="compute-dividend" aria-label="Verified compute dividend">
+      <div className="dividend-lead"><div className="card-icon"><Gauge /></div><div><p className="eyebrow">VERIFIED COMPUTE DIVIDEND</p><h2>{dividend.time_returned_hours_per_100.toFixed(1)} hours returned per 100</h2><p>For fully divisible CPU work matching this proof, your fabric finished the same work in an estimated {dividend.estimated_time_saved_percent.toFixed(1)}% less time than its fastest machine alone.</p></div></div>
+      <div className="dividend-metrics">
+        <div><span>Extra capacity</span><strong>+{dividend.verified_extra_capacity_percent.toFixed(1)}%</strong></div>
+        <div><span>Effective scale</span><strong>{dividend.effective_scale_over_fastest_node.toFixed(2)}×</strong></div>
+        <div><span>Signed machines</span><strong>{dividend.nodes.length}</strong></div>
+        <div><span>Proof rate</span><strong>{(dividend.fabric_hashes_per_second / 1_000_000).toFixed(2)} MH/s</strong></div>
+      </div>
+      <small><ShieldCheck /> Derived only from concurrent signed sustained CPU receipts. It is not a claim that every workload or the PC itself becomes this much faster.</small>
+    </article>}
     {state.fabricRole === "owner" && <ComputeStrategyPanel />}
     <div className="surface-grid two-column">
       <article className="surface-card featured">

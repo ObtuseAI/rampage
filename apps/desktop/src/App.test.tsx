@@ -168,6 +168,34 @@ test("shows automatic local AI qualification and the sustained fabric proof", ()
   expect(screen.getByRole("button", { name: "Prove the fabric" })).toBeEnabled();
 });
 
+test("turns signed benchmark receipts into a bounded compute dividend", () => {
+  useRampage.setState({
+    fabricBenchmark: {
+      schema: "rampage.fabric-benchmark-result.v1",
+      set_id: "set-1",
+      status: "succeeded",
+      nodes: [
+        { node_id: "main", name: "Main", receipt_id: "receipt-1", lanes: 4, total_hashes: 2_000_000, elapsed_ms: 50, hashes_per_second: 60_000_000, result_digest: `sha256:${"a".repeat(64)}` },
+        { node_id: "laptop", name: "Laptop", receipt_id: "receipt-2", lanes: 4, total_hashes: 2_000_000, elapsed_ms: 75, hashes_per_second: 40_000_000, result_digest: `sha256:${"b".repeat(64)}` },
+      ],
+      fabric_hashes_per_second: 100_000_000,
+      fastest_node_hashes_per_second: 60_000_000,
+      effective_scale_over_fastest_node: 1.666666,
+      verified_extra_capacity_percent: 66.6666,
+      estimated_time_saved_percent: 40,
+      time_returned_hours_per_100: 40,
+      proof_basis: "concurrent_signed_sustained_cpu_receipts",
+      applicability: "matching_fully_divisible_cpu_work_only",
+      all_results_signed: true,
+    },
+  });
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Work" }));
+  expect(screen.getByRole("heading", { name: "40.0 hours returned per 100" })).toBeVisible();
+  expect(screen.getByText(/not a claim that every workload or the PC itself becomes this much faster/i)).toBeVisible();
+  expect(screen.getByText(/\+66.7% verified capacity/i)).toBeVisible();
+});
+
 test("exposes remote control only for an explicitly capable paired worker", () => {
   const laptop = useRampage.getState().nodes.find((node) => node.id === "laptop")!;
   useRampage.setState({

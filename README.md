@@ -28,6 +28,7 @@ the authority to run wild.
 
 [**Launch the showcase**](https://obtuseai.github.io/rampage/) ·
 [Architecture](docs/ARCHITECTURE.md) ·
+[Pioneer architecture 2026](docs/PIONEER_RESEARCH_2026.md) ·
 [Universal fabric blueprint](docs/UNIVERSAL_FABRIC_BLUEPRINT.md) ·
 [Easy pairing](docs/PAIRING.md) ·
 [Security](SECURITY.md) ·
@@ -95,7 +96,7 @@ admitted-work loop so a slow probe cannot trigger a reconnect cycle.
 | Storage fabric | Encrypted chunked CAS, flushed restart-resumable QUIC frames, full-content possession proofs, corruption quarantine, budgeted independent repair, staging, and retrieval |
 | Real AI workload | OpenAI, Anthropic Messages, and OpenRouter-style text requests crossed authenticated QUIC to a worker's loopback Ollama, streamed back, and ended in a transcript-matched signed receipt |
 | Automatic local AI | Windows bootstrap detects or installs the pinned Ollama runtime, pulls the exact 2.5 GB `qwen3:4b` artifact, verifies its complete SHA-256 digest, and advertises it without an agent restart |
-| Signed fabric benchmark | One bounded CPU grant per capable live node; deterministic SHA-256 chains; node-pinned placement; signed receipts; aggregate and scale-over-fastest results in the desktop |
+| Signed fabric benchmark | One bounded CPU grant per capable live node; deterministic SHA-256 chains; node-pinned placement; signed receipts; aggregate rate, verified extra capacity, and scoped time-returned Compute Dividend in the desktop |
 | Universal capability contract | Signed offers advertise exact workload domain, adapter, operation, execution pattern, isolation, runtime digest, and qualification status; candidate profiles grant no authority |
 | Autonomous self-scan | Stable evidence digests cover routes, links, failures, denials, thermal/battery pressure, capability gaps, idle capacity, and protected-artifact replication |
 | Compute Strategy | Outcome-first Automatic, Biggest AI, Fastest AI, More Work, and Protect This PC placement previews with exact capacity and qualification blockers |

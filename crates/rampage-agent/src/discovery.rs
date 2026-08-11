@@ -11,7 +11,9 @@ use std::{
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
-use sysinfo::{Disks, System};
+use sysinfo::{
+    CpuRefreshKind, Disks, MINIMUM_CPU_UPDATE_INTERVAL, MemoryRefreshKind, RefreshKind, System,
+};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -35,8 +37,11 @@ struct NvidiaGpu {
 }
 
 pub fn discover(mut labels: BTreeMap<String, String>, data_dir: &Path) -> DiscoverySnapshot {
-    let mut system = System::new_all();
-    system.refresh_all();
+    // Process inventory is one of sysinfo's most expensive Windows refreshes and Rampage does not
+    // use it for a capability offer. Keep startup bounded to the resource classes we advertise.
+    let mut system = System::new_with_specifics(resource_refresh_kind());
+    std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
+    system.refresh_cpu_usage();
     let owner_idle = system.global_cpu_usage() < 20.0;
     let mut resources = vec![
         ResourceQuantityV1 {
@@ -119,6 +124,12 @@ pub fn discover(mut labels: BTreeMap<String, String>, data_dir: &Path) -> Discov
         thermal_headroom_percent,
         owner_idle,
     }
+}
+
+fn resource_refresh_kind() -> RefreshKind {
+    RefreshKind::nothing()
+        .with_memory(MemoryRefreshKind::nothing().with_ram())
+        .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
 }
 
 pub fn ollama_available(base_url: &str) -> bool {
@@ -595,6 +606,14 @@ fn power_status() -> (bool, Option<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_resource_probe_never_enumerates_processes() {
+        let refresh = resource_refresh_kind();
+        assert!(refresh.processes().is_none());
+        assert!(refresh.memory().is_some());
+        assert!(refresh.cpu().is_some());
+    }
 
     #[test]
     fn parses_nvidia_inventory_without_guessing_missing_rows() {

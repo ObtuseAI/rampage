@@ -95,6 +95,11 @@ export interface FabricBenchmarkResult {
   fabric_hashes_per_second: number;
   fastest_node_hashes_per_second: number;
   effective_scale_over_fastest_node: number;
+  verified_extra_capacity_percent: number;
+  estimated_time_saved_percent: number;
+  time_returned_hours_per_100: number;
+  proof_basis: "concurrent_signed_sustained_cpu_receipts";
+  applicability: "matching_fully_divisible_cpu_work_only";
   all_results_signed: true;
 }
 
