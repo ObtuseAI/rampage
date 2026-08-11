@@ -146,7 +146,7 @@ try {
             $headers = @{ 'x-rampage-token' = $token }
             $nodes = Invoke-RestMethod "$controllerBase/v1/nodes" -Headers $headers
             $offers = Invoke-RestMethod "$controllerBase/v1/offers" -Headers $headers
-            $ownerOffer = @($offers | Where-Object { $_.mesh_endpoint.signature } | Select-Object -First 1)
+            $ownerOffer = @($offers | Where-Object { $_.signature } | Select-Object -First 1)
             if ($nodes.Count -ge 1 -and $offers.Count -ge 1 -and $ownerOffer.Count -eq 1 -and
                 $intelligence.status -eq 'ready') { break }
         } catch {
@@ -177,7 +177,7 @@ try {
             $recoveredOffer = $offers | Where-Object {
                 "$($_.node_id)" -eq $ownerNodeId -and "$($_.offer_id)" -ne $initialOfferId
             } | Select-Object -First 1
-            if ($replacement -and $recoveredOffer -and $recoveredOffer.mesh_endpoint.signature) {
+            if ($replacement -and $recoveredOffer -and $recoveredOffer.signature) {
                 $agentRestarted = $true
                 break
             }
@@ -212,7 +212,7 @@ try {
         mesh_endpoint_id = $health.mesh_endpoint_id
         nodes = $nodes.Count
         offers = $offers.Count
-        owner_mesh_endpoint = $true
+        owner_signed_loopback_offer = $true
         owner_agent_restart_recovery = $agentRestarted
         close_to_tray = $true
         clean_explicit_exit = $true
