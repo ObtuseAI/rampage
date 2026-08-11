@@ -297,9 +297,12 @@ fn main() -> anyhow::Result<()> {
         let (execution_tx, execution_rx) =
             std::sync::mpsc::channel::<anyhow::Result<ExecutionReceiptV1>>();
         let (capability_tx, capability_rx) = std::sync::mpsc::channel::<ResourceOfferV1>();
+        let (link_probe_tx, link_probe_rx) =
+            std::sync::mpsc::channel::<Result<Option<LinkBenchmarkV1>, String>>();
         let receipt_outbox = args.key_file.with_extension("receipt.json");
         let mut work_in_flight = false;
         let mut capability_refresh_in_flight = false;
+        let mut link_probe_in_flight = false;
         let mut ready_announced = false;
         let mut reconnect_delay = std::time::Duration::from_secs(1);
         let mut next_offer_at = Instant::now();
@@ -315,6 +318,24 @@ fn main() -> anyhow::Result<()> {
                 offer.model_runtimes = refreshed.model_runtimes;
                 offer.workload_capabilities = refreshed.workload_capabilities;
                 capability_refresh_in_flight = false;
+            }
+            if let Ok(result) = link_probe_rx.try_recv() {
+                link_probe_in_flight = false;
+                match result {
+                    Ok(benchmark) => {
+                        diagnostic_worker_phase(&data_dir, "link.measured");
+                        offer.link_benchmark = benchmark;
+                        next_link_probe_at = Instant::now() + std::time::Duration::from_secs(60);
+                    }
+                    Err(error) => {
+                        diagnostic_worker_phase(&data_dir, "link.unavailable");
+                        eprintln!(
+                            "link benchmark unavailable; placement will stay conservative: {error}"
+                        );
+                        offer.link_benchmark = None;
+                        next_link_probe_at = Instant::now() + std::time::Duration::from_secs(30);
+                    }
+                }
             }
             if !capability_refresh_in_flight && Instant::now() >= next_capability_refresh_at {
                 diagnostic_worker_phase(&data_dir, "capability_refresh.spawn");
@@ -467,24 +488,20 @@ fn main() -> anyhow::Result<()> {
                 benchmark_expires_at,
                 offer.expires_at,
             );
-            if !work_in_flight && link_probe_is_due {
+            if !work_in_flight && !link_probe_in_flight && link_probe_is_due {
                 diagnostic_worker_phase(&data_dir, "link.probe");
                 let observed_at = transport.controller_now();
-                match transport.measure_link(node_id, observed_at) {
-                    Ok(benchmark) => {
-                        diagnostic_worker_phase(&data_dir, "link.measured");
-                        offer.link_benchmark = benchmark;
-                        next_link_probe_at = Instant::now() + std::time::Duration::from_secs(60);
-                    }
-                    Err(error) => {
-                        diagnostic_worker_phase(&data_dir, "link.unavailable");
-                        eprintln!(
-                            "link benchmark unavailable; placement will stay conservative: {error}"
-                        );
-                        offer.link_benchmark = None;
-                        next_link_probe_at = Instant::now() + std::time::Duration::from_secs(30);
-                    }
-                }
+                let probe_transport = transport.clone();
+                let link_probe_tx = link_probe_tx.clone();
+                std::thread::Builder::new()
+                    .name("rampage-link-probe".into())
+                    .spawn(move || {
+                        let result = probe_transport
+                            .measure_link(node_id, observed_at)
+                            .map_err(|error| error.to_string());
+                        let _ = link_probe_tx.send(result);
+                    })?;
+                link_probe_in_flight = true;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
@@ -647,17 +664,19 @@ fn load_or_create_key(path: &Path) -> anyhow::Result<SigningKey> {
     )?))
 }
 
+#[derive(Clone)]
 enum ControllerTransport {
     Http { base: String, token: String },
     Mesh(MeshController),
 }
 
+#[derive(Clone)]
 struct MeshController {
-    runtime: tokio::runtime::Runtime,
+    runtime: std::sync::Arc<tokio::runtime::Runtime>,
     endpoint: iroh::Endpoint,
     controller_endpoint_id: String,
     destination: iroh::EndpointAddr,
-    controller_clock_offset: std::sync::Mutex<Duration>,
+    controller_clock_offset: std::sync::Arc<std::sync::Mutex<Duration>>,
 }
 
 enum RemoteController<'a> {
@@ -747,7 +766,7 @@ impl ControllerTransport {
         };
         let destination = select_controller_destination(aggregate, candidates);
         let mesh_config = mesh_config_for_controller(mesh_record)?;
-        let runtime = tokio::runtime::Runtime::new()?;
+        let runtime = std::sync::Arc::new(tokio::runtime::Runtime::new()?);
         let endpoint = runtime.block_on(rampage_mesh::bind_endpoint(
             signing_key.to_bytes(),
             &mesh_config,
@@ -770,7 +789,7 @@ impl ControllerTransport {
             endpoint,
             controller_endpoint_id: mesh_record.endpoint_id.clone(),
             destination,
-            controller_clock_offset: std::sync::Mutex::new(Duration::zero()),
+            controller_clock_offset: std::sync::Arc::new(std::sync::Mutex::new(Duration::zero())),
         };
         if let Err(error) = mesh.request("GET", "/health", None) {
             eprintln!(
@@ -2843,11 +2862,11 @@ mod tests {
             }],
         );
         let controller = MeshController {
-            runtime: client_runtime,
+            runtime: std::sync::Arc::new(client_runtime),
             endpoint: client,
             controller_endpoint_id: server.id().to_string(),
             destination,
-            controller_clock_offset: std::sync::Mutex::new(Duration::zero()),
+            controller_clock_offset: std::sync::Arc::new(std::sync::Mutex::new(Duration::zero())),
         };
         let response = controller.request("GET", "/health", None).unwrap();
         assert_eq!(response.status, 200);
