@@ -508,6 +508,13 @@ pub struct AvailabilityV1 {
     pub owner_idle: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservedLinkPathV1 {
+    Direct,
+    OwnerRelay,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkBenchmarkV1 {
@@ -521,6 +528,8 @@ pub struct LinkBenchmarkV1 {
     pub transfer_bytes: u64,
     pub samples: u16,
     pub transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_path: Option<ObservedLinkPathV1>,
 }
 
 impl LinkBenchmarkV1 {
@@ -543,6 +552,261 @@ impl LinkBenchmarkV1 {
             && self.samples >= 3
             && self.transport == "authenticated_quic"
     }
+}
+
+/// One node's contribution to a completed, concurrently executed fabric benchmark.
+///
+/// The execution receipt itself remains the authority-bearing evidence. This projection only
+/// carries the stable identifiers and measured values needed to compare fabric performance over
+/// time without replaying every job event into the desktop application.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FabricBenchmarkNodeV1 {
+    pub job_id: Uuid,
+    pub node_id: Uuid,
+    pub name: String,
+    pub receipt_id: Uuid,
+    pub lanes: u64,
+    pub total_hashes: u64,
+    pub elapsed_ms: f64,
+    pub hashes_per_second: u64,
+    pub result_digest: String,
+}
+
+/// A proof-bounded measurement of useful, divisible CPU throughput across the live fabric.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FabricBenchmarkResultV1 {
+    pub schema: String,
+    pub set_id: Uuid,
+    pub status: String,
+    pub nodes: Vec<FabricBenchmarkNodeV1>,
+    pub fabric_hashes_per_second: u64,
+    pub fastest_node_hashes_per_second: u64,
+    pub effective_scale_over_fastest_node: f64,
+    pub verified_extra_capacity_percent: f64,
+    pub estimated_time_saved_percent: f64,
+    pub time_returned_hours_per_100: f64,
+    pub proof_basis: String,
+    pub applicability: String,
+    pub all_results_signed: bool,
+}
+
+impl FabricBenchmarkResultV1 {
+    pub const SCHEMA: &'static str = "rampage.fabric-benchmark-result.v1";
+    pub const PROOF_BASIS: &'static str = "concurrent_signed_sustained_cpu_receipts";
+    pub const APPLICABILITY: &'static str = "matching_fully_divisible_cpu_work_only";
+
+    /// Recompute every derived claim so malformed or exaggerated history cannot enter the ledger.
+    pub fn is_internally_consistent(&self) -> bool {
+        if self.schema != Self::SCHEMA
+            || self.set_id == Uuid::nil()
+            || self.status != "succeeded"
+            || self.nodes.is_empty()
+            || self.nodes.len() > MAX_SHARDS_PER_SET
+            || self.fabric_hashes_per_second == 0
+            || self.fastest_node_hashes_per_second == 0
+            || self.proof_basis != Self::PROOF_BASIS
+            || self.applicability != Self::APPLICABILITY
+            || !self.all_results_signed
+        {
+            return false;
+        }
+
+        let mut node_ids = BTreeSet::new();
+        let mut job_ids = BTreeSet::new();
+        let mut receipt_ids = BTreeSet::new();
+        let mut total_rate = 0_u64;
+        let mut fastest_rate = 0_u64;
+        for node in &self.nodes {
+            if node.job_id == Uuid::nil()
+                || node.node_id == Uuid::nil()
+                || !job_ids.insert(node.job_id)
+                || node.receipt_id == Uuid::nil()
+                || !node_ids.insert(node.node_id)
+                || !receipt_ids.insert(node.receipt_id)
+                || node.name.trim().is_empty()
+                || node.name.len() > 80
+                || node.name.chars().any(char::is_control)
+                || node.lanes == 0
+                || node.total_hashes == 0
+                || !node.elapsed_ms.is_finite()
+                || node.elapsed_ms <= 0.0
+                || node.hashes_per_second == 0
+                || !is_sha256_digest(&node.result_digest)
+            {
+                return false;
+            }
+            total_rate = total_rate.saturating_add(node.hashes_per_second);
+            fastest_rate = fastest_rate.max(node.hashes_per_second);
+        }
+
+        let expected_scale = total_rate as f64 / fastest_rate.max(1) as f64;
+        let expected_extra = (expected_scale - 1.0).max(0.0) * 100.0;
+        let expected_saved = (1.0 - (1.0 / expected_scale)).max(0.0) * 100.0;
+        total_rate == self.fabric_hashes_per_second
+            && fastest_rate == self.fastest_node_hashes_per_second
+            && approximately_equal(self.effective_scale_over_fastest_node, expected_scale)
+            && approximately_equal(self.verified_extra_capacity_percent, expected_extra)
+            && approximately_equal(self.estimated_time_saved_percent, expected_saved)
+            && approximately_equal(self.time_returned_hours_per_100, expected_saved)
+    }
+}
+
+/// Ledger metadata and comparison fields for one durable Compute Dividend measurement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FabricDividendRecordV1 {
+    pub schema: String,
+    pub ledger_sequence: u64,
+    pub recorded_at: DateTime<Utc>,
+    pub result: FabricBenchmarkResultV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_effective_scale: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_change_percent: Option<f64>,
+}
+
+impl FabricDividendRecordV1 {
+    pub const SCHEMA: &'static str = "rampage.fabric-dividend-record.v1";
+}
+
+/// A small set of intent classes with conservative, built-in scheduling defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkloadClassV1 {
+    InteractiveAi,
+    BatchAi,
+    BuildTest,
+    RenderTranscode,
+    ArtifactMovement,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BreakEvenRequestV1 {
+    pub schema: String,
+    pub workload_class: WorkloadClassV1,
+    /// Measured or conservatively estimated duration on the fastest participating node.
+    pub fastest_node_compute_ms: u64,
+    pub input_bytes: u64,
+    pub output_bytes: u64,
+    pub startup_ms: u64,
+    pub restart_tolerant: bool,
+    pub minimum_gain_percent: f64,
+}
+
+impl BreakEvenRequestV1 {
+    pub const SCHEMA: &'static str = "rampage.break-even-request.v1";
+
+    pub fn is_valid(&self) -> bool {
+        self.schema == Self::SCHEMA
+            && self.fastest_node_compute_ms > 0
+            && self.fastest_node_compute_ms <= 7 * 24 * 60 * 60 * 1_000
+            && self.input_bytes <= MAX_MODEL_SESSION_BYTES
+            && self.output_bytes <= MAX_MODEL_SESSION_BYTES
+            && self.startup_ms <= 60 * 60 * 1_000
+            && self.minimum_gain_percent.is_finite()
+            && (0.0..=90.0).contains(&self.minimum_gain_percent)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BreakEvenDecisionV1 {
+    UseFabric,
+    StayOnFastestNode,
+    InsufficientEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BreakEvenPlanV1 {
+    pub schema: String,
+    pub decision: BreakEvenDecisionV1,
+    pub workload_class: WorkloadClassV1,
+    pub baseline_node_id: Option<Uuid>,
+    pub selected_node_ids: Vec<Uuid>,
+    pub p90_baseline_ms: u64,
+    pub p90_fabric_ms: Option<u64>,
+    pub estimated_gain_percent: Option<f64>,
+    pub required_gain_percent: f64,
+    pub evidence_set_id: Option<Uuid>,
+    pub evidence_age_seconds: Option<u64>,
+    pub topology_confidence: String,
+    pub reason: String,
+    pub claim_boundary: String,
+}
+
+impl BreakEvenPlanV1 {
+    pub const SCHEMA: &'static str = "rampage.break-even-plan.v1";
+    pub const CLAIM_BOUNDARY: &'static str =
+        "projection_for_matching_divisible_cpu_work_not_a_general_speed_guarantee";
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkPathKindV1 {
+    ControllerLocal,
+    DirectMeasured,
+    OwnerRelayMeasured,
+    DirectCandidate,
+    OwnerRelayBootstrap,
+    Recovering,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrafficClassV1 {
+    AuthorityControl,
+    InteractiveAi,
+    RemoteMedia,
+    Artifact,
+    BulkBackground,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrafficAdmissionV1 {
+    pub traffic_class: TrafficClassV1,
+    pub admitted: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkNodeAutopilotV1 {
+    pub node_id: Uuid,
+    pub preferred_path: NetworkPathKindV1,
+    pub evidence: String,
+    pub direct_candidates: usize,
+    pub owner_relays: usize,
+    pub rtt_millis_p50: Option<f64>,
+    pub uplink_mbps: Option<f64>,
+    pub downlink_mbps: Option<f64>,
+    pub link_expires_at: Option<DateTime<Utc>>,
+    pub traffic: Vec<TrafficAdmissionV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkAutopilotStatusV1 {
+    pub schema: String,
+    pub generated_at: DateTime<Utc>,
+    pub mode: String,
+    pub nodes: Vec<NetworkNodeAutopilotV1>,
+    pub policy: String,
+}
+
+impl NetworkAutopilotStatusV1 {
+    pub const SCHEMA: &'static str = "rampage.network-autopilot-status.v1";
+    pub const POLICY: &'static str = "authority_first_then_measured_interactive_and_bulk_admission";
+}
+
+fn approximately_equal(actual: f64, expected: f64) -> bool {
+    actual.is_finite()
+        && expected.is_finite()
+        && (actual - expected).abs() <= expected.abs().max(1.0) * 1e-9
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1692,6 +1956,7 @@ mod tests {
             transfer_bytes: LINK_BENCHMARK_TRANSFER_BYTES,
             samples: 3,
             transport: "authenticated_quic".into(),
+            observed_path: None,
         };
         assert!(benchmark.is_valid_for(
             "controller-a",
@@ -2046,5 +2311,52 @@ mod tests {
         request.events =
             vec![RemoteInputEventV1::MouseMove { x: 0, y: 0 }; MAX_REMOTE_DESKTOP_INPUT_EVENTS + 1];
         assert!(!request.is_valid_for(node_id, "controller"));
+    }
+
+    #[test]
+    fn fabric_dividend_recomputes_every_claim_from_unique_receipts() {
+        let first = FabricBenchmarkNodeV1 {
+            job_id: Uuid::now_v7(),
+            node_id: Uuid::now_v7(),
+            name: "Main PC".into(),
+            receipt_id: Uuid::now_v7(),
+            lanes: 4,
+            total_hashes: 2_000_000,
+            elapsed_ms: 50.0,
+            hashes_per_second: 60_000,
+            result_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        let second = FabricBenchmarkNodeV1 {
+            job_id: Uuid::now_v7(),
+            node_id: Uuid::now_v7(),
+            name: "Laptop".into(),
+            receipt_id: Uuid::now_v7(),
+            lanes: 4,
+            total_hashes: 2_000_000,
+            elapsed_ms: 50.0,
+            hashes_per_second: 40_000,
+            result_digest: format!("sha256:{}", "b".repeat(64)),
+        };
+        let mut result = FabricBenchmarkResultV1 {
+            schema: FabricBenchmarkResultV1::SCHEMA.into(),
+            set_id: Uuid::now_v7(),
+            status: "succeeded".into(),
+            nodes: vec![first, second],
+            fabric_hashes_per_second: 100_000,
+            fastest_node_hashes_per_second: 60_000,
+            effective_scale_over_fastest_node: 5.0 / 3.0,
+            verified_extra_capacity_percent: 200.0 / 3.0,
+            estimated_time_saved_percent: 40.0,
+            time_returned_hours_per_100: 40.0,
+            proof_basis: FabricBenchmarkResultV1::PROOF_BASIS.into(),
+            applicability: FabricBenchmarkResultV1::APPLICABILITY.into(),
+            all_results_signed: true,
+        };
+        assert!(result.is_internally_consistent());
+        result.fabric_hashes_per_second += 1;
+        assert!(!result.is_internally_consistent());
+        result.fabric_hashes_per_second -= 1;
+        result.nodes[1].receipt_id = result.nodes[0].receipt_id;
+        assert!(!result.is_internally_consistent());
     }
 }

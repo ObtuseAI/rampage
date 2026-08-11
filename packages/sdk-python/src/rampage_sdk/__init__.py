@@ -51,6 +51,22 @@ class RampageClient:
         payload: list[dict[str, Any]] = response.json()
         return payload
 
+    def dividend_history(self, limit: int = 24) -> list[dict[str, Any]]:
+        """Return newest hash-chained Compute Dividend projections in chronological order."""
+        bounded = max(1, min(250, int(limit)))
+        response = self._client.get("/v1/dividends", params={"limit": bounded})
+        response.raise_for_status()
+        payload: list[dict[str, Any]] = response.json()
+        return payload
+
+    def plan_break_even(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Preview a conservative keep-or-distribute decision; no execution authority is issued."""
+        return self._post("/v1/plans/break-even", request)
+
+    def network_autopilot(self) -> dict[str, Any]:
+        """Return measured path and per-traffic-class admission state."""
+        return self._get("/v1/network/autopilot")
+
     def workload_capabilities(self) -> dict[str, Any]:
         """Return operation-exact capabilities from verified live signed offers."""
         return self._get("/v1/workload-capabilities")

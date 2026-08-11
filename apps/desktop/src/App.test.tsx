@@ -47,6 +47,9 @@ beforeEach(() => {
       message: "Checking the automatic local AI runtime.",
     },
     fabricBenchmark: null,
+    dividendHistory: [],
+    breakEvenPlan: null,
+    networkAutopilot: null,
     fabricBenchmarkPending: false,
     fabricRole: "owner",
     remoteAssistStatus: {
@@ -175,8 +178,8 @@ test("turns signed benchmark receipts into a bounded compute dividend", () => {
       set_id: "set-1",
       status: "succeeded",
       nodes: [
-        { node_id: "main", name: "Main", receipt_id: "receipt-1", lanes: 4, total_hashes: 2_000_000, elapsed_ms: 50, hashes_per_second: 60_000_000, result_digest: `sha256:${"a".repeat(64)}` },
-        { node_id: "laptop", name: "Laptop", receipt_id: "receipt-2", lanes: 4, total_hashes: 2_000_000, elapsed_ms: 75, hashes_per_second: 40_000_000, result_digest: `sha256:${"b".repeat(64)}` },
+        { job_id: "job-1", node_id: "main", name: "Main", receipt_id: "receipt-1", lanes: 4, total_hashes: 2_000_000, elapsed_ms: 50, hashes_per_second: 60_000_000, result_digest: `sha256:${"a".repeat(64)}` },
+        { job_id: "job-2", node_id: "laptop", name: "Laptop", receipt_id: "receipt-2", lanes: 4, total_hashes: 2_000_000, elapsed_ms: 75, hashes_per_second: 40_000_000, result_digest: `sha256:${"b".repeat(64)}` },
       ],
       fabric_hashes_per_second: 100_000_000,
       fastest_node_hashes_per_second: 60_000_000,
@@ -194,6 +197,51 @@ test("turns signed benchmark receipts into a bounded compute dividend", () => {
   expect(screen.getByRole("heading", { name: "40.0 hours returned per 100" })).toBeVisible();
   expect(screen.getByText(/not a claim that every workload or the PC itself becomes this much faster/i)).toBeVisible();
   expect(screen.getByText(/\+66.7% verified capacity/i)).toBeVisible();
+});
+
+test("shows fail-closed break-even and network autopilot decisions", () => {
+  useRampage.setState({
+    breakEvenPlan: {
+      schema: "rampage.break-even-plan.v1",
+      decision: "stay_on_fastest_node",
+      workload_class: "build_test",
+      baseline_node_id: "main",
+      selected_node_ids: ["main"],
+      p90_baseline_ms: 60_000,
+      p90_fabric_ms: 62_000,
+      estimated_gain_percent: -3.3,
+      required_gain_percent: 12,
+      evidence_set_id: "set-1",
+      evidence_age_seconds: 30,
+      topology_confidence: "fresh_signed_compute_and_link_evidence",
+      reason: "Distribution projects -3.3% gain, below the 12.0% safety threshold; stay on the fastest node.",
+      claim_boundary: "projection_for_matching_divisible_cpu_work_not_a_general_speed_guarantee",
+    },
+    networkAutopilot: {
+      schema: "rampage.network-autopilot-status.v1",
+      generated_at: new Date().toISOString(),
+      mode: "automatic_evidence_gated",
+      policy: "authority_first_then_measured_interactive_and_bulk_admission",
+      nodes: [{
+        node_id: "laptop",
+        preferred_path: "owner_relay_bootstrap",
+        evidence: "owner-operated relay retained while direct-path evidence is unavailable",
+        direct_candidates: 1,
+        owner_relays: 1,
+        rtt_millis_p50: null,
+        uplink_mbps: null,
+        downlink_mbps: null,
+        link_expires_at: null,
+        traffic: [{ traffic_class: "authority_control", admitted: true, reason: "authenticated" }],
+      }],
+    },
+  });
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Work" }));
+  expect(screen.getByRole("heading", { name: "Fastest node wins" })).toBeVisible();
+  expect(screen.getByText(/slower or unmeasured distributed plans are refused automatically/i)).toBeVisible();
+  expect(screen.getByText(/0 direct · 1 relay/i)).toBeVisible();
+  expect(screen.getByText(/laptop · owner relay bootstrap/i)).toBeVisible();
 });
 
 test("exposes remote control only for an explicitly capable paired worker", () => {

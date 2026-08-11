@@ -180,6 +180,61 @@ export interface FabricDiagnosticReport {
   }>;
 }
 
+export interface FabricDividendRecord {
+  schema: "rampage.fabric-dividend-record.v1";
+  ledger_sequence: number;
+  recorded_at: string;
+  result: {
+    schema: "rampage.fabric-benchmark-result.v1";
+    set_id: string;
+    nodes: Array<{ node_id: string; hashes_per_second: number; result_digest: string }>;
+    effective_scale_over_fastest_node: number;
+    verified_extra_capacity_percent: number;
+    estimated_time_saved_percent: number;
+    time_returned_hours_per_100: number;
+    all_results_signed: true;
+  };
+  previous_effective_scale?: number;
+  scale_change_percent?: number;
+}
+
+export interface BreakEvenRequest {
+  schema: "rampage.break-even-request.v1";
+  workload_class: "interactive_ai" | "batch_ai" | "build_test" | "render_transcode" | "artifact_movement";
+  fastest_node_compute_ms: number;
+  input_bytes: number;
+  output_bytes: number;
+  startup_ms: number;
+  restart_tolerant: boolean;
+  minimum_gain_percent: number;
+}
+
+export interface BreakEvenPlan {
+  schema: "rampage.break-even-plan.v1";
+  decision: "use_fabric" | "stay_on_fastest_node" | "insufficient_evidence";
+  selected_node_ids: string[];
+  p90_baseline_ms: number;
+  p90_fabric_ms: number | null;
+  estimated_gain_percent: number | null;
+  required_gain_percent: number;
+  topology_confidence: string;
+  reason: string;
+  claim_boundary: string;
+}
+
+export interface NetworkAutopilotStatus {
+  schema: "rampage.network-autopilot-status.v1";
+  generated_at: string;
+  mode: "automatic_evidence_gated";
+  nodes: Array<{
+    node_id: string;
+    preferred_path: "controller_local" | "direct_measured" | "owner_relay_measured" | "direct_candidate" | "owner_relay_bootstrap" | "recovering";
+    evidence: string;
+    traffic: Array<{ traffic_class: string; admitted: boolean; reason: string }>;
+  }>;
+  policy: string;
+}
+
 export interface RelayAccessManifest {
   schema: "rampage.relay-access-manifest.v1";
   fabric_id: string;
@@ -463,6 +518,19 @@ export class RampageClient {
 
   topology(): Promise<ResourceOffer[]> {
     return this.request("/v1/offers");
+  }
+
+  dividendHistory(limit = 24): Promise<FabricDividendRecord[]> {
+    const bounded = Math.max(1, Math.min(250, Math.trunc(limit)));
+    return this.request(`/v1/dividends?limit=${bounded}`);
+  }
+
+  planBreakEven(request: BreakEvenRequest): Promise<BreakEvenPlan> {
+    return this.request("/v1/plans/break-even", this.json(request));
+  }
+
+  networkAutopilot(): Promise<NetworkAutopilotStatus> {
+    return this.request("/v1/network/autopilot");
   }
 
   workloadCapabilities(): Promise<WorkloadCapabilityInventory> {

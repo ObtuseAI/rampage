@@ -12,7 +12,7 @@ use rampage_protocol::{
     LINK_BENCHMARK_TRANSFER_BYTES, LinkBenchmarkV1, MAX_MODEL_OUTPUT_BYTES, MeshControlRequestV1,
     MeshEndpointRecordV1, ModelExecutionReceiptV1, ModelInvocationFrameKind,
     ModelInvocationFrameV1, ModelInvocationRequestV1, ModelUsageV1, NodeIdentityV1,
-    RemoteDesktopResponseV1, ResourceOfferV1, StorageClass, WorkClaimV1,
+    ObservedLinkPathV1, RemoteDesktopResponseV1, ResourceOfferV1, StorageClass, WorkClaimV1,
 };
 use rand::{TryRng as _, rngs::SysRng};
 use sha2::{Digest, Sha256};
@@ -918,6 +918,7 @@ impl ControllerTransport {
             transfer_bytes: LINK_BENCHMARK_TRANSFER_BYTES,
             samples: 3,
             transport: "authenticated_quic".into(),
+            observed_path: mesh.observed_link_path(),
         }))
     }
 
@@ -1912,6 +1913,24 @@ fn sync_parent_directory(_path: &std::path::Path) -> std::io::Result<()> {
 }
 
 impl MeshController {
+    fn observed_link_path(&self) -> Option<ObservedLinkPathV1> {
+        let info = self
+            .runtime
+            .block_on(self.endpoint.remote_info(self.destination.id))?;
+        let mut relay_active = false;
+        for address in info.addrs() {
+            if !matches!(address.usage(), iroh::endpoint::TransportAddrUsage::Active) {
+                continue;
+            }
+            match address.addr() {
+                iroh::TransportAddr::Ip(_) => return Some(ObservedLinkPathV1::Direct),
+                iroh::TransportAddr::Relay(_) => relay_active = true,
+                _ => {}
+            }
+        }
+        relay_active.then_some(ObservedLinkPathV1::OwnerRelay)
+    }
+
     fn request(
         &self,
         method: &str,
@@ -2055,17 +2074,28 @@ fn select_controller_destination_for(
     candidates: Vec<iroh::EndpointAddr>,
     local_networks: &[LocalIpv4Network],
 ) -> iroh::EndpointAddr {
-    candidates
-        .into_iter()
-        .find(|candidate| {
-            candidate.ip_addrs().any(|address| match address.ip() {
-                IpAddr::V4(remote) => local_networks
-                    .iter()
-                    .any(|local| ipv4_is_same_subnet(local.ip, remote, local.netmask)),
-                IpAddr::V6(_) => false,
-            })
+    let same_lan = candidates.into_iter().find(|candidate| {
+        candidate.ip_addrs().any(|address| match address.ip() {
+            IpAddr::V4(remote) => local_networks
+                .iter()
+                .any(|local| ipv4_is_same_subnet(local.ip, remote, local.netmask)),
+            IpAddr::V6(_) => false,
         })
-        .unwrap_or(aggregate)
+    });
+    let Some(mut preferred) = same_lan else {
+        return aggregate;
+    };
+    // Keep the precisely selected same-LAN route, but never throw away an owner-operated relay.
+    // Iroh can establish through the relay when direct NAT traversal is not ready and upgrade to
+    // the authenticated direct candidate without changing the pinned endpoint identity.
+    preferred.addrs.extend(
+        aggregate
+            .addrs
+            .iter()
+            .filter(|address| matches!(address, iroh::TransportAddr::Relay(_)))
+            .cloned(),
+    );
+    preferred
 }
 
 fn ipv4_is_same_subnet(local: Ipv4Addr, remote: Ipv4Addr, netmask: Ipv4Addr) -> bool {
@@ -2736,6 +2766,7 @@ mod tests {
                 iroh::TransportAddr::Ip("100.98.141.113:58899".parse().unwrap()),
                 iroh::TransportAddr::Ip("172.28.48.1:58899".parse().unwrap()),
                 iroh::TransportAddr::Ip("192.168.86.32:58899".parse().unwrap()),
+                iroh::TransportAddr::Relay("https://relay.example.test".parse().unwrap()),
             ],
         );
         let selected = select_controller_destination_for(
@@ -2760,6 +2791,8 @@ mod tests {
             selected.ip_addrs().next().unwrap().to_string(),
             "192.168.86.32:58899"
         );
+        assert_eq!(selected.ip_addrs().count(), 1);
+        assert_eq!(selected.relay_urls().count(), 1);
     }
 
     #[test]

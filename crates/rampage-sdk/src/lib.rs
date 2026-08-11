@@ -3,8 +3,9 @@
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use rampage_protocol::{
-    ArtifactRefV1, CapabilityLeaseV1, EnrollmentInviteV1, ExecutionReceiptV1, JobSpecV1,
-    ModelSessionRequestV1, NodeIdentityV1, ResourceOfferV1, StorageClass,
+    ArtifactRefV1, BreakEvenPlanV1, BreakEvenRequestV1, CapabilityLeaseV1, EnrollmentInviteV1,
+    ExecutionReceiptV1, FabricDividendRecordV1, JobSpecV1, ModelSessionRequestV1,
+    NetworkAutopilotStatusV1, NodeIdentityV1, ResourceOfferV1, StorageClass,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -71,6 +72,25 @@ impl RampageClient {
 
     pub async fn topology(&self) -> anyhow::Result<Vec<ResourceOfferV1>> {
         self.get("/v1/offers").await
+    }
+
+    pub async fn dividend_history(
+        &self,
+        limit: u16,
+    ) -> anyhow::Result<Vec<FabricDividendRecordV1>> {
+        self.get(&format!("/v1/dividends?limit={}", limit.clamp(1, 250)))
+            .await
+    }
+
+    pub async fn plan_break_even(
+        &self,
+        request: &BreakEvenRequestV1,
+    ) -> anyhow::Result<BreakEvenPlanV1> {
+        self.post("/v1/plans/break-even", request).await
+    }
+
+    pub async fn network_autopilot(&self) -> anyhow::Result<NetworkAutopilotStatusV1> {
+        self.get("/v1/network/autopilot").await
     }
 
     pub async fn plan_model_session(

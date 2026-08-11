@@ -39,6 +39,33 @@ describe("RampageClient", () => {
     vi.unstubAllGlobals();
   });
 
+  it("exposes durable dividends and proposal-only network planning", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ schema: "rampage.break-even-plan.v1", decision: "insufficient_evidence" }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ schema: "rampage.network-autopilot-status.v1", mode: "automatic_evidence_gated", nodes: [] }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new RampageClient(undefined, "local-token");
+    expect(await client.dividendHistory(999)).toEqual([]);
+    await client.planBreakEven({
+      schema: "rampage.break-even-request.v1",
+      workload_class: "build_test",
+      fastest_node_compute_ms: 60_000,
+      input_bytes: 0,
+      output_bytes: 0,
+      startup_ms: 0,
+      restart_tolerant: true,
+      minimum_gain_percent: 12,
+    });
+    expect((await client.networkAutopilot()).mode).toBe("automatic_evidence_gated");
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "http://127.0.0.1:47831/v1/dividends?limit=250",
+      "http://127.0.0.1:47831/v1/plans/break-even",
+      "http://127.0.0.1:47831/v1/network/autopilot",
+    ]);
+    vi.unstubAllGlobals();
+  });
+
   it("revokes one exact enrolled identity with the required confirmation", async () => {
     const nodeId = "0198f1aa-9f18-7dc3-81a3-d78f22efb662";
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
