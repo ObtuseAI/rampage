@@ -1706,6 +1706,7 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
             let mut agent_args = vec![
                 "--controller".into(),
                 agent_controller.clone(),
+                "--local-controller".into(),
                 "--key-file".into(),
                 key_file.to_string_lossy().into_owned(),
             ];

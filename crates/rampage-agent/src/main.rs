@@ -55,6 +55,10 @@ struct Args {
     invite_file: Option<PathBuf>,
     #[arg(long, default_value = "http://127.0.0.1:47831")]
     controller: String,
+    /// Use the authenticated loopback controller even when this identity has a historical mesh pin.
+    /// This is reserved for the owner PC's co-located agent.
+    #[arg(long)]
+    local_controller: bool,
     #[arg(long)]
     register: bool,
     /// Claim and execute one controller-assigned native task, then submit its signed receipt.
@@ -113,7 +117,7 @@ fn main() -> anyhow::Result<()> {
     };
     let enrollment_marker = args.key_file.with_extension("enrolled");
     let controller_pin_file = args.key_file.with_extension("controller-pin.json");
-    let stored_pin = if controller_pin_file.is_file() {
+    let stored_pin = if !args.local_controller && controller_pin_file.is_file() {
         Some(read_json_file_bounded::<PinnedControllerV1>(
             &controller_pin_file,
             64 * 1024,
@@ -137,9 +141,13 @@ fn main() -> anyhow::Result<()> {
         None
     };
     let controller_pin = stored_pin.as_ref().or(migrated_pin.as_ref());
-    let remote_controller = controller_pin
-        .map(RemoteController::Pinned)
-        .or_else(|| invitation.as_ref().map(RemoteController::Invitation));
+    let remote_controller = if args.local_controller {
+        None
+    } else {
+        controller_pin
+            .map(RemoteController::Pinned)
+            .or_else(|| invitation.as_ref().map(RemoteController::Invitation))
+    };
     let identity = NodeIdentityV1 {
         schema: "rampage.node-identity.v1".into(),
         node_id,
