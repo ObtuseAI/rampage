@@ -8,7 +8,10 @@ use std::{
     io::{Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use sysinfo::{Pid, System};
@@ -34,6 +37,9 @@ use winreg::{
 
 #[derive(Default)]
 struct Sidecars(Mutex<Vec<CommandChild>>);
+
+#[derive(Clone, Default)]
+struct FabricLifecycle(Arc<AtomicBool>);
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -164,7 +170,7 @@ fn schedule_diagnostic_exit(app: &AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(delay).await;
-        handle.exit(0);
+        exit_app(&handle);
     });
 }
 
@@ -253,13 +259,12 @@ fn kill_process_tree(child: CommandChild) -> Result<(), String> {
             let _ = process.kill();
         }
     }
-    // Kill the root through the OS snapshot before asking the shell plugin to release it. During
-    // Tauri shutdown the plugin runtime is already winding down, so relying on its channel alone
-    // can strand a direct sidecar such as the controller.
+    // Kill the root through the OS snapshot. Do not call CommandChild::kill afterward: that method
+    // routes through Tauri's async shell channel and can deadlock while the plugin runtime is
+    // winding down. The OS termination plus the bounded PID-exit check below is authoritative.
     if let Some(process) = system.process(Pid::from_u32(child.pid())) {
         let _ = process.kill();
     }
-    let _ = child.kill();
     wait_for_process_exit(&watched, SIDECAR_STOP_TIMEOUT)
 }
 
@@ -286,10 +291,30 @@ fn stop_all_sidecars(app: &AppHandle) -> Result<usize, String> {
         sidecars.drain(..).collect::<Vec<_>>()
     };
     let count = children.len();
+    let mut failures = Vec::new();
     for child in children {
-        kill_process_tree(child)?;
+        if let Err(error) = kill_process_tree(child) {
+            failures.push(error);
+        }
+    }
+    if !failures.is_empty() {
+        return Err(format!(
+            "could not stop every supervised sidecar: {}",
+            failures.join("; ")
+        ));
     }
     Ok(count)
+}
+
+fn exit_app(app: &AppHandle) {
+    // Fence persistent loops and synchronously drain their current children before telling Tauri
+    // to tear down the plugin runtime. Waiting for RunEvent::Exit is too late: by then a command
+    // channel can already be unavailable and a supervised worker may survive the desktop shell.
+    app.state::<FabricLifecycle>()
+        .0
+        .store(true, Ordering::Release);
+    let _ = stop_all_sidecars(app);
+    app.exit(0);
 }
 
 fn runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1125,6 +1150,7 @@ fn persist_remote_invite_at(data_dir: &Path, invitation: &str) -> Result<(), Str
 
 fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(), String> {
     let runtime = app.state::<WorkerRuntime>().inner().clone();
+    let lifecycle = app.state::<FabricLifecycle>().inner().clone();
     if let Ok(mut status) = runtime.0.lock() {
         *status = WorkerRuntimeView {
             state: "starting",
@@ -1139,6 +1165,9 @@ fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(
     tauri::async_runtime::spawn(async move {
         let mut retry_delay = Duration::from_secs(1);
         loop {
+            if lifecycle.0.load(Ordering::Acquire) {
+                return;
+            }
             if !worker_enrollment_exists(&data_dir) || data_dir.join("KILL").is_file() {
                 if let Ok(mut status) = runtime.0.lock() {
                     *status = WorkerRuntimeView {
@@ -1262,6 +1291,9 @@ fn launch_remote_worker(app: &AppHandle, data_dir: &std::path::Path) -> Result<(
             // A naturally terminated child must not remain in the shutdown list: Windows can
             // recycle its PID before Rampage exits, and a stale PID must never target a new process.
             drop(take_sidecar(&handle, agent_pid));
+            if lifecycle.0.load(Ordering::Acquire) {
+                return;
+            }
             if !worker_enrollment_exists(&data_dir) || data_dir.join("KILL").is_file() {
                 continue;
             }
@@ -1670,11 +1702,15 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
         .push(intelligence);
 
     let handle = app.clone();
+    let lifecycle = app.state::<FabricLifecycle>().inner().clone();
     let agent_controller = controller_origin.clone();
     tauri::async_runtime::spawn(async move {
         let client = reqwest::Client::new();
         let mut retry_delay = Duration::from_secs(1);
         loop {
+            if lifecycle.0.load(Ordering::Acquire) {
+                return;
+            }
             let mut ready = false;
             for _ in 0..80 {
                 if client
@@ -1843,6 +1879,9 @@ fn launch_fabric(app: &AppHandle) -> Result<(), String> {
             if let Some(path) = invite_file {
                 let _ = std::fs::remove_file(path);
             }
+            if lifecycle.0.load(Ordering::Acquire) {
+                return;
+            }
             tokio::time::sleep(retry_delay).await;
             retry_delay = (retry_delay * 2).min(Duration::from_secs(10));
         }
@@ -1856,12 +1895,16 @@ fn schedule_remote_assist_indicator(
     role: &'static str,
 ) {
     let handle = app.clone();
+    let lifecycle = app.state::<FabricLifecycle>().inner().clone();
     tauri::async_runtime::spawn(async move {
         let Ok(data_dir) = runtime_dir(&handle) else {
             return;
         };
         let mut was_active = false;
         loop {
+            if lifecycle.0.load(Ordering::Acquire) {
+                return;
+            }
             let active =
                 remote_assist_enabled_at(&data_dir) && remote_assist_active_at(&data_dir).is_some();
             if active != was_active {
@@ -1942,7 +1985,7 @@ fn install_desktop_lifecycle(app: &tauri::App) -> Result<(), Box<dyn std::error:
                 let _ = local_stop(app.clone());
                 show_main_window(app);
             }
-            "quit" => app.exit(0),
+            "quit" => exit_app(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -1995,6 +2038,7 @@ pub fn run() {
             }
         })
         .manage(Sidecars::default())
+        .manage(FabricLifecycle::default())
         .manage(WorkerRuntime::default())
         .manage(LocalAiRuntime::default())
         .manage(PairingManager::default())
@@ -2041,11 +2085,17 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Rampage");
     app.run(|handle, event| {
-        if matches!(event, tauri::RunEvent::Exit)
-            && let Ok(mut sidecars) = handle.state::<Sidecars>().0.lock()
-        {
-            for child in sidecars.drain(..) {
-                let _ = kill_process_tree(child);
+        if matches!(event, tauri::RunEvent::Exit) {
+            // Publish shutdown before killing supervised children. Persistent worker loops observe
+            // this fence and cannot race the tray exit by spawning a replacement agent.
+            handle
+                .state::<FabricLifecycle>()
+                .0
+                .store(true, Ordering::Release);
+            if let Ok(mut sidecars) = handle.state::<Sidecars>().0.lock() {
+                for child in sidecars.drain(..) {
+                    let _ = kill_process_tree(child);
+                }
             }
         }
     });
