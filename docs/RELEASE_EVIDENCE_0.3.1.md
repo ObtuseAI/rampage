@@ -119,3 +119,44 @@ showcase topology. Rust tests cover local reset target validation and identity c
 tests cover revocation replay. The final physical line requires the owner and laptop to install the
 same 0.3.1 package, pair over the real network, advertise a fresh signed worker offer, and complete
 the fail-closed Remote Assist qualifier.
+
+## Recovery 19 compute-autopilot qualification
+
+Recovery 19 was built from merged commit
+`840945f110625d66626de2992ee27b2d952d539e` and published as the explicit unsigned prerelease
+[`v0.3.1-recovery.19-bootstrap`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.19-bootstrap).
+The tag adds durable Compute Dividend receipts, a conservative p90 break-even planner, observed-path
+Network Autopilot, five workload intents, Work-surface history and explanations, and matching Rust,
+TypeScript, and Python SDK access. It does not claim that remote VRAM is transparent local VRAM.
+
+| Gate | Result |
+| --- | --- |
+| Rust workspace | PASS — `cargo test --workspace --no-fail-fast` completed 175 tests; strict workspace Clippy passed |
+| Rust dependency policy | PASS — 0 RustSec vulnerabilities; 18 target-reviewed warnings with review through 2026-10-31 |
+| Desktop, edge, and TypeScript SDK | PASS — 23, 2, and 13 tests respectively; all production builds passed |
+| Proposal-only intelligence and Python SDK | PASS — Ruff clean; strict mypy clean across 9 files; 17 intelligence and 12 SDK tests passed |
+| Native release lifecycle | PASS — neutral first run, controller and proposal-only intelligence ready, signed owner offer, forced local-agent recovery, close-to-tray, and clean explicit exit |
+| NSIS lifecycle | PASS — install 0, uninstall 0, six payloads, Desktop and Rampage Shell shortcuts created then removed, zero leaked sidecars |
+| Public artifact delivery | PASS — anonymous HTTP 200 for EXE and MSI with exact expected byte lengths; GitHub asset digests match the source-bound manifest |
+
+The installer smoke initially found a real tray-exit race that could leave `rampage-agent` alive. A
+first fence prevented respawn but exposed a shell-channel teardown deadlock. The merged correction
+publishes an atomic lifecycle fence, drains every supervised process tree before Tauri teardown,
+uses bounded OS-level PID exit verification, and avoids the shell channel after runtime shutdown
+begins. The same smoke that found both failures passed against the final installer.
+
+| Windows x64 artifact | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `Rampage_0.3.1_x64-setup.exe` | 69,594,155 | `9c7e35e1a1b7b0e8e34837cd1a0bcf1101ea19480757a3c71a650b7a3396d072` |
+| `Rampage_0.3.1_x64_en-US.msi` | 79,552,512 | `d67b5d347a1ab1c9c923348e8985fe30045d83ffc9cf15a4be4205edbb6fad8b` |
+
+The source-current Work surface capture is `docs/assets/rampage-work-autopilot.png`, SHA-256
+`9daddf02f36bb0e3bfe7186eab93a45224454ed82cdd34d5cf9368e78b8c026c`.
+
+GitHub Actions jobs on PRs
+[#91](https://github.com/ObtuseAI/rampage/pull/91) and
+[#92](https://github.com/ObtuseAI/rampage/pull/92) failed before runner allocation with zero steps.
+The release therefore does not claim hosted-runner provenance, code signing, notarization, or
+cross-platform Recovery 19 packages. The exact local validation receipts are attached to both PRs.
+The prior physical two-machine qualification state is unchanged; current-laptop Recovery 19 pairing
+and Remote Assist still require an explicit live rerun before those claims can advance.
