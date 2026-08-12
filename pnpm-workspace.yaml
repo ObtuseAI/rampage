@@ -1,6 +1,8 @@
 packages:
   - apps/*
   - packages/*
+overrides:
+  nanoid: 3.3.17
 allowBuilds:
   esbuild: true
 confirmModulesPurge: false
