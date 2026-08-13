@@ -237,6 +237,58 @@ impl Ledger {
         Ok(events)
     }
 
+    /// Return one exact event by sequence for signed checkpoint validation.
+    pub fn event(&self, sequence: u64) -> Result<Option<LedgerEvent>, LedgerError> {
+        if sequence == 0 {
+            return Ok(None);
+        }
+        let connection = self.connection.lock().map_err(|_| LedgerError::Poisoned)?;
+        let row = connection
+            .query_row(
+                "SELECT sequence, recorded_at, event_type, subject_id, payload_json,
+                        previous_hash, event_hash
+                 FROM ledger_events WHERE sequence = ?1",
+                params![sequence],
+                |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(
+            |(
+                sequence,
+                timestamp,
+                event_type,
+                subject_id,
+                payload_json,
+                previous_hash,
+                event_hash,
+            )| {
+                let recorded_at = DateTime::parse_from_rfc3339(&timestamp)
+                    .map_err(|error| serde_json::Error::io(std::io::Error::other(error)))?
+                    .with_timezone(&Utc);
+                Ok(LedgerEvent {
+                    sequence,
+                    recorded_at,
+                    event_type,
+                    subject_id,
+                    payload: serde_json::from_str(&payload_json)?,
+                    previous_hash,
+                    event_hash,
+                })
+            },
+        )
+        .transpose()
+    }
+
     /// Return the newest events of one exact type in chronological order.
     ///
     /// Product history projections use this indexed, bounded query instead of scanning unrelated
@@ -292,6 +344,64 @@ impl Ledger {
         Ok(events)
     }
 
+    /// Return one chronological page of an exact event type.
+    ///
+    /// Startup projections use this indexed query to replay every authority-bearing event while
+    /// skipping unrelated high-volume telemetry. Callers advance with the last returned sequence.
+    pub fn events_of_type(
+        &self,
+        event_type: &str,
+        after_sequence: u64,
+        limit: u32,
+    ) -> Result<Vec<LedgerEvent>, LedgerError> {
+        let connection = self.connection.lock().map_err(|_| LedgerError::Poisoned)?;
+        let mut statement = connection.prepare(
+            "SELECT sequence, recorded_at, event_type, subject_id, payload_json,
+                    previous_hash, event_hash
+             FROM ledger_events
+             WHERE event_type = ?1 AND sequence > ?2
+             ORDER BY sequence ASC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![event_type, after_sequence, limit.clamp(1, 10_000)],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (
+                sequence,
+                timestamp,
+                event_type,
+                subject_id,
+                payload_json,
+                previous_hash,
+                event_hash,
+            ) = row?;
+            let recorded_at = DateTime::parse_from_rfc3339(&timestamp)
+                .map_err(|error| serde_json::Error::io(std::io::Error::other(error)))?
+                .with_timezone(&Utc);
+            Ok(LedgerEvent {
+                sequence,
+                recorded_at,
+                event_type,
+                subject_id,
+                payload: serde_json::from_str(&payload_json)?,
+                previous_hash,
+                event_hash,
+            })
+        })
+        .collect()
+    }
+
     /// Return the newest event of one exact type without scanning a high-volume ledger.
     pub fn latest_event_of_type(
         &self,
@@ -304,6 +414,60 @@ impl Ledger {
                         previous_hash, event_hash
                  FROM ledger_events WHERE event_type = ?1 ORDER BY sequence DESC LIMIT 1",
                 params![event_type],
+                |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            sequence,
+            timestamp,
+            event_type,
+            subject_id,
+            payload_json,
+            previous_hash,
+            event_hash,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let recorded_at = DateTime::parse_from_rfc3339(&timestamp)
+            .map_err(|error| serde_json::Error::io(std::io::Error::other(error)))?
+            .with_timezone(&Utc);
+        Ok(Some(LedgerEvent {
+            sequence,
+            recorded_at,
+            event_type,
+            subject_id,
+            payload: serde_json::from_str(&payload_json)?,
+            previous_hash,
+            event_hash,
+        }))
+    }
+
+    /// Return the newest exact event type for one subject without replaying its history.
+    pub fn latest_event_for_subject_of_type(
+        &self,
+        subject_id: &str,
+        event_type: &str,
+    ) -> Result<Option<LedgerEvent>, LedgerError> {
+        let connection = self.connection.lock().map_err(|_| LedgerError::Poisoned)?;
+        let row = connection
+            .query_row(
+                "SELECT sequence, recorded_at, event_type, subject_id, payload_json,
+                        previous_hash, event_hash
+                 FROM ledger_events
+                 WHERE subject_id = ?1 AND event_type = ?2
+                 ORDER BY sequence DESC LIMIT 1",
+                params![subject_id, event_type],
                 |row| {
                     Ok((
                         row.get::<_, u64>(0)?,
@@ -392,8 +556,16 @@ impl Ledger {
     }
 
     pub fn verify(&self) -> Result<u64, LedgerError> {
-        let mut expected_previous = GENESIS_HASH.to_string();
-        let mut after_sequence = 0_u64;
+        self.verify_after(0, GENESIS_HASH)
+    }
+
+    /// Verify only events after a separately authenticated checkpoint.
+    pub fn verify_after(
+        &self,
+        mut after_sequence: u64,
+        expected_previous: &str,
+    ) -> Result<u64, LedgerError> {
+        let mut expected_previous = expected_previous.to_string();
         let mut verified = 0_u64;
         loop {
             let events = self.events(after_sequence, 10_000)?;
@@ -521,6 +693,36 @@ mod tests {
         assert_eq!(first.sequence, 1);
         assert_eq!(second.previous_hash, first.event_hash);
         assert_eq!(ledger.verify().unwrap(), 2);
+        assert_eq!(ledger.event(first.sequence).unwrap(), Some(first.clone()));
+        assert_eq!(ledger.event(999).unwrap(), None);
+        assert_eq!(
+            ledger
+                .verify_after(first.sequence, &first.event_hash)
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn exact_type_pages_do_not_drop_old_authority_events() {
+        let ledger = Ledger::in_memory().unwrap();
+        let first = ledger
+            .append("node.enrolled", "old", &json!({"n": 1}))
+            .unwrap();
+        for index in 0..20 {
+            ledger
+                .append("resource.offer.registered", "noise", &index)
+                .unwrap();
+        }
+        let newest = ledger
+            .append("node.enrolled", "new", &json!({"n": 2}))
+            .unwrap();
+        let first_page = ledger.events_of_type("node.enrolled", 0, 1).unwrap();
+        let second_page = ledger
+            .events_of_type("node.enrolled", first_page[0].sequence, 1)
+            .unwrap();
+        assert_eq!(first_page, vec![first]);
+        assert_eq!(second_page, vec![newest]);
     }
 
     #[test]
@@ -545,6 +747,18 @@ mod tests {
         assert!(
             ledger
                 .latest_event_of_type("missing.event")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            ledger
+                .latest_event_for_subject_of_type("mesh", "mesh.started")
+                .unwrap(),
+            Some(newest)
+        );
+        assert!(
+            ledger
+                .latest_event_for_subject_of_type("node", "mesh.started")
                 .unwrap()
                 .is_none()
         );

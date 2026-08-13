@@ -5,7 +5,7 @@ import { type PairingRequest, useRampage } from "./store";
 
 vi.mock("./components/Arena", () => ({ Arena: () => <div>Spatial fabric</div> }));
 const nativeInvoke = vi.hoisted(() => vi.fn(async (command: string) => {
-  if (command === "control_window") return undefined;
+  if (command === "control_window" || command === "start_window_drag") return undefined;
   throw new Error("native backend unavailable in browser test");
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: nativeInvoke }));
@@ -125,6 +125,17 @@ test("routes every borderless window control through the native backend", () => 
   expect(nativeInvoke).toHaveBeenCalledWith("control_window", { action: "minimize" });
   expect(nativeInvoke).toHaveBeenCalledWith("control_window", { action: "maximize" });
   expect(nativeInvoke).toHaveBeenCalledWith("control_window", { action: "close" });
+});
+
+test("drags the borderless shell from the top header without stealing button input", () => {
+  const { container } = render(<App />);
+  const header = container.querySelector<HTMLElement>(".topbar");
+  if (!header) throw new Error("topbar drag surface is missing");
+  fireEvent.mouseDown(header, { button: 0 });
+  expect(nativeInvoke).toHaveBeenCalledWith("start_window_drag");
+  nativeInvoke.mockClear();
+  fireEvent.mouseDown(screen.getByRole("button", { name: "Refresh fabric" }), { button: 0 });
+  expect(nativeInvoke).not.toHaveBeenCalledWith("start_window_drag");
 });
 
 test("local stop does not depend on controller", () => {

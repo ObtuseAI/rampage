@@ -18,12 +18,12 @@ the authority to run wild.
 [![Rust 1.91](https://img.shields.io/badge/Rust-1.91%2B-0b0f17?logo=rust&logoColor=67f5c5)](Cargo.toml)
 [![AI authority](https://img.shields.io/badge/AI%20authority-proposals%20only-0b0f17?logo=probot&logoColor=67f5c5)](docs/ARCHITECTURE.md#recursive-improvement)
 
-## [⬇ Download Rampage Recovery 19 for Windows](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.19-bootstrap/Rampage_0.3.1_x64-setup.exe)
+## [⬇ Download Rampage Recovery 20 for Windows](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.20-bootstrap/Rampage_0.3.1_x64-setup.exe)
 
 **One installer. Desktop shortcut included.**
-[**Current verified build: recovery.19**](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.19-bootstrap) ·
+[**Current verified build: recovery.20**](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.20-bootstrap) ·
 [Release notes](docs/RELEASE_NOTES_0.3.1.md) ·
-[SHA-256](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.19-bootstrap/SHA256SUMS-windows-x64) ·
+[SHA-256](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.20-bootstrap/SHA256SUMS-windows-x64) ·
 [All releases](https://github.com/ObtuseAI/rampage/releases)
 
 [**Launch the showcase**](https://obtuseai.github.io/rampage/) ·
@@ -93,7 +93,14 @@ conservative p90 planner automatically refuses a distributed plan when startup, 
 stale topology would erase the gain. Network Autopilot keeps authenticated direct and owner-relay
 candidates available together, records the active path when Iroh can prove it, and independently
 gates control, interactive AI, remote media, artifact, and bulk traffic from fresh link evidence.
-The dependency lock also removes `RUSTSEC-2026-0253` through the fixed `lru 0.18.2` patch release.
+Recovery 20 makes the borderless shell draggable from its complete top chrome without stealing
+button input. It also replaces unbounded startup replay with a governor-signed ledger checkpoint,
+indexed authority-state reconstruction, and one newest still-fresh offer per enrolled node. Live
+capacity continues to refresh on every heartbeat, while durable capacity and link evidence is
+sampled hourly instead of inflating the ledger every few seconds. Invalid or altered checkpoints
+fall back to full hash-chain verification; enrolled identities, leases, receipts, and artifact
+authority are still replayed completely. The dependency lock also removes `RUSTSEC-2026-0253`
+through the fixed `lru 0.18.2` patch release.
 
 ![Rampage Recovery 19 Work Orchestrator showing the p90 break-even brain, Network Autopilot, autonomous compute strategy, live fabric proof, and owner-protected node telemetry](docs/assets/rampage-work-autopilot.png)
 
@@ -113,6 +120,7 @@ stay in a waiting or local-only state when that evidence is unavailable.
 | Durable Compute Dividend | Exact shard-set and signed-receipt reconciliation before ledger commit; restart-restored history, prior-scale comparison, and a native trend view |
 | P90 break-even brain | Five typed workload profiles; conservative compute/startup/transfer/retry model; stale or unmeasured topology fails closed; slower plans stay on the fastest node |
 | Network Autopilot | Same-LAN direct candidate plus owner-relay recovery in one authenticated endpoint set; observed direct/relay path evidence; independent traffic gates for control, AI, media, artifacts, and bulk work |
+| Recovery 20 startup | Governor-signed verification checkpoint; complete indexed authority replay; newest fresh offer recovery; hourly durable telemetry sampling; invalid-checkpoint full-verification fallback |
 | Universal capability contract | Signed offers advertise exact workload domain, adapter, operation, execution pattern, isolation, runtime digest, and qualification status; candidate profiles grant no authority |
 | Autonomous self-scan | Stable evidence digests cover routes, links, failures, denials, thermal/battery pressure, capability gaps, idle capacity, and protected-artifact replication |
 | Compute Strategy | Outcome-first Automatic, Biggest AI, Fastest AI, More Work, and Protect This PC placement previews with exact capacity and qualification blockers |

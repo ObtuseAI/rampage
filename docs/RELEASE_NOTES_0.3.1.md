@@ -77,6 +77,25 @@ performance traffic. The Work surface exposes these decisions without adding a s
 The release also advances Iroh's transitive `lru` dependency to 0.18.2, removing the newly published
 `RUSTSEC-2026-0253` panic-safety issue instead of adding it to Rampage's reviewed-warning baseline.
 
+Recovery 20 fixes the native borderless shell's missing move gesture. The complete top chrome is a
+native drag surface, while refresh, command, STOP, minimize, maximize, and close remain ordinary
+controls. A React regression test exercises both halves of that contract and the Tauri command is
+covered by the native desktop build.
+
+Recovery 20 also removes the long-lived owner's startup cliff. Signed worker capacity remains live
+in memory on every heartbeat, but durable offer and link evidence is sampled at most hourly per
+node. Controller restart restores every authority-bearing enrollment, revocation, invitation,
+lease, claim, receipt, shard set, and artifact transition through indexed event-type pages, plus
+only the newest still-fresh offer for each enrolled node. It never replays millions of expired
+heartbeats merely to reconstruct current state.
+
+After a complete hash-chain verification, the controller writes a governor-signed checkpoint that
+authenticates the verified sequence and event hash. Later starts verify only the new tail. A missing,
+malformed, wrongly signed, or ledger-mismatched checkpoint is ignored and forces full verification;
+it cannot turn a corrupted ledger into an accepted one. The placement E2E specifically restarts the
+controller, restores the fresh offer, admits work, produces a signed receipt, completes a pooled
+three-shard run, and proves STOP/resume plus stale-authority denial.
+
 ## What changed
 
 - **Fix Rampage** safely restarts a consistent native installation without erasing identity or work.
