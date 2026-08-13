@@ -226,3 +226,32 @@ The benchmark result applies only to workloads that can be divided across indepe
 does not claim transparent VRAM pooling. The laptop cannot run an LLM replica or shard until it
 advertises a qualified compatible model runtime; the governor correctly kept current model
 placement on the owner PC.
+
+## Recovery 21 physical-truth correction
+
+Recovery 21 is source-bound to merged commit
+`3cdc4678b380495702709743e664ddb35ecc8b44` and published as the explicit unsigned prerelease
+[`v0.3.1-recovery.21-bootstrap`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.21-bootstrap).
+It replaces the custom Rust-routed drag command with Tauri's direct main-window API under a
+least-privilege capability and denies a successful Ollama receipt when no visible answer text was
+produced.
+
+| Gate | Result |
+| --- | --- |
+| Source validation | PASS — complete Rust workspace; warnings-denied Clippy; desktop 24, edge 2, TypeScript SDK 13; all production builds; Ruff and strict mypy; intelligence 17 and Python SDK 12 |
+| Generated Tauri authority | PASS — `main` window only; `core:default` plus `core:window:allow-start-dragging`; no filesystem, shell, or broad network permission |
+| Isolated NSIS lifecycle | PASS — install 0, uninstall 0, six payloads, controller/intelligence ready, both shortcuts removed, zero leaked sidecars |
+| In-place main-PC upgrade | PASS — installer 0; controller ready; fencing epoch 3 preserved; two identities and two fresh signed offers restored; desktop shortcut present |
+| Empty-answer regression | PASS — installed 4B route returned a signed 543-byte receipt with a non-empty output digest; zero-byte completion is denied in both native and streaming Ollama paths |
+| Model instruction following | FAIL — the local 4B model exposed deliberation and truncated before the requested exact phrase; Rampage makes no model-quality claim from the successful execution receipt |
+| Human window drag | OPEN — the automated input harness releases before the asynchronous Tauri drag loop can be qualified; manual confirmation is required |
+| Remote Assist | OPEN — worker opt-in capability still absent at publication, so no remote session was attempted or claimed |
+
+| Windows x64 artifact | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `Rampage_0.3.1_x64-setup.exe` | 69,639,599 | `14bfa7be15458a902d280eedd24a4491f8d7522c5169ad0a2146c497c72612c2` |
+| `Rampage_0.3.1_x64_en-US.msi` | 79,319,040 | `4dcb28c876a8688c8fb30682ee7638f55d466a68935392b74352b32bf57aa3fe` |
+
+The public release page is anonymously readable and both binary URLs resolve to GitHub's release
+asset service. GitHub Actions again failed before runner allocation with zero executed steps; this
+release claims no hosted provenance, Authenticode signature, notarization, or non-Windows package.
