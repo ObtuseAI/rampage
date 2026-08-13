@@ -20,8 +20,8 @@ packages, public artifacts, and physical two-machine behavior are separate claim
 | NSIS installer and desktop shortcut | `scripts/Smoke-RampageInstaller.ps1 -Installer output/public-recovery9/Rampage_0.3.1_x64-setup.exe` | PASS — empty runtime stayed neutral; explicit owner install 0/uninstall 0; six payloads; controller/intelligence ready; one signed node and offer; shortcuts created then removed; no leaked sidecars; real installed firewall rules preserved |
 | Public release assets | [`v0.3.1-recovery.9`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.9) | PASS — 12 assets, three source-bound manifests, three checksum files, and verified Sigstore/SLSA provenance |
 | Physical owner upgrade and recovery | Public candidate 2 on Windows | PASS — exact public hash, install exit 0, runtime preserved, desktop shortcut present, lifecycle consistent, non-destructive repair restart, controller ready, one resident agent, and one fresh signed offer |
-| Physical owner/laptop re-pair | Fresh 0.3.1 installs | PENDING physical laptop action |
-| Physical owner-to-laptop view | `scripts/Qualify-RampageRemoteAssist.ps1 -ExpectedVersion 0.3.1` | PENDING live opted-in worker |
+| Physical owner/laptop re-pair | Fresh 0.3.1 installs | PASS — owner and laptop are enrolled, active, and publishing concurrently fresh signed offers |
+| Physical owner-to-laptop view/control | `scripts/Qualify-RampageRemoteAssist.ps1 -ExpectedVersion 0.3.1`; rerun with `-Mode control -ExerciseControlInput` | PASS — digest-verified native frame, one acknowledged pointer event, explicit close, and post-close frame/input denial |
 
 ## Locally qualified artifacts
 
@@ -116,9 +116,9 @@ pre-seeds only its isolated firewall readiness marker instead of mutating real R
 
 The Recovery Center screenshot is a browser-rendered view of the real React component using labeled
 showcase topology. Rust tests cover local reset target validation and identity cleanup; controller
-tests cover revocation replay. The final physical line requires the owner and laptop to install the
-same 0.3.1 package, pair over the real network, advertise a fresh signed worker offer, and complete
-the fail-closed Remote Assist qualifier.
+tests cover revocation replay. The physical line was completed on Recovery 21 after the owner and
+laptop installed the same 0.3.1 package, paired over the real network, advertised a fresh signed
+worker offer, and completed both view-only and bounded-control variants of the fail-closed qualifier.
 
 ## Recovery 19 compute-autopilot qualification
 
@@ -244,8 +244,17 @@ produced.
 | In-place main-PC upgrade | PASS — installer 0; controller ready; fencing epoch 3 preserved; two identities and two fresh signed offers restored; desktop shortcut present |
 | Empty-answer regression | PASS — installed 4B route returned a signed 543-byte receipt with a non-empty output digest; zero-byte completion is denied in both native and streaming Ollama paths |
 | Model instruction following | FAIL — the local 4B model exposed deliberation and truncated before the requested exact phrase; Rampage makes no model-quality claim from the successful execution receipt |
-| Human window drag | OPEN — the automated input harness releases before the asynchronous Tauri drag loop can be qualified; manual confirmation is required |
-| Remote Assist | OPEN — worker opt-in capability still absent at publication, so no remote session was attempted or claimed |
+| Human window drag | PASS — manual Recovery 21 confirmation moved the native borderless window from its top chrome; minimize, maximize, and close remained separate controls |
+| Remote Assist UI | PASS — the installed owner app showed enabled **View desktop** and **Control desktop** actions for the opted-in laptop |
+| Remote Assist view | PASS — signed 30-second lease; native 1920×600 JPEG frame, 101,729 bytes; SHA-256 `69ca1025350ef4a98f36992447ce103c841bbd96e7edc2eb8f03bc943220986c`; close confirmed; frame returned 404 afterward |
+| Remote Assist control | PASS — signed 30-second lease at fencing epoch 3; native 1920×600 JPEG frame, 100,093 bytes; SHA-256 `3820a0c10a6eba62dbe1f7f69ac3ac7883381cea5882e2052b82fb59d79d8923`; exactly one centered mouse-move event acknowledged; close confirmed; frame and input each returned 404 afterward |
+| Remote Assist privilege boundary | PASS — no elevation or secure-desktop authority; worker opt-in remains required and the owner STOP/revoke path remains authoritative |
+
+The first physical qualifier invocation also exposed a StrictMode-only tooling defect: it attempted
+to read `mesh_endpoint` from the owner's valid local offer even though only remote offers carry that
+field. The corrected qualifier treats heterogeneous offers as an expected topology, selects only a
+fresh offer that advertises the requested Remote Assist operation, and supports an explicit one-event
+control exercise without changing its view-only default.
 
 | Windows x64 artifact | Bytes | SHA-256 |
 | --- | ---: | --- |
