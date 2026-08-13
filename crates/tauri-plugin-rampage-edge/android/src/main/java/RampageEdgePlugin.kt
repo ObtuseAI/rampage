@@ -2,6 +2,8 @@ package ai.obtuse.rampage.edge
 
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.Configuration
 import android.os.BatteryManager
 import android.os.Build
@@ -65,7 +67,9 @@ class RampageEdgePlugin(private val activity: Activity) : Plugin(activity) {
     private fun readStatus(): JSObject {
         val battery = activity.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
         val power = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val batteryStatus = activity.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val capacity = battery.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        val plugged = batteryStatus?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
         val thermal = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             when (power.currentThermalStatus) {
                 PowerManager.THERMAL_STATUS_NONE -> 100
@@ -89,7 +93,10 @@ class RampageEdgePlugin(private val activity: Activity) : Plugin(activity) {
             put("foreground", resumed && donationRequested)
             put("donationRequested", donationRequested)
             put("batteryPercent", if (capacity in 0..100) capacity else 0)
-            put("onExternalPower", battery.isCharging)
+            // A data-heavy USB connection may supply external power without increasing the battery
+            // at that instant. Donation policy cares whether the owner supplied power, not whether
+            // Android's instantaneous charging heuristic is positive.
+            put("onExternalPower", plugged != 0)
             put("lowPowerMode", power.isPowerSaveMode)
             put("thermalHeadroomPercent", thermal)
             put("screenKeptAwake", donationRequested)
