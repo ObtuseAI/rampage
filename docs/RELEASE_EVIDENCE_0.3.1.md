@@ -160,3 +160,46 @@ The release therefore does not claim hosted-runner provenance, code signing, not
 cross-platform Recovery 19 packages. The exact local validation receipts are attached to both PRs.
 The prior physical two-machine qualification state is unchanged; current-laptop Recovery 19 pairing
 and Remote Assist still require an explicit live rerun before those claims can advance.
+
+## Recovery 20 startup and native-shell qualification
+
+Recovery 20 was built from merged commit
+`94ca374aa9f72f0455a6377346abf1707803e73e` and published as the explicit unsigned prerelease
+[`v0.3.1-recovery.20-bootstrap`](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.20-bootstrap).
+The tag adds native top-chrome window dragging, governor-signed ledger verification checkpoints,
+indexed complete authority-state reconstruction, newest-fresh-offer restart recovery, and hourly
+durable capacity/link evidence sampling. It does not weaken ledger integrity: missing, malformed,
+wrongly signed, or event-mismatched checkpoints force full hash-chain verification.
+
+| Gate | Result |
+| --- | --- |
+| Nine version surfaces | PASS — `scripts/Assert-RampageVersion.ps1 -Tag v0.3.1-recovery.20-bootstrap` |
+| Rust workspace | PASS — all workspace unit and documentation tests completed |
+| Strict changed-crate lint | PASS — ledger, controller, and desktop Clippy with warnings denied |
+| Desktop, edge, and TypeScript SDK | PASS — 24, 2, and 13 tests; every production build completed |
+| Proposal-only intelligence and Python SDK | PASS — Ruff clean; strict mypy clean across 9 files; 17 intelligence and 12 SDK tests passed |
+| Placement and restart | PASS — signed receipt, three-shard pooled execution, restart recovery, STOP/resume, durable fencing, and stale-authority denial |
+| Mesh, storage, and repair | PASS — authenticated direct QUIC, measured path, encrypted resumable transfer, independently signed replica receipts, and autonomous repair |
+| Universal model gateway | PASS — OpenAI, Anthropic Messages, and OpenRouter-compatible paths; streaming; signed receipt evidence; replay and stale-epoch denial |
+| NSIS lifecycle | PASS — install 0, uninstall 0, six payloads, controller/intelligence ready, one node/offer, both shortcuts removed on uninstall, zero leaked sidecars |
+| Public delivery | PASS — anonymous HTTP 200 for EXE and MSI with exact expected byte lengths; GitHub asset digests match the source-bound manifest |
+
+The first repository-wide campaign failed the restart placement assertion because the initial
+indexed projection deliberately discarded all offers. That was a valid integration regression:
+a still-fresh offer must remain schedulable during a quick controller restart. The final correction
+loads exactly one newest offer per enrolled node through the existing subject/sequence index and
+accepts it only when its signed node binding and expiry remain current. The complete placement E2E,
+targeted unit suite, warnings-as-errors lint, authenticated mesh campaign, and model-gateway campaign
+all passed after that correction.
+
+| Windows x64 artifact | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `Rampage_0.3.1_x64-setup.exe` | 69,600,256 | `2c522c5de2bdede9eda92ac625ed11727ec5c07beb5c5062d082d4c0e371c85c` |
+| `Rampage_0.3.1_x64_en-US.msi` | 79,278,080 | `b430899cd291abaf6461db4550d44ae47ebee6fdcbd5a5c1f68c112707c53899` |
+
+GitHub Actions runs on PR
+[#96](https://github.com/ObtuseAI/rampage/pull/96) failed before runner allocation with zero executed
+steps across CI, CodeQL, and native distribution. Recovery 20 therefore claims no hosted-runner
+provenance, Authenticode signature, notarization, or non-Windows package qualification. The final
+physical line remains open until the owner and laptop both install this exact release and complete
+a fresh signed worker-offer, admitted benchmark, receipt, and Remote Assist qualifier.
