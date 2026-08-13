@@ -1,7 +1,7 @@
 import { Activity, Boxes, BrainCircuit, CircleStop, Command, Eye, Grid2X2, Maximize2, Minus, MonitorUp, MousePointer2, Orbit, Play, RefreshCw, Rocket, ShieldCheck, Wrench, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState, type MouseEvent } from "react";
 import { CommandPalette } from "./components/CommandPalette";
 import { ComputeStrategyPanel } from "./components/ComputeStrategyPanel";
 import { ArenaBoundary, ArenaLoading } from "./components/ArenaBoundary";
@@ -68,13 +68,23 @@ export default function App() {
     return () => window.clearInterval(interval);
   }, [state.fabricRole]);
   const selected = state.nodes.find((node) => node.id === state.selectedNode) ?? state.nodes[0];
+  const startWindowDrag = (event: MouseEvent<HTMLElement>) => {
+    if (event.button !== 0 || !(event.target instanceof Element)) return;
+    if (event.target.closest("button, input, select, textarea, a, [role='button']")) return;
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    void invoke("start_window_drag").catch((error: unknown) => {
+      useRampage.setState({
+        lastAction: error instanceof Error ? error.message : "Window drag failed.",
+      });
+    });
+  };
   return (
     <div className="shell">
       {state.onboarding && <Onboarding />}
       <CommandPalette />
       <RemoteAssistPanel />
       <RecoveryCenter />
-      <header className="topbar" data-tauri-drag-region>
+      <header className="topbar" data-tauri-drag-region onMouseDown={startWindowDrag}>
         <div className="identity" data-tauri-drag-region><div className="brand-mark">R</div><div data-tauri-drag-region><strong data-tauri-drag-region>RAMPAGE</strong><span data-tauri-drag-region>PERSONAL COMPUTE FABRIC</span></div></div>
         <div className={`status-ribbon ${state.remoteAssistStatus.active ? "remote-active" : ""}`} role="status" data-tauri-drag-region><i className={state.connected && !state.killLatch ? "online" : "reduced"} /><strong data-tauri-drag-region>{state.killLatch ? "OWNER STOPPED" : state.remoteAssistStatus.active ? "REMOTE CONTROL ACTIVE" : state.fabricRole === "worker" ? state.workerRuntime.state === "active" ? "WORKER ACTIVE" : state.workerRuntime.state === "starting" || state.workerRuntime.state === "retrying" ? "WORKER CONNECTING" : "WORKER ATTENTION" : state.connected ? "FABRIC LIVE" : "LOCAL REDUCED"}</strong><span data-tauri-drag-region>{state.nodes.length} nodes</span><span data-tauri-drag-region>{state.meshMode.replace("_", " ")}</span><span data-tauri-drag-region>{state.diagnostic ? `self-scan ${state.diagnostic.health_score}/100` : state.capability.replaceAll("_", " ")}</span></div>
         <div className="header-actions">

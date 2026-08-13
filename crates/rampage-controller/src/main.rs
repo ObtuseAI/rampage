@@ -12,6 +12,7 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use rampage_controller::{
     AdmissionPolicy, ResourceReservation, choose_offer_with_topology, network_autopilot_status,
     plan_break_even, plan_model_session, plan_shard_set, score_offer_with_topology,
@@ -67,6 +68,7 @@ struct AppState {
     ledger: Arc<Ledger>,
     governor: Arc<Governor>,
     offers: Arc<RwLock<HashMap<Uuid, ResourceOfferV1>>>,
+    offer_evidence_recorded_at: Arc<RwLock<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>>,
     nodes: Arc<RwLock<HashMap<Uuid, NodeIdentityV1>>>,
     invites: Arc<RwLock<HashMap<Uuid, InviteRecord>>>,
     assignments: Arc<RwLock<HashMap<Uuid, Assignment>>>,
@@ -208,6 +210,15 @@ struct EventQuery {
     latest: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LedgerCheckpoint {
+    schema: String,
+    sequence: u64,
+    event_hash: String,
+    signature: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct DividendQuery {
     limit: Option<u32>,
@@ -283,6 +294,8 @@ struct RevokeNodeRequest {
 }
 
 const DEFAULT_MESH_UDP_PORT: u16 = 47_838;
+const LEDGER_CHECKPOINT_SCHEMA: &str = "rampage.ledger-checkpoint.v1";
+const OFFER_EVIDENCE_INTERVAL: chrono::Duration = chrono::Duration::hours(1);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -293,10 +306,15 @@ async fn main() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".rampage/runtime"));
     std::fs::create_dir_all(&data_dir)?;
+    let governor_signing_key =
+        SigningKey::from_bytes(&load_or_create_secret(&data_dir.join("governor.key"))?);
     let ledger = Arc::new(Ledger::open(data_dir.join("controller.db"))?);
-    ledger
-        .verify()
-        .context("refusing to start with an invalid evidence ledger")?;
+    verify_ledger_with_checkpoint(
+        &ledger,
+        &data_dir.join("ledger-checkpoint.json"),
+        &governor_signing_key,
+    )
+    .context("refusing to start with an invalid evidence ledger")?;
     let mut fencing_epoch = match ledger.current_fencing_epoch("controller")? {
         0 => ledger.advance_fencing_epoch("controller")?,
         current => current,
@@ -330,10 +348,10 @@ async fn main() -> anyhow::Result<()> {
             "authority_expansion": "denied"
         }),
     )?;
-    let governor = Arc::new(load_or_create_governor(
-        &data_dir.join("governor.key"),
+    let governor = Arc::new(Governor::from_signing_key(
         governor_config,
-    )?);
+        governor_signing_key,
+    ));
     let local_api_token = Arc::new(hex::encode(load_or_create_secret(
         &data_dir.join("controller.token"),
     )?));
@@ -370,6 +388,7 @@ async fn main() -> anyhow::Result<()> {
         ledger,
         governor,
         offers: Arc::new(RwLock::new(offers)),
+        offer_evidence_recorded_at: Arc::new(RwLock::new(HashMap::new())),
         nodes: Arc::new(RwLock::new(nodes)),
         invites: Arc::new(RwLock::new(invites)),
         assignments: Arc::new(RwLock::new(assignments)),
@@ -2582,15 +2601,18 @@ async fn register_offer(
             ));
         }
     }
-    if let Some(benchmark) = &offer.link_benchmark {
-        let is_new_observation = state
-            .offers
-            .read()
-            .map_err(lock_error)?
-            .get(&offer.node_id)
-            .and_then(|previous| previous.link_benchmark.as_ref())
-            .is_none_or(|previous| previous.observed_at != benchmark.observed_at);
-        if is_new_observation {
+    // Offers refresh frequently so scheduling always uses current signed capacity. Persist only an
+    // hourly evidence checkpoint per node; writing every heartbeat and minute-by-minute link probe
+    // made long-lived owner ledgers grow without bound and turned startup verification into a
+    // multi-minute operation.
+    let now = chrono::Utc::now();
+    let mut evidence_times = state
+        .offer_evidence_recorded_at
+        .write()
+        .map_err(lock_error)?;
+    let should_record = should_record_offer_evidence(evidence_times.get(&offer.node_id), now);
+    if should_record {
+        if let Some(benchmark) = &offer.link_benchmark {
             state
                 .ledger
                 .append(
@@ -2600,15 +2622,17 @@ async fn register_offer(
                 )
                 .map_err(internal_error)?;
         }
+        state
+            .ledger
+            .append(
+                "resource.offer.registered",
+                &offer.node_id.to_string(),
+                &offer,
+            )
+            .map_err(internal_error)?;
+        evidence_times.insert(offer.node_id, now);
     }
-    state
-        .ledger
-        .append(
-            "resource.offer.registered",
-            &offer.node_id.to_string(),
-            &offer,
-        )
-        .map_err(internal_error)?;
+    drop(evidence_times);
     state
         .offers
         .write()
@@ -2621,6 +2645,15 @@ async fn register_offer(
             "controller_time": chrono::Utc::now()
         })),
     ))
+}
+
+fn should_record_offer_evidence(
+    recorded_at: Option<&chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    recorded_at.is_none_or(|recorded_at| {
+        now.signed_duration_since(*recorded_at) >= OFFER_EVIDENCE_INTERVAL
+    })
 }
 
 fn validate_offer_identity_binding(
@@ -5574,13 +5607,110 @@ fn hash_secret(secret: &str) -> String {
     hex::encode(Sha256::digest(secret.as_bytes()))
 }
 
-fn load_or_create_governor(
+fn ledger_checkpoint_message(sequence: u64, event_hash: &str) -> Vec<u8> {
+    format!("{LEDGER_CHECKPOINT_SCHEMA}\n{sequence}\n{event_hash}\n").into_bytes()
+}
+
+fn read_bounded_regular_file(
     path: &std::path::Path,
-    config: GovernorConfig,
-) -> anyhow::Result<Governor> {
-    use ed25519_dalek::SigningKey;
-    let key = SigningKey::from_bytes(&load_or_create_secret(path)?);
-    Ok(Governor::from_signing_key(config, key))
+    limit: u64,
+    label: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        !metadata.file_type().is_symlink() && metadata.is_file(),
+        "{label} must be a regular non-symlink file"
+    );
+    anyhow::ensure!(metadata.len() <= limit, "{label} exceeds its size limit");
+    let bytes = std::fs::read(path)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= limit,
+        "{label} exceeds its size limit"
+    );
+    Ok(bytes)
+}
+
+fn read_ledger_checkpoint(
+    ledger: &Ledger,
+    path: &std::path::Path,
+    signing_key: &SigningKey,
+) -> anyhow::Result<Option<LedgerCheckpoint>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = read_bounded_regular_file(path, 4096, "ledger checkpoint")?;
+    let checkpoint: LedgerCheckpoint = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(
+        checkpoint.schema == LEDGER_CHECKPOINT_SCHEMA,
+        "unsupported ledger checkpoint schema"
+    );
+    let signature_bytes = hex::decode(&checkpoint.signature)?;
+    let signature = Signature::from_slice(&signature_bytes)?;
+    signing_key.verifying_key().verify(
+        &ledger_checkpoint_message(checkpoint.sequence, &checkpoint.event_hash),
+        &signature,
+    )?;
+    if checkpoint.sequence == 0 {
+        anyhow::ensure!(
+            checkpoint.event_hash == "GENESIS",
+            "invalid genesis checkpoint"
+        );
+    } else {
+        let event = ledger
+            .event(checkpoint.sequence)?
+            .context("checkpointed ledger event is missing")?;
+        anyhow::ensure!(
+            event.event_hash == checkpoint.event_hash,
+            "checkpointed ledger event hash differs from the signed checkpoint"
+        );
+    }
+    Ok(Some(checkpoint))
+}
+
+fn persist_ledger_checkpoint(
+    ledger: &Ledger,
+    path: &std::path::Path,
+    signing_key: &SigningKey,
+) -> anyhow::Result<()> {
+    let latest = ledger.latest_events(1)?.pop();
+    let (sequence, event_hash) = latest
+        .map(|event| (event.sequence, event.event_hash))
+        .unwrap_or_else(|| (0, "GENESIS".to_string()));
+    let signature = signing_key.sign(&ledger_checkpoint_message(sequence, &event_hash));
+    let checkpoint = LedgerCheckpoint {
+        schema: LEDGER_CHECKPOINT_SCHEMA.to_string(),
+        sequence,
+        event_hash,
+        signature: hex::encode(signature.to_bytes()),
+    };
+    let bytes = serde_json::to_vec_pretty(&checkpoint)?;
+    let temporary = path.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
+    write_new_durable_file(&temporary, &bytes)?;
+    if path.is_file() {
+        std::fs::remove_file(path)?;
+    }
+    std::fs::rename(&temporary, path)?;
+    sync_parent_directory(path)?;
+    Ok(())
+}
+
+fn verify_ledger_with_checkpoint(
+    ledger: &Ledger,
+    path: &std::path::Path,
+    signing_key: &SigningKey,
+) -> anyhow::Result<u64> {
+    let verified = match read_ledger_checkpoint(ledger, path, signing_key) {
+        Ok(Some(checkpoint)) => ledger.verify_after(checkpoint.sequence, &checkpoint.event_hash)?,
+        Ok(None) => ledger.verify()?,
+        Err(error) => {
+            warn!(%error, "Ignoring an unusable ledger checkpoint and verifying the full chain");
+            ledger.verify()?
+        }
+    };
+    if let Err(error) = persist_ledger_checkpoint(ledger, path, signing_key) {
+        warn!(%error, "Could not persist the ledger verification checkpoint");
+    }
+    Ok(verified)
 }
 
 fn load_or_create_secret(path: &std::path::Path) -> anyhow::Result<[u8; 32]> {
@@ -5779,195 +5909,224 @@ fn restore_state(ledger: &Ledger, fencing_epoch: u64) -> anyhow::Result<Restored
     let mut artifact_replicas = HashMap::new();
     let mut replica_evidence = HashMap::new();
     let now = chrono::Utc::now();
-    let mut after_sequence = 0_u64;
-    loop {
-        let events = ledger.events(after_sequence, 10_000)?;
-        if events.is_empty() {
-            break;
+    // Rebuild authority-bearing state only from indexed event classes. High-volume historical
+    // offer heartbeats are deliberately excluded: signed offers expire quickly and every worker
+    // must publish a fresh one after controller restart. This makes restore proportional to useful
+    // state rather than total ledger age while remaining fail-closed for leases and artifacts.
+    let mut restore_events = Vec::new();
+    for event_type in [
+        "node.enrolled",
+        "node.revoked",
+        "enrollment.invite.created",
+        "enrollment.invite.consumed",
+        "job.proposed",
+        "lease.issued",
+        "shard_set.admitted",
+        "job.claimed",
+        "job.receipted",
+        "artifact.replicated",
+        "artifact.input.staged",
+        "artifact.output.recorded",
+        "artifact.replica.verified",
+        "artifact.repaired",
+        "artifact.replica.invalidated",
+    ] {
+        let mut after_sequence = 0;
+        loop {
+            let page = ledger.events_of_type(event_type, after_sequence, 10_000)?;
+            let Some(last) = page.last() else {
+                break;
+            };
+            after_sequence = last.sequence;
+            restore_events.extend(page);
         }
-        after_sequence = events.last().expect("non-empty ledger page").sequence;
-        for event in events {
-            match event.event_type.as_str() {
-                "node.enrolled" => {
-                    let identity: NodeIdentityV1 = serde_json::from_value(event.payload)?;
-                    nodes.insert(identity.node_id, identity);
+    }
+    restore_events.sort_unstable_by_key(|event| event.sequence);
+    for event in restore_events {
+        match event.event_type.as_str() {
+            "node.enrolled" => {
+                let identity: NodeIdentityV1 = serde_json::from_value(event.payload)?;
+                nodes.insert(identity.node_id, identity);
+            }
+            "node.revoked" => {
+                let Ok(node_id) = Uuid::parse_str(&event.subject_id) else {
+                    continue;
+                };
+                nodes.remove(&node_id);
+                offers.remove(&node_id);
+                assignments.retain(|_, assignment| assignment.lease.node_id != node_id);
+                shard_sets
+                    .retain(|_, shard| shard.leases.iter().all(|lease| lease.node_id != node_id));
+                artifact_replicas.retain(|(_, replica_node), _| *replica_node != node_id);
+                replica_evidence.retain(|(_, replica_node), _| *replica_node != node_id);
+            }
+            "enrollment.invite.created" => {
+                let Some(secret_hash) = event.payload.get("secret_hash").and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                let Some(expires_at) = event.payload.get("expires_at").and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                let expires_at =
+                    chrono::DateTime::parse_from_rfc3339(expires_at)?.with_timezone(&chrono::Utc);
+                let invite_id = Uuid::parse_str(&event.subject_id)?;
+                if expires_at > now {
+                    invites.insert(
+                        invite_id,
+                        InviteRecord {
+                            secret_hash: secret_hash.into(),
+                            expires_at,
+                        },
+                    );
                 }
-                "node.revoked" => {
-                    let Ok(node_id) = Uuid::parse_str(&event.subject_id) else {
-                        continue;
-                    };
-                    nodes.remove(&node_id);
-                    offers.remove(&node_id);
-                    assignments.retain(|_, assignment| assignment.lease.node_id != node_id);
-                    shard_sets.retain(|_, shard| {
-                        shard.leases.iter().all(|lease| lease.node_id != node_id)
-                    });
-                    artifact_replicas.retain(|(_, replica_node), _| *replica_node != node_id);
-                    replica_evidence.retain(|(_, replica_node), _| *replica_node != node_id);
+            }
+            "enrollment.invite.consumed" => {
+                if let Ok(invite_id) = Uuid::parse_str(&event.subject_id) {
+                    invites.remove(&invite_id);
                 }
-                "resource.offer.registered" => {
-                    let offer: ResourceOfferV1 = serde_json::from_value(event.payload)?;
-                    if offer.expires_at > now {
-                        offers.insert(offer.node_id, offer);
-                    }
+            }
+            "job.proposed" => {
+                let job: JobSpecV1 = serde_json::from_value(event.payload)?;
+                proposed_jobs.insert(job.job_id, job);
+            }
+            "lease.issued" => {
+                let Some(lease_value) = event.payload.get("lease") else {
+                    continue;
+                };
+                let lease: CapabilityLeaseV1 = serde_json::from_value(lease_value.clone())?;
+                if lease.expires_at > now
+                    && lease.fencing_epoch == fencing_epoch
+                    && let Some(job) = proposed_jobs.get(&lease.job_id).cloned()
+                {
+                    assignments.insert(
+                        lease.job_id,
+                        Assignment {
+                            job,
+                            lease,
+                            claimed: false,
+                        },
+                    );
                 }
-                "enrollment.invite.created" => {
-                    let Some(secret_hash) =
-                        event.payload.get("secret_hash").and_then(Value::as_str)
-                    else {
-                        continue;
-                    };
-                    let Some(expires_at) = event.payload.get("expires_at").and_then(Value::as_str)
-                    else {
-                        continue;
-                    };
-                    let expires_at = chrono::DateTime::parse_from_rfc3339(expires_at)?
-                        .with_timezone(&chrono::Utc);
-                    let invite_id = Uuid::parse_str(&event.subject_id)?;
-                    if expires_at > now {
-                        invites.insert(
-                            invite_id,
-                            InviteRecord {
-                                secret_hash: secret_hash.into(),
-                                expires_at,
-                            },
-                        );
-                    }
-                }
-                "enrollment.invite.consumed" => {
-                    if let Ok(invite_id) = Uuid::parse_str(&event.subject_id) {
-                        invites.remove(&invite_id);
-                    }
-                }
-                "job.proposed" => {
-                    let job: JobSpecV1 = serde_json::from_value(event.payload)?;
-                    proposed_jobs.insert(job.job_id, job);
-                }
-                "lease.issued" => {
-                    let Some(lease_value) = event.payload.get("lease") else {
-                        continue;
-                    };
-                    let lease: CapabilityLeaseV1 = serde_json::from_value(lease_value.clone())?;
+            }
+            "shard_set.admitted" => {
+                let Some(set_value) = event.payload.get("set") else {
+                    continue;
+                };
+                let Some(leases_value) = event.payload.get("leases") else {
+                    continue;
+                };
+                let set: ShardSetV1 = serde_json::from_value(set_value.clone())?;
+                let leases: Vec<CapabilityLeaseV1> = serde_json::from_value(leases_value.clone())?;
+                let jobs = set
+                    .shards
+                    .iter()
+                    .map(|job| (job.job_id, job.clone()))
+                    .collect::<HashMap<_, _>>();
+                for lease in &leases {
                     if lease.expires_at > now
                         && lease.fencing_epoch == fencing_epoch
-                        && let Some(job) = proposed_jobs.get(&lease.job_id).cloned()
+                        && let Some(job) = jobs.get(&lease.job_id).cloned()
                     {
                         assignments.insert(
                             lease.job_id,
                             Assignment {
                                 job,
-                                lease,
+                                lease: lease.clone(),
                                 claimed: false,
                             },
                         );
                     }
                 }
-                "shard_set.admitted" => {
-                    let Some(set_value) = event.payload.get("set") else {
-                        continue;
-                    };
-                    let Some(leases_value) = event.payload.get("leases") else {
-                        continue;
-                    };
-                    let set: ShardSetV1 = serde_json::from_value(set_value.clone())?;
-                    let leases: Vec<CapabilityLeaseV1> =
-                        serde_json::from_value(leases_value.clone())?;
-                    let jobs = set
-                        .shards
-                        .iter()
-                        .map(|job| (job.job_id, job.clone()))
-                        .collect::<HashMap<_, _>>();
-                    for lease in &leases {
-                        if lease.expires_at > now
-                            && lease.fencing_epoch == fencing_epoch
-                            && let Some(job) = jobs.get(&lease.job_id).cloned()
-                        {
-                            assignments.insert(
-                                lease.job_id,
-                                Assignment {
-                                    job,
-                                    lease: lease.clone(),
-                                    claimed: false,
-                                },
-                            );
-                        }
-                    }
-                    shard_sets.insert(set.set_id, ShardSetRecord { spec: set, leases });
-                }
-                "job.claimed" => {
-                    if let Ok(job_id) = Uuid::parse_str(&event.subject_id)
-                        && let Some(assignment) = assignments.get_mut(&job_id)
-                    {
-                        assignment.claimed = true;
-                    }
-                }
-                "job.receipted" => {
-                    if let Ok(job_id) = Uuid::parse_str(&event.subject_id) {
-                        assignments.remove(&job_id);
-                        if let Ok(receipt) =
-                            serde_json::from_value::<ExecutionReceiptV1>(event.payload)
-                        {
-                            completed_receipts.insert(receipt.receipt_id, receipt.job_id);
-                        }
-                    }
-                }
-                "artifact.replicated"
-                | "artifact.input.staged"
-                | "artifact.output.recorded"
-                | "artifact.replica.verified"
-                | "artifact.repaired" => {
-                    let Some(node_id) = event
-                        .payload
-                        .get("node_id")
-                        .and_then(Value::as_str)
-                        .and_then(|value| Uuid::parse_str(value).ok())
-                    else {
-                        continue;
-                    };
-                    let Some(artifact_value) = event.payload.get("artifact") else {
-                        continue;
-                    };
-                    let artifact: ArtifactRefV1 = serde_json::from_value(artifact_value.clone())?;
-                    let key = (artifact.digest.clone(), node_id);
-                    artifact_replicas.insert(key.clone(), artifact);
-                    if let Some(receipt) = event
-                        .payload
-                        .get("replica_receipt")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value(value).ok())
-                        .filter(|receipt: &ArtifactReplicaReceiptV1| {
-                            receipt.node_id == node_id
-                                && receipt.digest == key.0
-                                && receipt.size_bytes
-                                    == artifact_replicas
-                                        .get(&key)
-                                        .map(|artifact| artifact.size_bytes)
-                                        .unwrap_or_default()
-                                && nodes.get(&node_id).is_some_and(|identity| {
-                                    verify_artifact_replica_receipt(identity, receipt).is_ok()
-                                })
-                        })
-                    {
-                        replica_evidence.insert(key, receipt);
-                    }
-                }
-                "artifact.replica.invalidated" => {
-                    let Some(node_id) = event
-                        .payload
-                        .get("node_id")
-                        .and_then(Value::as_str)
-                        .and_then(|value| Uuid::parse_str(value).ok())
-                    else {
-                        continue;
-                    };
-                    let Some(digest) = event.payload.get("digest").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let key = (digest.to_string(), node_id);
-                    replica_evidence.remove(&key);
-                }
-                _ => {}
+                shard_sets.insert(set.set_id, ShardSetRecord { spec: set, leases });
             }
+            "job.claimed" => {
+                if let Ok(job_id) = Uuid::parse_str(&event.subject_id)
+                    && let Some(assignment) = assignments.get_mut(&job_id)
+                {
+                    assignment.claimed = true;
+                }
+            }
+            "job.receipted" => {
+                if let Ok(job_id) = Uuid::parse_str(&event.subject_id) {
+                    assignments.remove(&job_id);
+                    if let Ok(receipt) = serde_json::from_value::<ExecutionReceiptV1>(event.payload)
+                    {
+                        completed_receipts.insert(receipt.receipt_id, receipt.job_id);
+                    }
+                }
+            }
+            "artifact.replicated"
+            | "artifact.input.staged"
+            | "artifact.output.recorded"
+            | "artifact.replica.verified"
+            | "artifact.repaired" => {
+                let Some(node_id) = event
+                    .payload
+                    .get("node_id")
+                    .and_then(Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                else {
+                    continue;
+                };
+                let Some(artifact_value) = event.payload.get("artifact") else {
+                    continue;
+                };
+                let artifact: ArtifactRefV1 = serde_json::from_value(artifact_value.clone())?;
+                let key = (artifact.digest.clone(), node_id);
+                artifact_replicas.insert(key.clone(), artifact);
+                if let Some(receipt) = event
+                    .payload
+                    .get("replica_receipt")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok())
+                    .filter(|receipt: &ArtifactReplicaReceiptV1| {
+                        receipt.node_id == node_id
+                            && receipt.digest == key.0
+                            && receipt.size_bytes
+                                == artifact_replicas
+                                    .get(&key)
+                                    .map(|artifact| artifact.size_bytes)
+                                    .unwrap_or_default()
+                            && nodes.get(&node_id).is_some_and(|identity| {
+                                verify_artifact_replica_receipt(identity, receipt).is_ok()
+                            })
+                    })
+                {
+                    replica_evidence.insert(key, receipt);
+                }
+            }
+            "artifact.replica.invalidated" => {
+                let Some(node_id) = event
+                    .payload
+                    .get("node_id")
+                    .and_then(Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                else {
+                    continue;
+                };
+                let Some(digest) = event.payload.get("digest").and_then(Value::as_str) else {
+                    continue;
+                };
+                let key = (digest.to_string(), node_id);
+                replica_evidence.remove(&key);
+            }
+            _ => {}
+        }
+    }
+    // A fresh signed offer remains useful across a quick controller restart. Recover only the
+    // newest offer for each enrolled node through the subject index; never replay its heartbeat
+    // history. Expired offers stay excluded and workers republish as normal.
+    for node_id in nodes.keys() {
+        let Some(event) = ledger
+            .latest_event_for_subject_of_type(&node_id.to_string(), "resource.offer.registered")?
+        else {
+            continue;
+        };
+        let offer: ResourceOfferV1 = serde_json::from_value(event.payload)?;
+        if offer.node_id == *node_id && offer.expires_at > now {
+            offers.insert(*node_id, offer);
         }
     }
     let idempotency = assignments
@@ -6368,6 +6527,102 @@ mod tests {
         let (nodes, offers, ..) = restore_state(&ledger, 0).unwrap();
         assert!(!nodes.contains_key(&identity.node_id));
         assert!(!offers.contains_key(&identity.node_id));
+    }
+
+    #[test]
+    fn restart_restores_identity_without_replaying_expired_offer_noise() {
+        let ledger = Ledger::in_memory().unwrap();
+        let offer = valid_model_offer();
+        let identity = NodeIdentityV1 {
+            schema: NodeIdentityV1::SCHEMA.into(),
+            node_id: offer.node_id,
+            owner_id: Uuid::now_v7(),
+            display_name: "steady laptop".into(),
+            device_kind: DeviceKind::Desktop,
+            platform: "windows-x86_64".into(),
+            public_key: "c".repeat(64),
+            enrolled_at: chrono::Utc::now(),
+            fencing_epoch: 0,
+        };
+        ledger
+            .append("node.enrolled", &identity.node_id.to_string(), &identity)
+            .unwrap();
+        let mut historical_offer = offer.clone();
+        historical_offer.observed_at = chrono::Utc::now() - Duration::minutes(2);
+        historical_offer.expires_at = chrono::Utc::now() - Duration::minutes(1);
+        for _ in 0..100 {
+            historical_offer.offer_id = Uuid::now_v7();
+            ledger
+                .append(
+                    "resource.offer.registered",
+                    &identity.node_id.to_string(),
+                    &historical_offer,
+                )
+                .unwrap();
+        }
+
+        let (nodes, offers, ..) = restore_state(&ledger, 0).unwrap();
+        let restored = nodes
+            .get(&identity.node_id)
+            .expect("identity should survive restart");
+        assert_eq!(restored.node_id, identity.node_id);
+        assert_eq!(restored.public_key, identity.public_key);
+        assert!(
+            offers.is_empty(),
+            "workers must republish fresh signed capacity"
+        );
+    }
+
+    #[test]
+    fn restart_restores_only_the_newest_still_fresh_offer() {
+        let ledger = Ledger::in_memory().unwrap();
+        let mut offer = valid_model_offer();
+        let identity = NodeIdentityV1 {
+            schema: NodeIdentityV1::SCHEMA.into(),
+            node_id: offer.node_id,
+            owner_id: Uuid::now_v7(),
+            display_name: "quick restart laptop".into(),
+            device_kind: DeviceKind::Desktop,
+            platform: "windows-x86_64".into(),
+            public_key: "d".repeat(64),
+            enrolled_at: chrono::Utc::now(),
+            fencing_epoch: 0,
+        };
+        ledger
+            .append("node.enrolled", &identity.node_id.to_string(), &identity)
+            .unwrap();
+        for _ in 0..10 {
+            offer.offer_id = Uuid::now_v7();
+            ledger
+                .append(
+                    "resource.offer.registered",
+                    &identity.node_id.to_string(),
+                    &offer,
+                )
+                .unwrap();
+        }
+
+        let (_, offers, ..) = restore_state(&ledger, 0).unwrap();
+        assert_eq!(
+            offers
+                .get(&identity.node_id)
+                .map(|restored| restored.offer_id),
+            Some(offer.offer_id)
+        );
+    }
+
+    #[test]
+    fn offer_evidence_is_immediate_then_hourly() {
+        let first = chrono::Utc::now();
+        assert!(should_record_offer_evidence(None, first));
+        assert!(!should_record_offer_evidence(
+            Some(&first),
+            first + Duration::minutes(59)
+        ));
+        assert!(should_record_offer_evidence(
+            Some(&first),
+            first + Duration::hours(1)
+        ));
     }
 
     #[test]
@@ -6811,6 +7066,56 @@ mod tests {
         let second = load_or_create_secret(&path).unwrap();
         assert_eq!(first, second);
         assert_eq!(std::fs::read_to_string(path).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn signed_ledger_checkpoint_verifies_only_the_new_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(temp.path().join("controller.db")).unwrap();
+        let checkpoint_path = temp.path().join("ledger-checkpoint.json");
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        ledger.append("first", "subject", &json!({"n": 1})).unwrap();
+        ledger
+            .append("second", "subject", &json!({"n": 2}))
+            .unwrap();
+
+        assert_eq!(
+            verify_ledger_with_checkpoint(&ledger, &checkpoint_path, &signing_key).unwrap(),
+            2
+        );
+        ledger.append("third", "subject", &json!({"n": 3})).unwrap();
+        assert_eq!(
+            verify_ledger_with_checkpoint(&ledger, &checkpoint_path, &signing_key).unwrap(),
+            1
+        );
+        let checkpoint = read_ledger_checkpoint(&ledger, &checkpoint_path, &signing_key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint.sequence, 3);
+    }
+
+    #[test]
+    fn unusable_checkpoint_falls_back_to_full_chain_verification() {
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(temp.path().join("controller.db")).unwrap();
+        let checkpoint_path = temp.path().join("ledger-checkpoint.json");
+        let signing_key = SigningKey::from_bytes(&[9_u8; 32]);
+        ledger.append("first", "subject", &json!({"n": 1})).unwrap();
+        verify_ledger_with_checkpoint(&ledger, &checkpoint_path, &signing_key).unwrap();
+        let mut checkpoint: Value =
+            serde_json::from_slice(&std::fs::read(&checkpoint_path).unwrap()).unwrap();
+        checkpoint["signature"] = Value::String("00".repeat(64));
+        std::fs::write(&checkpoint_path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+
+        assert_eq!(
+            verify_ledger_with_checkpoint(&ledger, &checkpoint_path, &signing_key).unwrap(),
+            1
+        );
+        assert!(
+            read_ledger_checkpoint(&ledger, &checkpoint_path, &signing_key)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[cfg(unix)]
