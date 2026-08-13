@@ -92,8 +92,10 @@ user-visible answer text.
 The physical Recovery 21 main-PC upgrade preserved the controller's fencing epoch and restored both
 fresh signed node offers. Its installed 4B route then returned a non-empty 543-byte signed receipt.
 The local model still failed the requested exact-phrase instruction by exposing deliberation and
-truncating, so that run proves execution integrity—not model quality. Human title-bar movement and
-the laptop's explicit Remote Assist opt-in remain open interactive gates.
+truncating, so that run proves execution integrity—not model quality. The final native gates now pass:
+manual title-bar movement moved the borderless window, and the opted-in laptop completed signed view
+and control sessions with native frames, one bounded pointer event, explicit close, and post-close
+denial of both frame and input access.
 
 Recovery 20 also removes the long-lived owner's startup cliff. Signed worker capacity remains live
 in memory on every heartbeat, but durable offer and link evidence is sampled at most hourly per

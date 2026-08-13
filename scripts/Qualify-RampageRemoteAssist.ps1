@@ -5,12 +5,19 @@ param(
     [string]$DataDir = (Join-Path $env:APPDATA 'ai.obtuse.rampage\runtime'),
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$ExpectedVersion = '0.3.1',
+    [ValidateSet('view', 'control')]
+    [string]$Mode = 'view',
+    [switch]$ExerciseControlInput,
     [ValidateRange(5, 60)]
     [int]$TimeoutSeconds = 15
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+if ($ExerciseControlInput -and $Mode -ne 'control') {
+    throw 'ExerciseControlInput requires -Mode control'
+}
 
 $controllerUri = $null
 if (-not [Uri]::TryCreate($ControllerBase, [UriKind]::Absolute, [ref]$controllerUri) -or
@@ -90,13 +97,21 @@ $offers = @((Invoke-RampageRequest -Method GET -Path '/v1/offers').Body)
 $now = [DateTimeOffset]::UtcNow
 $eligible = @($offers | Where-Object {
     $offer = $_
-    $capability = @($offer.workload_capabilities | Where-Object {
-        $_.adapter -eq 'rampage.remote-assist.v1' -and
-        $_.status -eq 'shipped' -and
-        @($_.operations) -contains 'view'
-    })
+    $hasMeshEndpoint = $null -ne $offer.PSObject.Properties['mesh_endpoint'] -and
+        $null -ne $offer.mesh_endpoint
+    $hasWorkloadCapabilities = $null -ne $offer.PSObject.Properties['workload_capabilities']
+    $capability = if ($hasWorkloadCapabilities) {
+        @($offer.workload_capabilities | Where-Object {
+            $_.adapter -eq 'rampage.remote-assist.v1' -and
+            $_.status -eq 'shipped' -and
+            @($_.operations) -contains $Mode
+        })
+    } else {
+        @()
+    }
     $offer.node_id -and
-    $offer.mesh_endpoint -and
+    $hasMeshEndpoint -and
+    $hasWorkloadCapabilities -and
     @($offer.adapters) -contains 'rampage.remote-assist.v1' -and
     $offer.availability.foreground_allowed -eq $true -and
     [DateTimeOffset]::Parse($offer.expires_at) -gt $now -and
@@ -131,18 +146,19 @@ $session = $null
 $framePayload = $null
 $frameBytes = $null
 $closeReceipt = $null
+$inputReceipt = $null
 $qualificationError = $null
 $closeError = $null
 try {
     $opened = Invoke-RampageRequest -Method POST -Path '/v1/remote-assist/sessions' `
-        -ExpectedStatus @(201) -Body @{ node_id = $selected.node_id; mode = 'view' }
+        -ExpectedStatus @(201) -Body @{ node_id = $selected.node_id; mode = $Mode }
     $session = $opened.Body.session
     $issuedAt = [DateTimeOffset]::Parse($session.issued_at)
     $expiresAt = [DateTimeOffset]::Parse($session.expires_at)
     $leaseSeconds = ($expiresAt - $issuedAt).TotalSeconds
     if ($session.schema -ne 'rampage.remote-desktop-lease.v1' -or
         $session.node_id -ne $selected.node_id -or
-        $session.mode -ne 'view' -or
+        $session.mode -ne $Mode -or
         $leaseSeconds -le 0 -or $leaseSeconds -gt 30 -or
         $session.max_width -lt 1 -or $session.max_width -gt 4096 -or
         $session.max_height -lt 1 -or $session.max_height -gt 4096 -or
@@ -173,6 +189,17 @@ try {
         $frameBytes[$frameBytes.Length - 1] -ne 0xd9) {
         throw 'The physical Remote Assist frame failed its contract or digest verification'
     }
+
+    if ($ExerciseControlInput) {
+        $inputReceipt = (Invoke-RampageRequest -Method POST `
+            -Path "/v1/remote-assist/sessions/$($session.session_id)/input" `
+            -Body @{ sequence = 1; events = @(@{ kind = 'mouse_move'; x = 32768; y = 32768 }) }).Body
+        if ($inputReceipt.session_id -ne $session.session_id -or
+            $inputReceipt.sequence -ne 1 -or
+            $inputReceipt.applied_events -ne 1) {
+            throw 'The physical Remote Assist control input was not acknowledged exactly once'
+        }
+    }
 } catch {
     $qualificationError = $_
 } finally {
@@ -193,6 +220,14 @@ if (-not $closeReceipt.closed -or $closeReceipt.duplicate) {
 }
 $postClose = Invoke-RampageRequest -Method GET `
     -Path "/v1/remote-assist/sessions/$($session.session_id)/frame" -ExpectedStatus @(404)
+$postCloseInputStatus = $null
+if ($ExerciseControlInput) {
+    $postCloseInput = Invoke-RampageRequest -Method POST `
+        -Path "/v1/remote-assist/sessions/$($session.session_id)/input" `
+        -Body @{ sequence = 2; events = @(@{ kind = 'mouse_move'; x = 32768; y = 32768 }) } `
+        -ExpectedStatus @(404)
+    $postCloseInputStatus = $postCloseInput.StatusCode
+}
 
 $frame = $framePayload.frame
 $leaseDuration = ([DateTimeOffset]::Parse($session.expires_at) -
@@ -220,6 +255,9 @@ $leaseDuration = ([DateTimeOffset]::Parse($session.expires_at) -
     jpeg_contract_verified = $true
     session_close_confirmed = $true
     post_close_http_status = $postClose.StatusCode
+    control_input_exercised = [bool]$ExerciseControlInput
+    applied_control_events = if ($inputReceipt) { $inputReceipt.applied_events } else { 0 }
+    post_close_input_http_status = $postCloseInputStatus
     elevation_authority = $false
     secure_desktop_authority = $false
     verified_at = [DateTimeOffset]::UtcNow.ToString('o')

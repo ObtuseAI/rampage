@@ -202,15 +202,17 @@ to any unpaired peer and can be turned off immediately without changing the rest
 
 ![Rampage 0.3.0 owner grid with a paired Studio Laptop selected and explicit View desktop and Control desktop actions](docs/assets/rampage-remote-assist-controls.png)
 
-The screenshot is a source-current browser showcase using labeled demonstration topology; it is not
-presented as a physical two-machine control receipt. Native Windows capture/input, signed-heartbeat,
-durable replay-fence, protocol-digest, and UI contract tests are recorded separately. Exact physical
-laptop installation and interactive control remain an explicit release-evidence line item until run.
+The screenshot is a source-current browser showcase using labeled demonstration topology, not the
+physical receipt. Recovery 21 has now also completed a real Windows owner-to-laptop run: the native
+app exposed both actions for the opted-in worker, a signed control lease returned a digest-verified
+JPEG frame, one bounded pointer event was acknowledged, and the controller denied both frame and
+input access after close. The exact evidence remains separate from the showcase image.
 
 Once an opted-in worker is live, the owner can produce a fail-closed physical frame receipt with
-`scripts/Qualify-RampageRemoteAssist.ps1`. The command accepts only the loopback protected API,
-requires a fresh shipped Remote Assist offer, verifies the signed lease bounds and JPEG SHA-256, closes
-the session, and proves the controller returns `404` for the revoked session. It never injects input.
+`scripts/Qualify-RampageRemoteAssist.ps1`. The default is view-only. The explicit control exercise
+adds `-Mode control -ExerciseControlInput` and sends exactly one centered mouse-move event. Both
+paths accept only the loopback protected API, require a fresh shipped capability, verify the signed
+lease bounds and JPEG SHA-256, close the session, and prove the revoked session returns `404`.
 
 ## Recovery Center: nobody gets trapped in a broken pairing
 
