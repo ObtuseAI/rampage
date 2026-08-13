@@ -82,6 +82,13 @@ native drag surface, while refresh, command, STOP, minimize, maximize, and close
 controls. A React regression test exercises both halves of that contract and the Tauri command is
 covered by the native desktop build.
 
+The physical Recovery 20 rerun proved two-node compute and exposed two final truth defects before
+promotion: the custom Rust-routed drag command did not move the live window, and an Ollama request
+could consume a small output budget in hidden thinking while returning a zero-byte success receipt.
+The next package now uses Tauri's documented direct `startDragging()` window API, disables the
+hidden reasoning lane for bounded answer execution, and fails closed when Ollama produces no
+user-visible answer text.
+
 Recovery 20 also removes the long-lived owner's startup cliff. Signed worker capacity remains live
 in memory on every heartbeat, but durable offer and link evidence is sampled at most hourly per
 node. Controller restart restores every authority-bearing enrollment, revocation, invitation,

@@ -1625,10 +1625,10 @@ async fn run_ollama_invocation(
             "model": request.lease.model_id,
             "messages": request.messages,
             "stream": true,
-            // Keep reasoning-capable runtimes in their structured mode. Ollama then places the
-            // reasoning trace in `message.thinking`, which Rampage intentionally does not forward,
-            // while ordinary answer text remains in `message.content`.
-            "think": true,
+            // Rampage returns bounded answer text, not a hidden reasoning trace. Disabling the
+            // runtime's optional thinking lane also prevents a small output budget from being
+            // consumed before any user-visible content is produced.
+            "think": false,
             "options": options
         }))
         .send()
@@ -1679,7 +1679,13 @@ async fn run_ollama_invocation(
             completion =
                 process_ollama_line(send, request, &buffered, &mut output, &mut sequence).await?;
         }
-        completion.ok_or_else(|| anyhow::anyhow!("Ollama stream ended without a terminal frame"))
+        let completion = completion
+            .ok_or_else(|| anyhow::anyhow!("Ollama stream ended without a terminal frame"))?;
+        anyhow::ensure!(
+            !output.is_empty(),
+            "Ollama completed without user-visible answer text"
+        );
+        Ok(completion)
     }
     .await;
 
@@ -2223,7 +2229,7 @@ mod tests {
     }
 
     async fn fake_chat(Json(request): Json<serde_json::Value>) -> Response {
-        assert_eq!(request.get("think"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(request.get("think"), Some(&serde_json::Value::Bool(false)));
         Response::builder()
             .header("content-type", "application/x-ndjson")
             .body(Body::from(concat!(

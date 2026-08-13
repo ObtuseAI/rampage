@@ -382,6 +382,7 @@ fn run_ollama(claim: &WorkClaimV1) -> Result<String, ExecutionError> {
             "model": model,
             "prompt": prompt,
             "stream": false,
+            "think": false,
             "options": {"num_predict": num_predict}
         }))
         .send()
@@ -391,10 +392,19 @@ fn run_ollama(claim: &WorkClaimV1) -> Result<String, ExecutionError> {
     let body: serde_json::Value = response
         .json()
         .map_err(|error| ExecutionError::BackendUnavailable(error.to_string()))?;
+    required_ollama_response(&body)
+}
+
+fn required_ollama_response(body: &serde_json::Value) -> Result<String, ExecutionError> {
     body.get("response")
         .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
         .map(str::to_owned)
-        .ok_or_else(|| ExecutionError::BackendUnavailable("response text is missing".into()))
+        .ok_or_else(|| {
+            ExecutionError::BackendUnavailable(
+                "Ollama completed without user-visible answer text".into(),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -539,6 +549,20 @@ mod tests {
             run_cpu_benchmark(&claim),
             Err(ExecutionError::InvalidArgument("iterations_per_lane"))
         ));
+    }
+
+    #[test]
+    fn ollama_receipts_require_user_visible_answer_text() {
+        assert_eq!(
+            required_ollama_response(&serde_json::json!({"response": "verified"})).unwrap(),
+            "verified"
+        );
+        assert!(matches!(
+            required_ollama_response(&serde_json::json!({"response": "  "})),
+            Err(ExecutionError::BackendUnavailable(message))
+                if message.contains("without user-visible answer text")
+        ));
+        assert!(required_ollama_response(&serde_json::json!({})).is_err());
     }
 
     const MAX_TEST_ITERATIONS: u64 = 20_000_000;
