@@ -5,10 +5,15 @@ import { type PairingRequest, useRampage } from "./store";
 
 vi.mock("./components/Arena", () => ({ Arena: () => <div>Spatial fabric</div> }));
 const nativeInvoke = vi.hoisted(() => vi.fn(async (command: string) => {
-  if (command === "control_window" || command === "start_window_drag") return undefined;
+  if (command === "control_window") return undefined;
   throw new Error("native backend unavailable in browser test");
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: nativeInvoke }));
+const nativeWindow = vi.hoisted(() => ({
+  startDragging: vi.fn(async () => undefined),
+  toggleMaximize: vi.fn(async () => undefined),
+}));
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => nativeWindow }));
 const nativeEvent = vi.hoisted(() => ({
   pairingHandler: null as null | ((event: { payload: PairingRequest | null }) => void),
 }));
@@ -24,6 +29,8 @@ afterEach(cleanup);
 
 beforeEach(() => {
   nativeInvoke.mockClear();
+  nativeWindow.startDragging.mockClear();
+  nativeWindow.toggleMaximize.mockClear();
   Object.defineProperty(window, "__TAURI_INTERNALS__", {
     configurable: true,
     value: {},
@@ -131,11 +138,14 @@ test("drags the borderless shell from the top header without stealing button inp
   const { container } = render(<App />);
   const header = container.querySelector<HTMLElement>(".topbar");
   if (!header) throw new Error("topbar drag surface is missing");
-  fireEvent.mouseDown(header, { button: 0 });
-  expect(nativeInvoke).toHaveBeenCalledWith("start_window_drag");
-  nativeInvoke.mockClear();
-  fireEvent.mouseDown(screen.getByRole("button", { name: "Refresh fabric" }), { button: 0 });
-  expect(nativeInvoke).not.toHaveBeenCalledWith("start_window_drag");
+  fireEvent.mouseDown(header, { button: 0, buttons: 1, detail: 1 });
+  expect(nativeWindow.startDragging).toHaveBeenCalledOnce();
+  nativeWindow.startDragging.mockClear();
+  fireEvent.mouseDown(screen.getByRole("button", { name: "Refresh fabric" }), { button: 0, buttons: 1 });
+  expect(nativeWindow.startDragging).not.toHaveBeenCalled();
+
+  fireEvent.mouseDown(header, { button: 0, buttons: 1, detail: 2 });
+  expect(nativeWindow.toggleMaximize).toHaveBeenCalledOnce();
 });
 
 test("local stop does not depend on controller", () => {

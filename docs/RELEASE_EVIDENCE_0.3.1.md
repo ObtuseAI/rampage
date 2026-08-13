@@ -203,3 +203,26 @@ steps across CI, CodeQL, and native distribution. Recovery 20 therefore claims n
 provenance, Authenticode signature, notarization, or non-Windows package qualification. The final
 physical line remains open until the owner and laptop both install this exact release and complete
 a fresh signed worker-offer, admitted benchmark, receipt, and Remote Assist qualifier.
+
+### Physical owner + laptop qualification — August 13, 2026
+
+Both Windows PCs installed and opened the exact Recovery 20 package. The owner reconstructed its
+existing fabric, accepted fresh signed offers from both enrolled identities, and admitted one
+concurrent, node-pinned benchmark job to each machine. The worker used authenticated direct QUIC;
+its sampled link measured 15.6 ms median RTT, 48.2 Mbps down, and 48.4 Mbps up during the proof.
+
+| Physical gate | Result |
+| --- | --- |
+| Fresh two-node fabric | PASS — two enrolled identities and two concurrently fresh signed offers |
+| Real pooled work | PASS — two signed receipts covering 20,000,000 deterministic SHA-256 iterations per machine |
+| Measured compute dividend | PASS — 62,504,502 hashes/s fabric, 31,615,865 hashes/s fastest node, +97.70% verified capacity, and 49.42% estimated time saved for matching fully divisible CPU work |
+| Recovery 20 benchmark projection | PASS — the installed native UI displayed `2 signed machine receipts · 62.50 MH/s · +97.7% verified capacity · 49.4h returned per 100h of matched work` |
+| Resource truth | PASS — the owner advertised RTX 3070, 8 GiB VRAM, 16 logical cores, and two exact local Ollama models; the laptop advertised GTX 1650, 4 GiB VRAM, 12 logical cores, encrypted storage capacity, and no invented model runtime |
+| Remote Assist | OPEN — the laptop had not enabled its explicit owner-control policy, so the capability correctly remained absent and no session authority was issued |
+| Borderless drag | FAIL — two live top-chrome drag attempts invoked the Recovery 20 path but did not change the native window origin; source was corrected to Tauri's documented direct window API for the next package |
+| Native generation truth | FAIL then fixed in source — a bounded 4B job produced a signed `succeeded` receipt with zero output bytes; the next package disables hidden thinking-only consumption and treats empty answer text as a failed receipt |
+
+The benchmark result applies only to workloads that can be divided across independent workers. It
+does not claim transparent VRAM pooling. The laptop cannot run an LLM replica or shard until it
+advertises a qualified compatible model runtime; the governor correctly kept current model
+placement on the owner PC.

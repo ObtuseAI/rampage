@@ -210,11 +210,6 @@ fn control_window(window: tauri::WebviewWindow, action: &str) -> Result<(), Stri
     }
 }
 
-#[tauri::command]
-fn start_window_drag(window: tauri::WebviewWindow) -> Result<(), String> {
-    window.start_dragging().map_err(|error| error.to_string())
-}
-
 fn descendant_pids(system: &System, root: Pid, output: &mut Vec<Pid>) {
     for (pid, process) in system.processes() {
         if process.parent() == Some(root) {
@@ -2062,7 +2057,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             control_window,
-            start_window_drag,
             local_stop,
             fabric_mode,
             worker_runtime_status,
