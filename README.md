@@ -18,12 +18,12 @@ the authority to run wild.
 [![Rust 1.91](https://img.shields.io/badge/Rust-1.91%2B-0b0f17?logo=rust&logoColor=67f5c5)](Cargo.toml)
 [![AI authority](https://img.shields.io/badge/AI%20authority-proposals%20only-0b0f17?logo=probot&logoColor=67f5c5)](docs/ARCHITECTURE.md#recursive-improvement)
 
-## [⬇ Download Rampage Recovery 20 for Windows](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.20-bootstrap/Rampage_0.3.1_x64-setup.exe)
+## [⬇ Download Rampage Recovery 21 for Windows](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.21-bootstrap/Rampage_0.3.1_x64-setup.exe)
 
 **One installer. Desktop shortcut included.**
-[**Current verified build: recovery.20**](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.20-bootstrap) ·
+[**Current verified build: recovery.21**](https://github.com/ObtuseAI/rampage/releases/tag/v0.3.1-recovery.21-bootstrap) ·
 [Release notes](docs/RELEASE_NOTES_0.3.1.md) ·
-[SHA-256](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.20-bootstrap/SHA256SUMS-windows-x64) ·
+[SHA-256](https://github.com/ObtuseAI/rampage/releases/download/v0.3.1-recovery.21-bootstrap/SHA256SUMS-windows-x64) ·
 [All releases](https://github.com/ObtuseAI/rampage/releases)
 
 [**Launch the showcase**](https://obtuseai.github.io/rampage/) ·
@@ -93,14 +93,18 @@ conservative p90 planner automatically refuses a distributed plan when startup, 
 stale topology would erase the gain. Network Autopilot keeps authenticated direct and owner-relay
 candidates available together, records the active path when Iroh can prove it, and independently
 gates control, interactive AI, remote media, artifact, and bulk traffic from fresh link evidence.
-Recovery 20 makes the borderless shell draggable from its complete top chrome without stealing
-button input. It also replaces unbounded startup replay with a governor-signed ledger checkpoint,
+Recovery 20 replaced unbounded startup replay with a governor-signed ledger checkpoint,
 indexed authority-state reconstruction, and one newest still-fresh offer per enrolled node. Live
 capacity continues to refresh on every heartbeat, while durable capacity and link evidence is
 sampled hourly instead of inflating the ledger every few seconds. Invalid or altered checkpoints
 fall back to full hash-chain verification; enrolled identities, leases, receipts, and artifact
 authority are still replayed completely. The dependency lock also removes `RUSTSEC-2026-0253`
-through the fixed `lru 0.18.2` patch release.
+through the fixed `lru 0.18.2` patch release. Its physical two-PC rerun then proved +97.7% measured
+capacity for matching divisible CPU work and exposed two final truth defects: top-chrome movement
+still failed live, and a bounded Ollama job could sign a zero-byte success. Recovery 21 moves the
+shell through Tauri's direct main-window API under an explicit least-privilege capability and makes
+empty model answer text a failed receipt. The installed replacement produced a signed 543-byte
+answer receipt while preserving both fresh nodes and the owner's fencing epoch.
 
 ![Rampage Recovery 19 Work Orchestrator showing the p90 break-even brain, Network Autopilot, autonomous compute strategy, live fabric proof, and owner-protected node telemetry](docs/assets/rampage-work-autopilot.png)
 
@@ -121,6 +125,8 @@ stay in a waiting or local-only state when that evidence is unavailable.
 | P90 break-even brain | Five typed workload profiles; conservative compute/startup/transfer/retry model; stale or unmeasured topology fails closed; slower plans stay on the fastest node |
 | Network Autopilot | Same-LAN direct candidate plus owner-relay recovery in one authenticated endpoint set; observed direct/relay path evidence; independent traffic gates for control, AI, media, artifacts, and bulk work |
 | Recovery 20 startup | Governor-signed verification checkpoint; complete indexed authority replay; newest fresh offer recovery; hourly durable telemetry sampling; invalid-checkpoint full-verification fallback |
+| Recovery 21 physical fabric | Owner PC + laptop; two fresh signed offers; authenticated direct QUIC; 40,000,000 deterministic hashes across two signed receipts; 62.50 MH/s combined; +97.7% verified capacity; 49.4% estimated time saved for matching fully divisible CPU work |
+| Recovery 21 runtime truth | Direct main-window drag permission; zero-byte Ollama success denied; installed 4B route returned a non-empty 543-byte signed receipt |
 | Universal capability contract | Signed offers advertise exact workload domain, adapter, operation, execution pattern, isolation, runtime digest, and qualification status; candidate profiles grant no authority |
 | Autonomous self-scan | Stable evidence digests cover routes, links, failures, denials, thermal/battery pressure, capability gaps, idle capacity, and protected-artifact replication |
 | Compute Strategy | Outcome-first Automatic, Biggest AI, Fastest AI, More Work, and Protect This PC placement previews with exact capacity and qualification blockers |
